@@ -1,0 +1,151 @@
+body { font-family: Arial; background:#f0f4ff; }
+
+.email-form { 
+    max-width:600px; 
+    margin:50px auto; 
+    background:white; 
+    padding:25px; 
+    border-radius:10px; 
+    box-shadow:0 4px 10px rgba(0,0,0,0.1);
+    transition: margin-left 0.4s ease;
+}
+
+h2 { text-align:center; color:#0038a8; margin-bottom:20px;}
+
+label { display:block; margin:10px 0 5px; font-weight:bold;}
+
+input, select, textarea { 
+    width:100%; 
+    padding:12px; 
+    border:1px solid #ccc; 
+    border-radius:6px; 
+    font-size:14px; 
+    box-sizing:border-box;
+}
+
+textarea { min-height:120px; resize:vertical;}
+
+.submit-btn input { 
+    margin-top:15px; 
+    width:100%; 
+    padding:12px; 
+    background:#0038a8; 
+    color:white; 
+    border:none; 
+    border-radius:6px; 
+    cursor:pointer; 
+    font-weight:bold;
+}
+
+.submit-btn input:hover { background:#002080;}
+
+.message-status { 
+    text-align:center; 
+    font-weight:600; 
+    color:green; 
+    margin-bottom:15px;
+}
+
+/* =============================== */
+/* SIDEBAR SYSTEM (ADDED) */
+/* =============================== */
+
+.sidebar {
+    height:100vh;
+    width:220px;
+    background:#2c3e50;
+    color:white;
+    display:flex;
+    flex-direction:column;
+    position:fixed;
+    left:0;
+    top:0;
+    transition:width 0.4s ease;
+    overflow:hidden;
+    z-index:1000;
+    padding-top:10px;
+}
+
+.sidebar .toggle-btn{
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    width:40px;
+    height:40px;
+    margin:0 auto 15px auto;
+    background:none;
+    border:1px solid white;
+    border-radius:6px;
+    color:white;
+    cursor:pointer;
+    font-size:20px;
+    transition:all 0.3s;
+}
+
+.sidebar .toggle-btn:hover{
+    background:#34495e;
+}
+
+.sidebar h2{
+    text-align:center;
+    padding:20px 0;
+    border-bottom:1px solid #34495e;
+    transition:opacity 0.3s ease;
+}
+
+.sidebar a{
+    display:flex;
+    align-items:center;
+    padding:15px 20px;
+    color:white;
+    text-decoration:none;
+    transition:all 0.3s ease;
+}
+
+.sidebar a .icon{
+    margin-right:15px;
+    font-size:18px;
+}
+
+.sidebar a:hover{
+    background:#34495e;
+}
+
+/* COLLAPSED SIDEBAR */
+
+.sidebar.collapsed{
+    width:60px;
+}
+
+.sidebar.collapsed h2{
+    opacity:0;
+    height:0;
+    margin:0;
+    padding:0;
+}
+
+.sidebar.collapsed a .text{
+    display:none;
+}
+
+.sidebar.collapsed a{
+    justify-content:center;
+}
+
+.sidebar.collapsed a .icon{
+    margin-right:0;
+}
+
+/* =============================== */
+/* PAGE SHIFT FOR SIDEBAR */
+/* =============================== */
+
+.email-form{
+    margin-left:240px;
+}
+
+/* When sidebar collapses */
+
+.sidebar.collapsed ~ .email-form{
+    margin-left:80px;
+}

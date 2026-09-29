@@ -1,0 +1,312 @@
+{
+    "fd_69fdab62cb9d32.44278464": {
+        "id": "fd_69fdab62cb9d32.44278464",
+        "title": "APPLICATION FOR SUPERVISED INDUSTRIAL TRAINING",
+        "original": "NEUST-OJT-F002 Application for Supervised Industrial Training (2).docx",
+        "file": "fd_69fdab62cb9d32.44278464.docx",
+        "ext": "docx",
+        "is_image": false,
+        "uploaded": "2026-05-08 11:22:46",
+        "schema": {
+            "doc_title": "APPLICATION FOR SUPERVISED INDUSTRIAL TRAINING",
+            "doc_subtitle": "NEUST-OJT-F002",
+            "institution": "NUEVA ECIJA UNIVERSITY OF SCIENCE AND TECHNOLOGY",
+            "form_code": "NEUST-OJT-F002",
+            "revision_date": "01.08.2025",
+            "instructions": [
+                "May I apply for placement under the On–the–Job Training Program. The following are my particulars and preference for your information and guidance."
+            ],
+            "sections": [
+                {
+                    "type": "field_group",
+                    "title": "I. Personal Data",
+                    "content": null,
+                    "fields": [
+                        {
+                            "id": "name",
+                            "label": "Name",
+                            "type": "text",
+                            "options": null,
+                            "placeholder": null,
+                            "required": true,
+                            "span": "full",
+                            "note": null
+                        },
+                        {
+                            "id": "age",
+                            "label": "Age",
+                            "type": "text",
+                            "options": null,
+                            "placeholder": null,
+                            "required": true,
+                            "span": "half",
+                            "note": null
+                        },
+                        {
+                            "id": "sex",
+                            "label": "Sex",
+                            "type": "text",
+                            "options": null,
+                            "placeholder": null,
+                            "required": true,
+                            "span": "half",
+                            "note": null
+                        },
+                        {
+                            "id": "status",
+                            "label": "Status",
+                            "type": "text",
+                            "options": null,
+                            "placeholder": null,
+                            "required": true,
+                            "span": "half",
+                            "note": null
+                        },
+                        {
+                            "id": "religion",
+                            "label": "Religion",
+                            "type": "text",
+                            "options": null,
+                            "placeholder": null,
+                            "required": true,
+                            "span": "half",
+                            "note": null
+                        },
+                        {
+                            "id": "home_address",
+                            "label": "Home Address",
+                            "type": "textarea",
+                            "options": null,
+                            "placeholder": null,
+                            "required": true,
+                            "span": "full",
+                            "note": null
+                        }
+                    ],
+                    "columns": null,
+                    "rows": null
+                },
+                {
+                    "type": "field_group",
+                    "title": "II. Academic Data",
+                    "content": null,
+                    "fields": [
+                        {
+                            "id": "course",
+                            "label": "Course",
+                            "type": "text",
+                            "options": null,
+                            "placeholder": null,
+                            "required": true,
+                            "span": "half",
+                            "note": null
+                        },
+                        {
+                            "id": "major",
+                            "label": "Major",
+                            "type": "text",
+                            "options": null,
+                            "placeholder": null,
+                            "required": true,
+                            "span": "half",
+                            "note": null
+                        },
+                        {
+                            "id": "year_and_section",
+                            "label": "Year and Section",
+                            "type": "text",
+                            "options": null,
+                            "placeholder": null,
+                            "required": true,
+                            "span": "half",
+                            "note": null
+                        },
+                        {
+                            "id": "day",
+                            "label": "Day",
+                            "type": "text",
+                            "options": null,
+                            "placeholder": null,
+                            "required": true,
+                            "span": "half",
+                            "note": null
+                        },
+                        {
+                            "id": "evening",
+                            "label": "Evening",
+                            "type": "text",
+                            "options": null,
+                            "placeholder": null,
+                            "required": true,
+                            "span": "half",
+                            "note": null
+                        },
+                        {
+                            "id": "ojt_coordinator",
+                            "label": "Name of OJT Coordinator",
+                            "type": "text",
+                            "options": null,
+                            "placeholder": null,
+                            "required": true,
+                            "span": "full",
+                            "note": null
+                        }
+                    ],
+                    "columns": null,
+                    "rows": null
+                },
+                {
+                    "type": "field_group",
+                    "title": "III. Preference for Placement",
+                    "content": null,
+                    "fields": [
+                        {
+                            "id": "company",
+                            "label": "Company",
+                            "type": "text",
+                            "options": null,
+                            "placeholder": null,
+                            "required": true,
+                            "span": "full",
+                            "note": null
+                        },
+                        {
+                            "id": "address",
+                            "label": "Address",
+                            "type": "text",
+                            "options": null,
+                            "placeholder": null,
+                            "required": true,
+                            "span": "full",
+                            "note": null
+                        },
+                        {
+                            "id": "telephone",
+                            "label": "Telephone Number",
+                            "type": "tel",
+                            "options": null,
+                            "placeholder": null,
+                            "required": true,
+                            "span": "half",
+                            "note": null
+                        },
+                        {
+                            "id": "contact_person",
+                            "label": "Contact Person",
+                            "type": "text",
+                            "options": null,
+                            "placeholder": null,
+                            "required": true,
+                            "span": "half",
+                            "note": null
+                        },
+                        {
+                            "id": "position",
+                            "label": "Position",
+                            "type": "text",
+                            "options": null,
+                            "placeholder": null,
+                            "required": true,
+                            "span": "full",
+                            "note": null
+                        }
+                    ],
+                    "columns": null,
+                    "rows": null
+                },
+                {
+                    "type": "signature_block",
+                    "title": null,
+                    "content": null,
+                    "fields": [
+                        {
+                            "id": "student_signature",
+                            "label": "Signature of Student over Printed Name",
+                            "type": "signature",
+                            "options": null,
+                            "placeholder": null,
+                            "required": true,
+                            "span": "full",
+                            "note": null
+                        }
+                    ],
+                    "columns": null,
+                    "rows": null
+                },
+                {
+                    "type": "signature_block",
+                    "title": null,
+                    "content": null,
+                    "fields": [
+                        {
+                            "id": "director_signature",
+                            "label": "Approved",
+                            "type": "signature",
+                            "options": null,
+                            "placeholder": null,
+                            "required": true,
+                            "span": "full",
+                            "note": null
+                        },
+                        {
+                            "id": "director_name",
+                            "label": "RANDY M. BAÑEZ, J.D.",
+                            "type": "text",
+                            "options": null,
+                            "placeholder": null,
+                            "required": true,
+                            "span": "full",
+                            "note": null
+                        },
+                        {
+                            "id": "director_title",
+                            "label": "Director",
+                            "type": "text",
+                            "options": null,
+                            "placeholder": null,
+                            "required": true,
+                            "span": "full",
+                            "note": null
+                        },
+                        {
+                            "id": "director_office",
+                            "label": "On–the–Job Training and Career Development Center",
+                            "type": "text",
+                            "options": null,
+                            "placeholder": null,
+                            "required": true,
+                            "span": "full",
+                            "note": null
+                        },
+                        {
+                            "id": "date_signed",
+                            "label": "Date Signed",
+                            "type": "date",
+                            "options": null,
+                            "placeholder": null,
+                            "required": true,
+                            "span": "full",
+                            "note": null
+                        }
+                    ],
+                    "columns": null,
+                    "rows": null
+                }
+            ],
+            "footer_text": "NEUST-OJT-F002 Rev. 02 (01.08.2025)",
+            "signatories": [
+                {
+                    "role": "Student",
+                    "name_line": true,
+                    "date_line": false
+                },
+                {
+                    "role": "Director",
+                    "name_line": true,
+                    "date_line": true
+                }
+            ]
+        },
+        "saved_data": []
+    }
+}

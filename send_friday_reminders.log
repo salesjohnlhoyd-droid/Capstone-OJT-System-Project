@@ -1,0 +1,258 @@
+[2026-06-05 15:56:02] Script started.
+[2026-06-05 15:56:02] Friday reminder run — Week: June 01 - June 05, 2026 (week_start=2026-06-01, week_end=2026-06-05)
+[2026-06-05 15:56:02] Found 4 student(s) with email.
+[2026-06-05 15:56:07]   SENT: Riamae Sales <rmechalas4@gmail.com>
+[2026-06-05 15:56:11]   SENT: Mi Mi Marinas <rmechalas1@gmail.com>
+[2026-06-05 15:56:16]   SENT: Heaven Sales <alloyds.sales@gmail.com>
+[2026-06-05 15:56:16]   SKIP (already reminded): john lhoyd sales
+[2026-06-05 15:56:16] Done. Sent: 3 | Skipped: 1 | Errors: 0
+[2026-06-05 15:59:17] ========================================
+[2026-06-05 15:59:17] Script started.
+[2026-06-05 15:59:17] PHP version : 8.2.12
+[2026-06-05 15:59:17] PHP binary  : C:\xampp\php\php.exe
+[2026-06-05 15:59:17] php.ini     : C:\xampp\php\php.ini
+[2026-06-05 15:59:17] CWD         : C:\xampp\htdocs\phpmailer
+[2026-06-05 15:59:17] __DIR__     : C:\xampp\htdocs\phpmailer
+[2026-06-05 15:59:17] Script day  : Friday (5) — timezone: Asia/Manila
+[2026-06-05 15:59:17] Extensions OK: openssl, mysqli, json all loaded.
+[2026-06-05 15:59:17] Composer autoload: loaded.
+[2026-06-05 15:59:17] PHPMailer: loaded.
+[2026-06-05 15:59:17] db.php: loaded.
+[2026-06-05 15:59:17] Database: connected.
+[2026-06-05 15:59:17] Week: June 01 - June 05, 2026  (week_start=2026-06-01, week_end=2026-06-05)
+[2026-06-05 15:59:17] Students found: 4
+[2026-06-05 15:59:17]   SKIP (already reminded): Riamae Sales
+[2026-06-05 15:59:17]   SKIP (already reminded): Mi Mi Marinas
+[2026-06-05 15:59:17]   SKIP (already reminded): Heaven Sales
+[2026-06-05 15:59:17]   SKIP (already reminded): john lhoyd sales
+[2026-06-05 15:59:17] Finished. Sent: 0 | Skipped: 4 | Errors: 0
+[2026-06-05 15:59:17] ========================================
+[2026-06-26 08:03:27] ========================================
+[2026-06-26 08:03:27] Script started.
+[2026-06-26 08:03:27] PHP version : 8.2.12
+[2026-06-26 08:03:27] PHP binary  : C:\xampp\php\php.exe
+[2026-06-26 08:03:27] php.ini     : C:\xampp\php\php.ini
+[2026-06-26 08:03:27] CWD         : C:\xampp\htdocs\phpmailer
+[2026-06-26 08:03:27] __DIR__     : C:\xampp\htdocs\phpmailer
+[2026-06-26 08:03:27] Script day  : Friday (5) — timezone: Asia/Manila
+[2026-06-26 08:03:27] Extensions OK: openssl, mysqli, json all loaded.
+[2026-06-26 08:03:27] Composer autoload: loaded.
+[2026-06-26 08:03:30] PHPMailer: loaded.
+[2026-06-26 08:03:31] db.php: loaded.
+[2026-06-26 08:03:31] Database: connected.
+[2026-06-26 08:03:31] Week: June 22 - June 26, 2026  (week_start=2026-06-22, week_end=2026-06-26)
+[2026-06-26 08:03:31] Students found: 4
+[2026-06-26 08:03:56]   ERROR sending to Riamae Sales <rmechalas4@gmail.com>: SMTP Error: Could not connect to SMTP host.
+[2026-06-26 08:04:09]   ERROR sending to Mi Mi Marinas <rmechalas1@gmail.com>: SMTP Error: Could not connect to SMTP host.
+[2026-06-26 08:04:21]   SENT: Heaven Sales <alloyds.sales@gmail.com>
+[2026-06-26 08:04:33]   SENT: john lhoyd sales <mr.aoshin02@gmail.com>
+[2026-06-26 08:04:33] Finished. Sent: 2 | Skipped: 0 | Errors: 2
+[2026-06-26 08:04:33] ========================================
+[2026-06-26 08:04:38] ========================================
+[2026-06-26 08:04:38] Script started.
+[2026-06-26 08:04:38] PHP version : 8.2.12
+[2026-06-26 08:04:38] PHP binary  : C:\xampp\php\php.exe
+[2026-06-26 08:04:38] php.ini     : C:\xampp\php\php.ini
+[2026-06-26 08:04:38] CWD         : C:\xampp\htdocs\phpmailer
+[2026-06-26 08:04:38] __DIR__     : C:\xampp\htdocs\phpmailer
+[2026-06-26 08:04:38] Script day  : Friday (5) — timezone: Asia/Manila
+[2026-06-26 08:04:38] Extensions OK: openssl, mysqli, json all loaded.
+[2026-06-26 08:04:39] Composer autoload: loaded.
+[2026-06-26 08:04:39] PHPMailer: loaded.
+[2026-06-26 08:04:39] db.php: loaded.
+[2026-06-26 08:04:39] Database: connected.
+[2026-06-26 08:04:39] Week: June 22 - June 26, 2026  (week_start=2026-06-22, week_end=2026-06-26)
+[2026-06-26 08:04:39] Students found: 4
+[2026-06-26 08:04:45]   SENT: Riamae Sales <rmechalas4@gmail.com>
+[2026-06-26 08:04:52]   SENT: Mi Mi Marinas <rmechalas1@gmail.com>
+[2026-06-26 08:04:53]   SKIP (already reminded): Heaven Sales
+[2026-06-26 08:04:53]   SKIP (already reminded): john lhoyd sales
+[2026-06-26 08:04:53] Finished. Sent: 2 | Skipped: 2 | Errors: 0
+[2026-06-26 08:04:53] ========================================
+[2026-06-26 08:05:03] ========================================
+[2026-06-26 08:05:03] Script started.
+[2026-06-26 08:05:03] PHP version : 8.2.12
+[2026-06-26 08:05:03] PHP binary  : C:\xampp\php\php.exe
+[2026-06-26 08:05:03] php.ini     : C:\xampp\php\php.ini
+[2026-06-26 08:05:03] CWD         : C:\xampp\htdocs\phpmailer
+[2026-06-26 08:05:03] __DIR__     : C:\xampp\htdocs\phpmailer
+[2026-06-26 08:05:03] Script day  : Friday (5) — timezone: Asia/Manila
+[2026-06-26 08:05:03] Extensions OK: openssl, mysqli, json all loaded.
+[2026-06-26 08:05:03] Composer autoload: loaded.
+[2026-06-26 08:05:04] PHPMailer: loaded.
+[2026-06-26 08:05:04] db.php: loaded.
+[2026-06-26 08:05:04] Database: connected.
+[2026-06-26 08:05:04] Week: June 22 - June 26, 2026  (week_start=2026-06-22, week_end=2026-06-26)
+[2026-06-26 08:05:04] Students found: 4
+[2026-06-26 08:05:04]   SKIP (already reminded): Riamae Sales
+[2026-06-26 08:05:04]   SKIP (already reminded): Mi Mi Marinas
+[2026-06-26 08:05:04]   SKIP (already reminded): Heaven Sales
+[2026-06-26 08:05:04]   SKIP (already reminded): john lhoyd sales
+[2026-06-26 08:05:04] Finished. Sent: 0 | Skipped: 4 | Errors: 0
+[2026-06-26 08:05:04] ========================================
+[2026-06-19 08:01:02] ========================================
+[2026-06-19 08:01:02] Script started.
+[2026-06-19 08:01:02] PHP version : 8.2.12
+[2026-06-19 08:01:02] PHP binary  : C:\xampp\php\php.exe
+[2026-06-19 08:01:02] php.ini     : C:\xampp\php\php.ini
+[2026-06-19 08:01:02] CWD         : C:\xampp\htdocs\phpmailer
+[2026-06-19 08:01:02] __DIR__     : C:\xampp\htdocs\phpmailer
+[2026-06-19 08:01:02] Script day  : Friday (5) — timezone: Asia/Manila
+[2026-06-19 08:01:02] Extensions OK: openssl, mysqli, json all loaded.
+[2026-06-19 08:01:02] Composer autoload: loaded.
+[2026-06-19 08:01:02] PHPMailer: loaded.
+[2026-06-19 08:01:02] db.php: loaded.
+[2026-06-19 08:01:02] Database: connected.
+[2026-06-19 08:01:02] Week: June 15 - June 19, 2026  (week_start=2026-06-15, week_end=2026-06-19)
+[2026-06-19 08:01:02] Students found: 4
+[2026-06-19 08:01:02]   SKIP (already reminded): john lhoyd sales
+[2026-06-19 08:01:02]   SKIP (already reminded): Heaven Sales
+[2026-06-19 08:01:02]   SKIP (already reminded): Mi Mi Marinas
+[2026-06-19 08:01:02]   SKIP (already reminded): Riamae Sales
+[2026-06-19 08:01:02] Finished. Sent: 0 | Skipped: 4 | Errors: 0
+[2026-06-19 08:01:02] ========================================
+[2026-06-19 14:00:47] ========================================
+[2026-06-19 14:00:47] Script started.
+[2026-06-19 14:00:47] PHP version : 8.2.12
+[2026-06-19 14:00:47] PHP binary  : C:\xampp\php\php.exe
+[2026-06-19 14:00:47] php.ini     : C:\xampp\php\php.ini
+[2026-06-19 14:00:47] CWD         : C:\xampp\htdocs\phpmailer
+[2026-06-19 14:00:47] __DIR__     : C:\xampp\htdocs\phpmailer
+[2026-06-19 14:00:47] Script day  : Friday (5) — timezone: Asia/Manila
+[2026-06-19 14:00:47] Extensions OK: openssl, mysqli, json all loaded.
+[2026-06-19 14:00:47] Composer autoload: loaded.
+[2026-06-19 14:00:47] PHPMailer: loaded.
+[2026-06-19 14:00:47] db.php: loaded.
+[2026-06-19 14:00:47] Database: connected.
+[2026-06-19 14:00:47] Week: June 15 - June 19, 2026  (week_start=2026-06-15, week_end=2026-06-19)
+[2026-06-19 14:00:47] Students found: 4
+[2026-06-19 14:00:47]   SKIP (already reminded): john lhoyd sales
+[2026-06-19 14:00:47]   SKIP (already reminded): Heaven Sales
+[2026-06-19 14:00:47]   SKIP (already reminded): Mi Mi Marinas
+[2026-06-19 14:00:47]   SKIP (already reminded): Riamae Sales
+[2026-06-19 14:00:47] Finished. Sent: 0 | Skipped: 4 | Errors: 0
+[2026-06-19 14:00:47] ========================================
+[2026-06-19 15:02:15] ========================================
+[2026-06-19 15:02:15] Script started.
+[2026-06-19 15:02:15] PHP version : 8.2.12
+[2026-06-19 15:02:15] PHP binary  : C:\xampp\php\php.exe
+[2026-06-19 15:02:15] php.ini     : C:\xampp\php\php.ini
+[2026-06-19 15:02:15] CWD         : C:\xampp\htdocs\phpmailer
+[2026-06-19 15:02:15] __DIR__     : C:\xampp\htdocs\phpmailer
+[2026-06-19 15:02:15] Script day  : Friday (5) — timezone: Asia/Manila
+[2026-06-19 15:02:15] Extensions OK: openssl, mysqli, json all loaded.
+[2026-06-19 15:02:15] Composer autoload: loaded.
+[2026-06-19 15:02:15] PHPMailer: loaded.
+[2026-06-19 15:02:15] db.php: loaded.
+[2026-06-19 15:02:15] Database: connected.
+[2026-06-19 15:02:15] Week: June 15 - June 19, 2026  (week_start=2026-06-15, week_end=2026-06-19)
+[2026-06-19 15:02:15] Students found: 4
+[2026-06-19 15:02:15]   SKIP (already reminded): john lhoyd sales
+[2026-06-19 15:02:15]   SKIP (already reminded): Heaven Sales
+[2026-06-19 15:02:15]   SKIP (already reminded): Mi Mi Marinas
+[2026-06-19 15:02:15]   SKIP (already reminded): Riamae Sales
+[2026-06-19 15:02:15] Finished. Sent: 0 | Skipped: 4 | Errors: 0
+[2026-06-19 15:02:15] ========================================
+[2026-06-19 15:02:54] ========================================
+[2026-06-19 15:02:54] Script started.
+[2026-06-19 15:02:54] PHP version : 8.2.12
+[2026-06-19 15:02:54] PHP binary  : C:\xampp\php\php.exe
+[2026-06-19 15:02:54] php.ini     : C:\xampp\php\php.ini
+[2026-06-19 15:02:54] CWD         : C:\xampp\htdocs\phpmailer
+[2026-06-19 15:02:54] __DIR__     : C:\xampp\htdocs\phpmailer
+[2026-06-19 15:02:54] Script day  : Friday (5) — timezone: Asia/Manila
+[2026-06-19 15:02:54] Extensions OK: openssl, mysqli, json all loaded.
+[2026-06-19 15:02:54] Composer autoload: loaded.
+[2026-06-19 15:02:54] PHPMailer: loaded.
+[2026-06-19 15:02:54] db.php: loaded.
+[2026-06-19 15:02:54] Database: connected.
+[2026-06-19 15:02:54] Week: June 15 - June 19, 2026  (week_start=2026-06-15, week_end=2026-06-19)
+[2026-06-19 15:02:54] Students found: 4
+[2026-06-19 15:02:54]   SKIP (already reminded): john lhoyd sales
+[2026-06-19 15:02:54]   SKIP (already reminded): Heaven Sales
+[2026-06-19 15:02:54]   SKIP (already reminded): Mi Mi Marinas
+[2026-06-19 15:02:54]   SKIP (already reminded): Riamae Sales
+[2026-06-19 15:02:54] Finished. Sent: 0 | Skipped: 4 | Errors: 0
+[2026-06-19 15:02:54] ========================================
+[2026-06-19 15:04:56] ========================================
+[2026-06-19 15:04:56] Script started.
+[2026-06-19 15:04:56] PHP version : 8.2.12
+[2026-06-19 15:04:56] PHP binary  : C:\xampp\php\php.exe
+[2026-06-19 15:04:56] php.ini     : C:\xampp\php\php.ini
+[2026-06-19 15:04:56] CWD         : C:\xampp\htdocs\phpmailer
+[2026-06-19 15:04:56] __DIR__     : C:\xampp\htdocs\phpmailer
+[2026-06-19 15:04:56] Script day  : Friday (5) — timezone: Asia/Manila
+[2026-06-19 15:04:56] Extensions OK: openssl, mysqli, json all loaded.
+[2026-06-19 15:04:56] Composer autoload: loaded.
+[2026-06-19 15:04:56] PHPMailer: loaded.
+[2026-06-19 15:04:56] db.php: loaded.
+[2026-06-19 15:04:56] Database: connected.
+[2026-06-19 15:04:56] Week: June 15 - June 19, 2026  (week_start=2026-06-15, week_end=2026-06-19)
+[2026-06-19 15:04:56] Students found: 4
+[2026-06-19 15:04:56]   SKIP (already reminded): john lhoyd sales
+[2026-06-19 15:04:56]   SKIP (already reminded): Heaven Sales
+[2026-06-19 15:04:56]   SKIP (already reminded): Mi Mi Marinas
+[2026-06-19 15:04:56]   SKIP (already reminded): Riamae Sales
+[2026-06-19 15:04:56] Finished. Sent: 0 | Skipped: 4 | Errors: 0
+[2026-06-19 15:04:56] ========================================
+[2026-06-19 15:04:58] ========================================
+[2026-06-19 15:04:58] Script started.
+[2026-06-19 15:04:58] PHP version : 8.2.12
+[2026-06-19 15:04:58] PHP binary  : C:\xampp\php\php.exe
+[2026-06-19 15:04:58] php.ini     : C:\xampp\php\php.ini
+[2026-06-19 15:04:58] CWD         : C:\xampp\htdocs\phpmailer
+[2026-06-19 15:04:58] __DIR__     : C:\xampp\htdocs\phpmailer
+[2026-06-19 15:04:58] Script day  : Friday (5) — timezone: Asia/Manila
+[2026-06-19 15:04:58] Extensions OK: openssl, mysqli, json all loaded.
+[2026-06-19 15:04:58] Composer autoload: loaded.
+[2026-06-19 15:04:58] PHPMailer: loaded.
+[2026-06-19 15:04:58] db.php: loaded.
+[2026-06-19 15:04:58] Database: connected.
+[2026-06-19 15:04:58] Week: June 15 - June 19, 2026  (week_start=2026-06-15, week_end=2026-06-19)
+[2026-06-19 15:04:58] Students found: 4
+[2026-06-19 15:04:58]   SKIP (already reminded): john lhoyd sales
+[2026-06-19 15:04:58]   SKIP (already reminded): Heaven Sales
+[2026-06-19 15:04:58]   SKIP (already reminded): Mi Mi Marinas
+[2026-06-19 15:04:58]   SKIP (already reminded): Riamae Sales
+[2026-06-19 15:04:58] Finished. Sent: 0 | Skipped: 4 | Errors: 0
+[2026-06-19 15:04:58] ========================================
+[2026-06-19 15:04:59] ========================================
+[2026-06-19 15:04:59] Script started.
+[2026-06-19 15:04:59] PHP version : 8.2.12
+[2026-06-19 15:04:59] PHP binary  : C:\xampp\php\php.exe
+[2026-06-19 15:04:59] php.ini     : C:\xampp\php\php.ini
+[2026-06-19 15:04:59] CWD         : C:\xampp\htdocs\phpmailer
+[2026-06-19 15:04:59] __DIR__     : C:\xampp\htdocs\phpmailer
+[2026-06-19 15:04:59] Script day  : Friday (5) — timezone: Asia/Manila
+[2026-06-19 15:04:59] Extensions OK: openssl, mysqli, json all loaded.
+[2026-06-19 15:04:59] Composer autoload: loaded.
+[2026-06-19 15:04:59] PHPMailer: loaded.
+[2026-06-19 15:04:59] db.php: loaded.
+[2026-06-19 15:04:59] Database: connected.
+[2026-06-19 15:04:59] Week: June 15 - June 19, 2026  (week_start=2026-06-15, week_end=2026-06-19)
+[2026-06-19 15:04:59] Students found: 4
+[2026-06-19 15:04:59]   SKIP (already reminded): john lhoyd sales
+[2026-06-19 15:04:59]   SKIP (already reminded): Heaven Sales
+[2026-06-19 15:04:59]   SKIP (already reminded): Mi Mi Marinas
+[2026-06-19 15:04:59]   SKIP (already reminded): Riamae Sales
+[2026-06-19 15:04:59] Finished. Sent: 0 | Skipped: 4 | Errors: 0
+[2026-06-19 15:04:59] ========================================
+[2026-09-18 08:42:24] ========================================
+[2026-09-18 08:42:24] Script started.
+[2026-09-18 08:42:24] PHP version : 8.2.12
+[2026-09-18 08:42:24] PHP binary  : C:\xampp\php\php.exe
+[2026-09-18 08:42:24] php.ini     : C:\xampp\php\php.ini
+[2026-09-18 08:42:24] CWD         : C:\xampp\htdocs\phpmailer
+[2026-09-18 08:42:24] __DIR__     : C:\xampp\htdocs\phpmailer
+[2026-09-18 08:42:24] Script day  : Friday (5) — timezone: Asia/Manila
+[2026-09-18 08:42:24] Extensions OK: openssl, mysqli, json all loaded.
+[2026-09-18 08:42:25] Composer autoload: loaded.
+[2026-09-18 08:42:25] PHPMailer: loaded.
+[2026-09-18 08:42:25] db.php: loaded.
+[2026-09-18 08:42:25] Database: connected.
+[2026-09-18 08:42:25] Week: September 14 - September 18, 2026  (week_start=2026-09-14, week_end=2026-09-18)
+[2026-09-18 08:42:25] Students found: 2
+[2026-09-18 08:42:32]   SENT: Mi Mi Marinas <rmechalas1@gmail.com>
+[2026-09-18 08:42:38]   SENT: john lhoyd sales <mr.aoshin02@gmail.com>
+[2026-09-18 08:42:38] Finished. Sent: 2 | Skipped: 0 | Errors: 0
+[2026-09-18 08:42:38] ========================================

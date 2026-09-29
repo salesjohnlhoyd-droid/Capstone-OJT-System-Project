@@ -1,0 +1,858 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Application for Supervised Industrial Training — NEUST</title>
+<link href="https://fonts.googleapis.com/css2?family=Crimson+Pro:ital,wght@0,400;0,600;0,700;1,400&family=DM+Sans:opsz,wght@9..40,300;9..40,400;9..40,500;9..40,600;9..40,700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --navy: #0d2545;
+    --blue: #1a4a8a;
+    --accent: #2563eb;
+    --gold: #b8860b;
+    --light: #f0f4fb;
+    --border: #c8d0e0;
+    --text: #1a2035;
+    --muted: #5a6a8a;
+    --white: #ffffff;
+  }
+
+  body {
+    font-family: 'DM Sans', sans-serif;
+    background: #eef1f8;
+    color: var(--text);
+    min-height: 100vh;
+    padding: 0;
+  }
+
+  /* ── TOOLBAR ── */
+  .toolbar {
+    background: var(--navy);
+    padding: .75rem 2rem;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    flex-wrap: wrap;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    box-shadow: 0 2px 12px rgba(0,0,0,.3);
+  }
+  .toolbar-left {
+    display: flex;
+    align-items: center;
+    gap: .75rem;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: .7rem;
+    color: #93c5fd;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+  }
+  .toolbar-left strong { color: #fff; font-size: .8rem; }
+  .toolbar-right { display: flex; gap: .5rem; flex-wrap: wrap; }
+  .tbtn {
+    display: inline-flex; align-items: center; gap: .35rem;
+    padding: 7px 15px; border-radius: 7px; font-size: .78rem;
+    font-weight: 600; cursor: pointer; border: none;
+    font-family: 'DM Sans', sans-serif; transition: all .15s;
+    text-decoration: none;
+  }
+  .tbtn-ghost { background: rgba(255,255,255,.1); color: #bfdbfe; border: 1px solid rgba(255,255,255,.15); }
+  .tbtn-ghost:hover { background: rgba(255,255,255,.2); color: #fff; }
+  .tbtn-primary { background: var(--accent); color: #fff; }
+  .tbtn-primary:hover { background: #1d4ed8; }
+  .tbtn-success { background: #16a34a; color: #fff; }
+  .tbtn-success:hover { background: #15803d; }
+  .tbtn-warning { background: #d97706; color: #fff; }
+  .tbtn-warning:hover { background: #b45309; }
+
+  /* ── EDIT PANEL ── */
+  .edit-panel {
+    display: none;
+    background: #fff;
+    border-bottom: 2px solid var(--accent);
+    padding: 1.25rem 2rem;
+    gap: 1.5rem;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    box-shadow: 0 4px 16px rgba(0,0,0,.08);
+  }
+  .edit-panel.open { display: flex; }
+  .edit-group { display: flex; flex-direction: column; gap: 4px; min-width: 180px; }
+  .edit-group label { font-size: .68rem; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .07em; }
+  .edit-group input, .edit-group select {
+    padding: 7px 10px; border: 1.5px solid var(--border); border-radius: 7px;
+    font-size: .85rem; font-family: 'DM Sans', sans-serif; color: var(--text);
+    background: #fafbff; transition: border-color .15s;
+  }
+  .edit-group input:focus, .edit-group select:focus { outline: none; border-color: var(--accent); }
+
+  /* ── DOCUMENT WRAPPER ── */
+  .doc-outer {
+    max-width: 900px;
+    margin: 2rem auto;
+    padding: 0 1.5rem 3rem;
+  }
+
+  .doc-paper {
+    background: var(--white);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    box-shadow: 0 4px 32px rgba(0,0,0,.12), 0 1px 4px rgba(0,0,0,.08);
+    overflow: hidden;
+  }
+
+  /* ── LETTERHEAD ── */
+  .letterhead {
+    background: var(--navy);
+    padding: 1.5rem 2.5rem;
+    display: flex;
+    align-items: center;
+    gap: 1.5rem;
+    border-bottom: 4px solid var(--gold);
+  }
+  .lh-seal {
+    width: 70px; height: 70px;
+    border: 3px solid rgba(255,255,255,.3);
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 2rem; flex-shrink: 0;
+    background: rgba(255,255,255,.08);
+  }
+  .lh-text { color: #fff; }
+  .lh-republic { font-size: .62rem; letter-spacing: .15em; text-transform: uppercase; color: #93c5fd; margin-bottom: .2rem; font-family: 'JetBrains Mono', monospace; }
+  .lh-uni { font-family: 'Crimson Pro', serif; font-size: 1.2rem; font-weight: 700; line-height: 1.2; }
+  .lh-addr { font-size: .72rem; color: #93c5fd; margin-top: .2rem; }
+  .lh-dept {
+    margin-left: auto; text-align: right; color: #fff;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: .62rem; letter-spacing: .08em; text-transform: uppercase; line-height: 1.7; color: #bfdbfe;
+  }
+
+  /* ── FORM TITLE BAND ── */
+  .title-band {
+    background: #f0f4fb;
+    border-bottom: 2px solid var(--navy);
+    padding: 1.25rem 2.5rem;
+    text-align: center;
+  }
+  .title-band .dept-tag {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: .62rem; letter-spacing: .14em; text-transform: uppercase;
+    color: var(--muted); margin-bottom: .4rem;
+  }
+  .title-band h1 {
+    font-family: 'Crimson Pro', serif;
+    font-size: 1.4rem; font-weight: 700; color: var(--navy);
+    letter-spacing: .02em;
+  }
+  .title-band .form-meta {
+    display: flex; justify-content: center; gap: 2rem; margin-top: .5rem;
+    font-family: 'JetBrains Mono', monospace; font-size: .65rem; color: var(--muted);
+  }
+  .meta-edit { cursor: pointer; border-bottom: 1px dashed var(--border); padding-bottom: 1px; }
+  .meta-edit:hover { color: var(--accent); border-color: var(--accent); }
+
+  /* ── DATE LINE ── */
+  .date-line {
+    padding: .75rem 2.5rem;
+    text-align: right;
+    font-size: .82rem; color: var(--muted);
+    border-bottom: 1px solid #e8ecf4;
+  }
+  .date-line span { font-weight: 600; color: var(--text); }
+
+  /* ── ADDRESSEE ── */
+  .addressee {
+    padding: 1.25rem 2.5rem .5rem;
+    font-size: .88rem; line-height: 1.8;
+  }
+  .addressee .to { font-weight: 700; color: var(--navy); }
+  .addressee .position { font-size: .78rem; color: var(--muted); }
+  .addressee .salutation { margin-top: .75rem; font-style: italic; }
+
+  /* ── INTRO TEXT ── */
+  .intro-text {
+    padding: .5rem 2.5rem 1rem;
+    font-size: .88rem; line-height: 1.75; color: var(--text);
+    border-bottom: 1px solid #e8ecf4;
+  }
+
+  /* ── FORM BODY ── */
+  .form-body { padding: 1rem 2.5rem 2rem; }
+
+  /* Section */
+  .sec {
+    margin-top: 1.5rem;
+  }
+  .sec-title {
+    display: flex; align-items: center; gap: 10px;
+    margin-bottom: 1rem; padding-bottom: .5rem;
+    border-bottom: 2px solid var(--navy);
+  }
+  .sec-num {
+    font-family: 'Crimson Pro', serif;
+    font-size: 1rem; font-weight: 700; color: var(--navy);
+    background: var(--navy); color: #fff;
+    width: 26px; height: 26px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: .78rem; flex-shrink: 0;
+  }
+  .sec-label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: .72rem; font-weight: 500; text-transform: uppercase;
+    letter-spacing: .1em; color: var(--navy);
+  }
+
+  /* Fields grid */
+  .fgrid { display: grid; grid-template-columns: 1fr 1fr; gap: .85rem 1.5rem; }
+  .fgrid.three { grid-template-columns: 1fr 1fr 1fr; }
+  .fcol-full { grid-column: 1 / -1; }
+  .fcol-half { grid-column: span 1; }
+
+  .field {
+    display: flex; flex-direction: column; gap: 3px;
+  }
+  .field label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: .6rem; font-weight: 500; text-transform: uppercase;
+    letter-spacing: .09em; color: var(--muted);
+  }
+  .field input, .field textarea, .field select {
+    width: 100%;
+    border: none; border-bottom: 1.5px solid var(--border);
+    padding: 6px 2px;
+    font-size: .9rem; font-family: 'Crimson Pro', serif;
+    color: var(--text); background: transparent;
+    transition: border-color .15s;
+    border-radius: 0;
+  }
+  .field input:focus, .field textarea:focus, .field select:focus {
+    outline: none; border-bottom-color: var(--accent);
+  }
+  .field textarea {
+    border: 1.5px solid var(--border); border-radius: 6px;
+    padding: 8px 10px; resize: vertical; min-height: 56px;
+  }
+  .field textarea:focus { border-color: var(--accent); }
+  .field select {
+    border: 1.5px solid var(--border); border-radius: 6px;
+    padding: 6px 10px; background: #fafbff; cursor: pointer;
+  }
+  .field select:focus { border-color: var(--accent); }
+
+  /* ── SIGNATURE SECTION ── */
+  .sig-section {
+    margin-top: 2.5rem;
+    padding-top: 1.5rem;
+    border-top: 1px solid #e8ecf4;
+  }
+  .sig-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 2rem;
+    margin-top: 1rem;
+  }
+  .sig-block { display: flex; flex-direction: column; gap: .5rem; }
+  .sig-label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: .6rem; font-weight: 500; text-transform: uppercase;
+    letter-spacing: .09em; color: var(--muted);
+  }
+  .sigpad-wrap {
+    border: 1.5px solid var(--border); border-radius: 8px;
+    background: #fafbff; padding: 6px;
+    display: inline-flex; flex-direction: column; gap: 4px;
+    width: 100%;
+  }
+  .sigpad {
+    border: 1.5px dashed #c3cfe2; border-radius: 5px;
+    cursor: crosshair; display: block; touch-action: none;
+    background: #fff; width: 100%; height: 75px;
+  }
+  .sig-clear {
+    font-size: .65rem; color: #dc2626; background: none; border: none;
+    cursor: pointer; align-self: flex-end; padding: 2px 6px;
+    font-family: 'DM Sans', sans-serif; font-weight: 600;
+    transition: background .12s; border-radius: 4px;
+  }
+  .sig-clear:hover { background: #fee2e2; }
+  .sig-name {
+    border: none; border-bottom: 1.5px solid var(--border);
+    padding: 5px 2px; font-size: .85rem;
+    font-family: 'Crimson Pro', serif; color: var(--text);
+    background: transparent; width: 100%;
+  }
+  .sig-name:focus { outline: none; border-bottom-color: var(--accent); }
+  .sig-sublabel {
+    font-size: .68rem; color: var(--muted); text-align: center;
+    font-style: italic;
+  }
+
+  /* ── APPROVAL BLOCK ── */
+  .approval-block {
+    margin-top: 2rem;
+    padding: 1.25rem 1.5rem;
+    background: #f8f9fc;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 2rem;
+    align-items: end;
+  }
+  .approval-sig { display: flex; flex-direction: column; gap: .5rem; }
+  /* divider hidden — layout now uses two equal columns */
+  .approval-divider { display: none; }
+  .director-block { text-align: center; }
+  .director-name {
+    font-family: 'Crimson Pro', serif;
+    font-size: 1rem; font-weight: 700; color: var(--navy);
+  }
+  .director-title { font-size: .72rem; color: var(--muted); margin-top: .2rem; line-height: 1.5; }
+  .director-line {
+    border-bottom: 2px solid var(--navy);
+    margin: .5rem auto; width: 80%;
+  }
+
+  /* ── FOOTER BAND ── */
+  .footer-band {
+    background: #f0f4fb;
+    border-top: 2px solid var(--navy);
+    padding: .85rem 2.5rem;
+    display: flex; justify-content: space-between; align-items: center;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: .62rem; color: var(--muted);
+    letter-spacing: .06em;
+  }
+
+  /* ── PRINT STYLES ── */
+  @media print {
+    /* Remove browser-injected header/footer (date, title, URL, page numbers) */
+    @page {
+      size: A4 portrait;
+      margin: 0;
+    }
+
+    html {
+      -webkit-print-color-adjust: exact;
+      print-color-adjust: exact;
+    }
+
+    /* Hide toolbar and edit panel */
+    .toolbar, .edit-panel { display: none !important; }
+
+    body { background: #fff !important; margin: 0; padding: 0; }
+
+    /* Document wrapper: safe inner margins so nothing clips at paper edge */
+    .doc-outer { padding: 0; margin: 6mm 10mm; max-width: 100%; }
+    .doc-paper  { box-shadow: none !important; border: none !important; border-radius: 0 !important; }
+
+    /* ── Letterhead: tighter ── */
+    .letterhead       { padding: .55rem 1.4rem; }
+    .lh-seal          { width: 46px; height: 46px; font-size: 1.3rem; }
+    .lh-uni           { font-size: .92rem; }
+    .lh-addr          { font-size: .62rem; margin-top: .1rem; }
+    .lh-republic      { font-size: .54rem; }
+    .lh-dept          { font-size: .54rem; line-height: 1.5; }
+
+    /* ── Title band ── */
+    .title-band       { padding: .55rem 1.4rem; }
+    .title-band h1    { font-size: 1rem; }
+    .dept-tag         { font-size: .54rem; margin-bottom: .2rem; }
+    .form-meta        { font-size: .58rem; margin-top: .2rem; gap: 1rem; }
+
+    /* ── Date / addressee / intro ── */
+    .date-line        { padding: .35rem 1.4rem; font-size: .74rem; }
+    .addressee        { padding: .6rem 1.4rem .3rem; font-size: .78rem; line-height: 1.55; }
+    .intro-text       { padding: .25rem 1.4rem .5rem; font-size: .78rem; line-height: 1.6; }
+
+    /* ── Form body ── */
+    .form-body        { padding: .4rem 1.4rem 1rem; }
+    .sec              { margin-top: .6rem; }
+    .sec-title        { margin-bottom: .5rem; padding-bottom: .25rem; }
+    .sec-num          { width: 20px; height: 20px; font-size: .68rem; }
+    .sec-label        { font-size: .62rem; }
+
+    /* ── Field grid ── */
+    .fgrid            { gap: .35rem 1rem; }
+    .field label      { font-size: .54rem; }
+    .field input,
+    .field select     { font-size: .8rem; padding: 3px 2px; border-color: #999 !important; }
+    .field textarea   { font-size: .8rem; min-height: 34px; padding: 4px 6px; border-color: #999 !important; resize: none; }
+
+    /* ── Signature section ── */
+    .sig-section      { margin-top: .9rem; padding-top: .6rem; }
+    .sigpad           { height: 46px; }
+    .sig-clear        { display: none; }   /* hide Clear button on print */
+    .sig-name         { font-size: .8rem; padding: 3px 2px; border-color: #999 !important; }
+    .sig-label        { font-size: .54rem; }
+    .sigpad-wrap      { padding: 3px; }
+
+    /* ── Approval block ── */
+    .approval-block   { margin-top: .75rem; padding: .65rem 1rem; gap: .9rem; }
+    .director-name    { font-size: .86rem; }
+    .director-title   { font-size: .62rem; }
+    .director-line    { margin: .3rem auto; }
+
+    /* ── Footer ── */
+    .footer-band      { padding: .5rem 1.4rem; font-size: .54rem; }
+
+    /* Prevent sections from breaking across pages */
+    .sec, .sig-section, .approval-block, .footer-band {
+      page-break-inside: avoid;
+      break-inside: avoid;
+    }
+  }
+
+  @media (max-width: 640px) {
+    .fgrid, .fgrid.three, .sig-grid { grid-template-columns: 1fr; }
+    .fcol-full, .fcol-half { grid-column: auto; }
+    .form-body { padding: 1rem 1.25rem 1.5rem; }
+    .letterhead { padding: 1rem; flex-wrap: wrap; }
+    .lh-dept { margin-left: 0; text-align: left; }
+    .approval-block { grid-template-columns: 1fr; }
+    .approval-divider { display: none; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ── TOOLBAR ── -->
+<div class="toolbar">
+  <div class="toolbar-left">
+    <strong>NEUST — SIT Application</strong>
+    <span>Digital Form</span>
+  </div>
+  <div class="toolbar-right">
+    <button class="tbtn tbtn-ghost" onclick="toggleEdit()">&#9998; Edit Header</button>
+    <button class="tbtn tbtn-warning" onclick="clearForm()">&#9003; Clear Form</button>
+    <button class="tbtn tbtn-ghost" onclick="window.print()">&#128438; Print</button>
+    <button class="tbtn tbtn-success" onclick="saveForm()">&#128190; Save as HTML</button>
+  </div>
+</div>
+
+<!-- ── EDIT PANEL ── -->
+<div class="edit-panel" id="editPanel">
+  <div class="edit-group">
+    <label>Form No.</label>
+    <input type="text" id="ep_formno" value="NEUST-OJT-F002" oninput="updateMeta()">
+  </div>
+  <div class="edit-group">
+    <label>Effectivity Date</label>
+    <input type="text" id="ep_effectivity" value="01.08.2025" oninput="updateMeta()">
+  </div>
+  <div class="edit-group">
+    <label>University Name</label>
+    <input type="text" id="ep_uni" value="NUEVA ECIJA UNIVERSITY OF SCIENCE AND TECHNOLOGY" oninput="updateMeta()">
+  </div>
+  <div class="edit-group">
+    <label>Campus / Address</label>
+    <input type="text" id="ep_addr" value="Cabanatuan City, Nueva Ecija" oninput="updateMeta()">
+  </div>
+  <div class="edit-group">
+    <label>Director Name</label>
+    <input type="text" id="ep_director" value="RANDY M. BAÑEZ, J.D." oninput="updateMeta()">
+  </div>
+  <div class="edit-group">
+    <label>Director Title</label>
+    <input type="text" id="ep_dtitle" value="Director, On-the-Job Training and Career Development Center" oninput="updateMeta()">
+  </div>
+  <div class="edit-group">
+    <label>Department/Office</label>
+    <input type="text" id="ep_dept" value="On-the-Job Training and Career Development Center" oninput="updateMeta()">
+  </div>
+  <button class="tbtn tbtn-primary" onclick="toggleEdit()">&#10003; Done</button>
+</div>
+
+<!-- ── DOCUMENT ── -->
+<div class="doc-outer">
+<div class="doc-paper">
+
+  <!-- Letterhead -->
+  <div class="letterhead">
+    <div class="lh-seal">🏛️</div>
+    <div class="lh-text">
+      <div class="lh-republic">Republic of the Philippines</div>
+      <div class="lh-uni" id="lh_uni">NUEVA ECIJA UNIVERSITY OF SCIENCE AND TECHNOLOGY</div>
+      <div class="lh-addr" id="lh_addr">Cabanatuan City, Nueva Ecija</div>
+    </div>
+    <div class="lh-dept" id="lh_dept">On-the-Job Training<br>and Career Development Center</div>
+  </div>
+
+  <!-- Title Band -->
+  <div class="title-band">
+    <div class="dept-tag" id="tt_dept">On-the-Job Training and Career Development Center</div>
+    <h1>APPLICATION FOR SUPERVISED INDUSTRIAL TRAINING</h1>
+    <div class="form-meta">
+      <span>Form No.: <span class="meta-edit" id="tt_formno" onclick="toggleEdit()">NEUST-OJT-F002</span></span>
+      <span>Effectivity: <span class="meta-edit" id="tt_eff" onclick="toggleEdit()">01.08.2025</span></span>
+    </div>
+  </div>
+
+  <!-- Date -->
+  <div class="date-line">
+    Date: <input type="date" id="doc_date" style="border:none;border-bottom:1.5px solid #c8d0e0;padding:3px 6px;font-family:'Crimson Pro',serif;font-size:.88rem;color:#1a2035;background:transparent;cursor:pointer;" oninput="this.style.color='#1a2035'">
+  </div>
+
+  <!-- Addressee -->
+  <div class="addressee">
+    <div>The Director</div>
+    <div>On-the-Job Training and Career Development Office</div>
+    <div class="to" id="ad_uni">NUEVA ECIJA UNIVERSITY OF SCIENCE AND TECHNOLOGY</div>
+    <div id="ad_addr">Cabanatuan City, Nueva Ecija</div>
+    <div class="salutation">Sir/Ma'am:</div>
+  </div>
+
+  <!-- Intro -->
+  <div class="intro-text">
+    &nbsp;&nbsp;&nbsp;&nbsp;May I apply for placement under the On-the-Job Training Program. The following are my particulars and preference for your information and guidance.
+  </div>
+
+  <!-- Form Body -->
+  <div class="form-body">
+
+    <!-- I. Personal Data -->
+    <div class="sec">
+      <div class="sec-title">
+        <div class="sec-num">I</div>
+        <div class="sec-label">Personal Data</div>
+      </div>
+      <div class="fgrid">
+        <div class="field fcol-full">
+          <label>Name (Last Name, First Name, Middle Name)</label>
+          <input type="text" name="name" placeholder="e.g. Dela Cruz, Juan Santos">
+        </div>
+        <div class="field fcol-half">
+          <label>Age</label>
+          <input type="number" name="age" placeholder="e.g. 20" min="15" max="40">
+        </div>
+        <div class="field fcol-half">
+          <label>Sex</label>
+          <select name="sex">
+            <option value="">— Select —</option>
+            <option>Male</option>
+            <option>Female</option>
+          </select>
+        </div>
+        <div class="field fcol-half">
+          <label>Civil Status</label>
+          <select name="status">
+            <option value="">— Select —</option>
+            <option>Single</option>
+            <option>Married</option>
+            <option>Widowed</option>
+            <option>Separated</option>
+          </select>
+        </div>
+        <div class="field fcol-half">
+          <label>Religion</label>
+          <input type="text" name="religion" placeholder="e.g. Roman Catholic">
+        </div>
+        <div class="field fcol-full">
+          <label>Home Address</label>
+          <textarea name="home_address" placeholder="Complete home address including barangay, city/municipality, province"></textarea>
+        </div>
+      </div>
+    </div>
+
+    <!-- II. Academic Data -->
+    <div class="sec">
+      <div class="sec-title">
+        <div class="sec-num">II</div>
+        <div class="sec-label">Academic Data</div>
+      </div>
+      <div class="fgrid">
+        <div class="field fcol-half">
+          <label>Course</label>
+          <input type="text" name="course" placeholder="e.g. Bachelor of Science in Information Technology">
+        </div>
+        <div class="field fcol-half">
+          <label>Major</label>
+          <input type="text" name="major" placeholder="e.g. Network Technology">
+        </div>
+        <div class="field fcol-half">
+          <label>Year and Section</label>
+          <input type="text" name="year_section" placeholder="e.g. 4-A">
+        </div>
+        <div class="field fcol-half" style="display:grid;grid-template-columns:1fr 1fr;gap:.5rem;">
+          <div class="field">
+            <label>Day</label>
+            <input type="text" name="day_sched" placeholder="e.g. MWF">
+          </div>
+          <div class="field">
+            <label>Evening</label>
+            <input type="text" name="evening_sched" placeholder="e.g. TTh">
+          </div>
+        </div>
+        <div class="field fcol-full">
+          <label>Name of OJT Coordinator</label>
+          <input type="text" name="ojt_coordinator" placeholder="Full name of your OJT Coordinator">
+        </div>
+      </div>
+    </div>
+
+    <!-- III. Preference for Placement -->
+    <div class="sec">
+      <div class="sec-title">
+        <div class="sec-num">III</div>
+        <div class="sec-label">Preference for Placement</div>
+      </div>
+      <div class="fgrid">
+        <div class="field fcol-full">
+          <label>Company Name</label>
+          <input type="text" name="company" placeholder="Name of preferred company/organization">
+        </div>
+        <div class="field fcol-full">
+          <label>Address</label>
+          <textarea name="company_address" placeholder="Complete address of the company/organization"></textarea>
+        </div>
+        <div class="field fcol-half">
+          <label>Telephone Number</label>
+          <input type="tel" name="telephone" placeholder="e.g. (044) 123-4567">
+        </div>
+        <div class="field fcol-half">
+          <label>Contact Person</label>
+          <input type="text" name="contact_person" placeholder="Name of contact person">
+        </div>
+        <div class="field fcol-full">
+          <label>Position / Department</label>
+          <input type="text" name="position" placeholder="Preferred position or department">
+        </div>
+      </div>
+    </div>
+
+    <!-- Signature / Approval Block -->
+    <div class="approval-block" style="margin-top:1.75rem;">
+
+      <!-- LEFT: Director (no signature pad) -->
+      <div class="director-block">
+        <div class="director-line"></div>
+        <div class="director-name" id="dir_name">RANDY M. BAÑEZ, J.D.</div>
+        <div class="director-title" id="dir_title">Director<br>On-the-Job Training and Career Development Center</div>
+        <div style="margin-top:.75rem;">
+          <div class="field" style="text-align:left;">
+            <label>Date Signed</label>
+            <input type="date" name="date_signed" style="border:none;border-bottom:1.5px solid #c8d0e0;padding:4px 2px;font-family:'Crimson Pro',serif;font-size:.85rem;color:#1a2035;background:transparent;width:100%;">
+          </div>
+        </div>
+      </div>
+
+      <!-- RIGHT: Student Signature -->
+      <div class="approval-sig">
+        <div class="sig-label">Signature of Student over Printed Name</div>
+        <div class="sigpad-wrap">
+          <canvas class="sigpad" id="canvas_student"></canvas>
+          <button type="button" class="sig-clear" onclick="clearSig('student')">✕ Clear</button>
+        </div>
+        <input class="sig-name" type="text" name="student_name" placeholder="Print full name">
+        <input type="hidden" id="sig_student">
+      </div>
+
+    </div>
+
+  </div><!-- form-body -->
+
+  <!-- Footer -->
+  <div class="footer-band">
+    <span id="ft_formno">NEUST-OJT-F002</span>
+    <span id="ft_rev">Rev. 02 (01.08.2025)</span>
+  </div>
+
+</div><!-- doc-paper -->
+</div><!-- doc-outer -->
+
+<script>
+// ── Meta update from edit panel ───────────────────────────────────────
+function updateMeta() {
+  const formno      = document.getElementById('ep_formno').value;
+  const eff         = document.getElementById('ep_effectivity').value;
+  const uni         = document.getElementById('ep_uni').value;
+  const addr        = document.getElementById('ep_addr').value;
+  const director    = document.getElementById('ep_director').value;
+  const dtitle      = document.getElementById('ep_dtitle').value;
+  const dept        = document.getElementById('ep_dept').value;
+
+  document.getElementById('lh_uni').textContent    = uni;
+  document.getElementById('lh_addr').textContent   = addr;
+  document.getElementById('lh_dept').innerHTML     = dept.replace(' and ', '<br>and ');
+  document.getElementById('tt_dept').textContent   = dept;
+  document.getElementById('tt_formno').textContent = formno;
+  document.getElementById('tt_eff').textContent    = eff;
+  document.getElementById('ad_uni').textContent    = uni;
+  document.getElementById('ad_addr').textContent   = addr;
+  document.getElementById('dir_name').textContent  = director;
+  document.getElementById('dir_title').innerHTML   = 'Director<br>' + dtitle;
+  document.getElementById('ft_formno').textContent = formno;
+  document.getElementById('ft_rev').textContent    = 'Rev. 02 (' + eff + ')';
+}
+
+function toggleEdit() {
+  const panel = document.getElementById('editPanel');
+  panel.classList.toggle('open');
+}
+
+// ── Clear form ───────────────────────────────────────────────────────
+function clearForm() {
+  if (!confirm('Clear all filled data? This cannot be undone.')) return;
+  document.querySelectorAll('input[type=text], input[type=number], input[type=tel], input[type=date], textarea').forEach(el => {
+    if (!el.id || !el.id.startsWith('ep_')) el.value = '';
+  });
+  document.querySelectorAll('select').forEach(el => el.selectedIndex = 0);
+  ['student','approved'].forEach(id => {
+    const c = document.getElementById('canvas_' + id);
+    if (c) c.getContext('2d').clearRect(0,0,c.width,c.height);
+    const h = document.getElementById('sig_' + id);
+    if (h) h.value = '';
+  });
+}
+
+// ── Save as HTML ─────────────────────────────────────────────────────
+function saveForm() {
+  // Capture signatures first
+  ['student','approved'].forEach(id => {
+    const c = document.getElementById('canvas_' + id);
+    const h = document.getElementById('sig_' + id);
+    if (c && h && !h.value) h.value = c.toDataURL();
+  });
+
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>SIT Application — Saved</title>
+<style>
+  body{font-family:'Georgia',serif;background:#f5f6fa;margin:0;padding:2rem;color:#111}
+  .wrap{max-width:800px;margin:0 auto;background:#fff;border:1px solid #ccc;padding:2.5rem 3rem;box-shadow:0 2px 12px rgba(0,0,0,.1)}
+  .hdr{text-align:center;border-bottom:3px solid #0d2545;padding-bottom:1rem;margin-bottom:1.5rem}
+  h1{font-size:1.2rem;font-weight:700;color:#0d2545;margin:.3rem 0}
+  .meta{font-size:.72rem;color:#666;display:flex;justify-content:center;gap:1.5rem;margin-top:.4rem}
+  table{width:100%;border-collapse:collapse;margin-top:1rem}
+  th,td{padding:8px 12px;border:1px solid #ddd;font-size:.85rem;vertical-align:top;text-align:left}
+  th{background:#f0f4fb;font-weight:700;color:#0d2545;font-size:.75rem;text-transform:uppercase}
+  td:first-child{font-weight:600;color:#5a6a8a;width:35%;white-space:nowrap}
+  .sec-row td{background:#0d2545;color:#fff;font-weight:700;font-size:.78rem;text-transform:uppercase;letter-spacing:.08em}
+  img{max-height:60px;display:block}
+  .foot{text-align:center;font-size:.65rem;color:#aaa;margin-top:1.5rem;border-top:1px solid #eee;padding-top:.75rem}
+</style>
+</head>
+<body>
+<div class="wrap">
+<div class="hdr">
+  <div style="font-size:.65rem;text-transform:uppercase;letter-spacing:.1em;color:#999">${document.getElementById('lh_uni').textContent}</div>
+  <h1>APPLICATION FOR SUPERVISED INDUSTRIAL TRAINING</h1>
+  <div class="meta">
+    <span>Form No.: ${document.getElementById('tt_formno').textContent}</span>
+    <span>Effectivity: ${document.getElementById('tt_eff').textContent}</span>
+    <span>Saved: ${new Date().toLocaleDateString()}</span>
+  </div>
+</div>
+<table>
+  <tr class="sec-row"><td colspan="2">I. Personal Data</td></tr>
+  ${buildRow('Name', 'input[name=name]')}
+  ${buildRow('Age', 'input[name=age]')}
+  ${buildRow('Sex', 'select[name=sex]')}
+  ${buildRow('Civil Status', 'select[name=status]')}
+  ${buildRow('Religion', 'input[name=religion]')}
+  ${buildRow('Home Address', 'textarea[name=home_address]')}
+  <tr class="sec-row"><td colspan="2">II. Academic Data</td></tr>
+  ${buildRow('Course', 'input[name=course]')}
+  ${buildRow('Major', 'input[name=major]')}
+  ${buildRow('Year and Section', 'input[name=year_section]')}
+  ${buildRow('Day Schedule', 'input[name=day_sched]')}
+  ${buildRow('Evening Schedule', 'input[name=evening_sched]')}
+  ${buildRow('OJT Coordinator', 'input[name=ojt_coordinator]')}
+  <tr class="sec-row"><td colspan="2">III. Preference for Placement</td></tr>
+  ${buildRow('Company Name', 'input[name=company]')}
+  ${buildRow('Company Address', 'textarea[name=company_address]')}
+  ${buildRow('Telephone', 'input[name=telephone]')}
+  ${buildRow('Contact Person', 'input[name=contact_person]')}
+  ${buildRow('Position', 'input[name=position]')}
+  <tr class="sec-row"><td colspan="2">Signatures</td></tr>
+  <tr><td>Student Signature</td><td>${buildSigCell('student', document.querySelector('input[name=student_name]')?.value)}</td></tr>
+  <tr><td>Student Printed Name</td><td>${document.querySelector('input[name=student_name]')?.value || '—'}</td></tr>
+  <tr><td>Approved By</td><td>${buildSigCell('approved', '')}</td></tr>
+  <tr><td>Director</td><td><strong>${document.getElementById('dir_name').textContent}</strong><br><small>${document.getElementById('dir_title').innerText}</small></td></tr>
+  ${buildRow('Date Signed', 'input[name=date_signed]')}
+</table>
+<div class="foot">${document.getElementById('tt_formno').textContent} | ${document.getElementById('ft_rev').textContent} | Saved ${new Date().toLocaleString()}</div>
+</div>
+</body></html>`;
+
+  const blob = new Blob([html], {type:'text/html'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'SIT_Application_' + Date.now() + '.html';
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+function buildRow(label, selector) {
+  const el = document.querySelector(selector);
+  const val = el ? (el.value || '—') : '—';
+  return `<tr><td>${label}</td><td>${val.replace(/\n/g,'<br>')}</td></tr>`;
+}
+
+function buildSigCell(id, name) {
+  const h = document.getElementById('sig_' + id);
+  if (h && h.value && h.value.startsWith('data:image')) {
+    return `<img src="${h.value}" style="max-height:60px">`;
+  }
+  return '—';
+}
+
+// ── Signature Pads ───────────────────────────────────────────────────
+(function initSigs() {
+  document.querySelectorAll('.sigpad').forEach(canvas => {
+    const id  = canvas.id.replace('canvas_', '');
+    const ctx = canvas.getContext('2d');
+    ctx.strokeStyle = '#0d2545';
+    ctx.lineWidth   = 2;
+    ctx.lineCap     = 'round';
+    ctx.lineJoin    = 'round';
+    let drawing = false;
+
+    // Resize canvas to container
+    function resize() {
+      const w = canvas.parentElement.clientWidth - 14;
+      canvas.width  = w > 0 ? w : 300;
+      canvas.height = 75;
+    }
+    resize();
+    window.addEventListener('resize', resize);
+
+    function pos(e) {
+      const r = canvas.getBoundingClientRect();
+      const s = e.touches ? e.touches[0] : e;
+      return [s.clientX - r.left, s.clientY - r.top];
+    }
+    function persist() {
+      const h = document.getElementById('sig_' + id);
+      if (h) h.value = canvas.toDataURL();
+    }
+
+    canvas.addEventListener('mousedown',  e => { drawing=true; ctx.beginPath(); ctx.moveTo(...pos(e)); });
+    canvas.addEventListener('mousemove',  e => { if(!drawing)return; ctx.lineTo(...pos(e)); ctx.stroke(); persist(); });
+    canvas.addEventListener('mouseup',    () => drawing=false);
+    canvas.addEventListener('mouseleave', () => drawing=false);
+    canvas.addEventListener('touchstart', e => { e.preventDefault(); drawing=true; ctx.beginPath(); ctx.moveTo(...pos(e)); }, {passive:false});
+    canvas.addEventListener('touchmove',  e => { e.preventDefault(); if(!drawing)return; ctx.lineTo(...pos(e)); ctx.stroke(); persist(); }, {passive:false});
+    canvas.addEventListener('touchend',   () => drawing=false);
+  });
+})();
+
+function clearSig(id) {
+  const c = document.getElementById('canvas_' + id);
+  const h = document.getElementById('sig_' + id);
+  if (c) c.getContext('2d').clearRect(0, 0, c.width, c.height);
+  if (h) h.value = '';
+}
+
+// Set today's date by default
+document.getElementById('doc_date').valueAsDate = new Date();
+</script>
+</body>
+</html>

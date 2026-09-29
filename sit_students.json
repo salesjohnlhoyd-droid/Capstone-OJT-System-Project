@@ -1,0 +1,27 @@
+{
+    "stu_69fdb8c2ba0a38.10768979": {
+        "id": "stu_69fdb8c2ba0a38.10768979",
+        "created_at": "2026-05-08 12:19:46",
+        "last_name": "sales",
+        "first_name": "john lhoyd",
+        "middle_name": "santos",
+        "student_number": "",
+        "email": "salesjohnlhoyd@gmail.com",
+        "age": "",
+        "sex": "",
+        "civil_status": "",
+        "religion": "",
+        "home_address": "purok 7",
+        "course": "Bachelor of Science in Information Technology",
+        "major": "WEb",
+        "year_section": "3-a",
+        "day_sched": "M",
+        "evening_sched": "TT",
+        "ojt_coordinator": "rm",
+        "company": "Nueva Ecija University of Science and Technology Atate",
+        "company_address": "purok 7",
+        "telephone": "09157679437",
+        "contact_person": "john lhoyd santos sales",
+        "position": "Training Officer"
+    }
+}

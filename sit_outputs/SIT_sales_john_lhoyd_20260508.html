@@ -1,0 +1,414 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SIT Application — sales, john lhoyd santos</title>
+<link href="https://fonts.googleapis.com/css2?family=Crimson+Pro:ital,wght@0,400;0,600;0,700;1,400&family=DM+Sans:opsz,wght@9..40,300;9..40,400;9..40,500;9..40,600;9..40,700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --navy: #0d2545; --blue: #1a4a8a; --accent: #2563eb;
+  --gold: #b8860b; --light: #f0f4fb; --border: #c8d0e0;
+  --text: #1a2035; --muted: #5a6a8a; --white: #ffffff;
+}
+body { font-family: 'DM Sans', sans-serif; background: #eef1f8; color: var(--text); min-height: 100vh; padding: 0; }
+
+/* Preview bar */
+.preview-bar {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 200;
+  background: var(--navy); padding: .75rem 2rem;
+  display: flex; align-items: center; justify-content: space-between;
+  box-shadow: 0 2px 12px rgba(0,0,0,.3); color: #fff;
+  font-family: 'DM Sans', sans-serif; font-size: .84rem;
+}
+.preview-actions { display: flex; gap: .5rem; }
+
+/* Toolbar (non-preview) */
+.toolbar {
+  background: var(--navy); padding: .75rem 2rem;
+  display: flex; align-items: center; justify-content: space-between; gap: 1rem;
+  flex-wrap: wrap; position: sticky; top: 0; z-index: 100;
+  box-shadow: 0 2px 12px rgba(0,0,0,.3);
+}
+.toolbar-left { display: flex; align-items: center; gap: .75rem;
+  font-family: 'JetBrains Mono', monospace; font-size: .7rem;
+  color: #93c5fd; letter-spacing: .08em; text-transform: uppercase; }
+.toolbar-left strong { color: #fff; font-size: .8rem; }
+.toolbar-right { display: flex; gap: .5rem; flex-wrap: wrap; }
+.tbtn { display: inline-flex; align-items: center; gap: .35rem; padding: 7px 15px;
+  border-radius: 7px; font-size: .78rem; font-weight: 600; cursor: pointer; border: none;
+  font-family: 'DM Sans', sans-serif; transition: all .15s; text-decoration: none; }
+.tbtn-ghost { background: rgba(255,255,255,.1); color: #bfdbfe; border: 1px solid rgba(255,255,255,.15); }
+.tbtn-ghost:hover { background: rgba(255,255,255,.2); color: #fff; }
+.tbtn-success { background: #16a34a; color: #fff; }
+.tbtn-success:hover { background: #15803d; }
+.tbtn-warning { background: #d97706; color: #fff; }
+
+/* Document */
+.doc-outer { max-width: 900px; margin: 2rem auto; padding: 0 1.5rem 3rem; }
+.doc-paper { background: var(--white); border: 1px solid var(--border); border-radius: 4px;
+  box-shadow: 0 4px 32px rgba(0,0,0,.12), 0 1px 4px rgba(0,0,0,.08); overflow: hidden; }
+
+/* Letterhead */
+.letterhead { background: var(--navy); padding: 1.5rem 2.5rem;
+  display: flex; align-items: center; gap: 1.5rem; border-bottom: 4px solid var(--gold); }
+.lh-seal { width: 70px; height: 70px; border: 3px solid rgba(255,255,255,.3); border-radius: 50%;
+  display: flex; align-items: center; justify-content: center; font-size: 2rem; flex-shrink: 0;
+  background: rgba(255,255,255,.08); }
+.lh-text { color: #fff; }
+.lh-republic { font-size: .62rem; letter-spacing: .15em; text-transform: uppercase; color: #93c5fd; margin-bottom: .2rem; font-family: 'JetBrains Mono', monospace; }
+.lh-uni { font-family: 'Crimson Pro', serif; font-size: 1.2rem; font-weight: 700; line-height: 1.2; }
+.lh-addr { font-size: .72rem; color: #93c5fd; margin-top: .2rem; }
+.lh-dept { margin-left: auto; text-align: right; font-family: 'JetBrains Mono', monospace;
+  font-size: .62rem; letter-spacing: .08em; text-transform: uppercase; line-height: 1.7; color: #bfdbfe; }
+
+/* Title Band */
+.title-band { background: #f0f4fb; border-bottom: 2px solid var(--navy); padding: 1.25rem 2.5rem; text-align: center; }
+.title-band .dept-tag { font-family: 'JetBrains Mono', monospace; font-size: .62rem; letter-spacing: .14em;
+  text-transform: uppercase; color: var(--muted); margin-bottom: .4rem; }
+.title-band h1 { font-family: 'Crimson Pro', serif; font-size: 1.4rem; font-weight: 700; color: var(--navy); letter-spacing: .02em; }
+.title-band .form-meta { display: flex; justify-content: center; gap: 2rem; margin-top: .5rem;
+  font-family: 'JetBrains Mono', monospace; font-size: .65rem; color: var(--muted); }
+
+/* Date */
+.date-line { padding: .75rem 2.5rem; text-align: right; font-size: .82rem; color: var(--muted); border-bottom: 1px solid #e8ecf4; }
+.date-line span { font-weight: 600; color: var(--text); }
+
+/* Addressee */
+.addressee { padding: 1.25rem 2.5rem .5rem; font-size: .88rem; line-height: 1.8; }
+.addressee .to { font-weight: 700; color: var(--navy); }
+.addressee .salutation { margin-top: .75rem; font-style: italic; }
+
+/* Intro */
+.intro-text { padding: .5rem 2.5rem 1rem; font-size: .88rem; line-height: 1.75; border-bottom: 1px solid #e8ecf4; }
+
+/* Form Body */
+.form-body { padding: 1rem 2.5rem 2rem; }
+.sec { margin-top: 1.5rem; }
+.sec-title { display: flex; align-items: center; gap: 10px; margin-bottom: 1rem;
+  padding-bottom: .5rem; border-bottom: 2px solid var(--navy); }
+.sec-num { font-family: 'Crimson Pro', serif; background: var(--navy); color: #fff;
+  width: 26px; height: 26px; border-radius: 50%; display: flex; align-items: center;
+  justify-content: center; font-size: .78rem; flex-shrink: 0; }
+.sec-label { font-family: 'JetBrains Mono', monospace; font-size: .72rem; font-weight: 500;
+  text-transform: uppercase; letter-spacing: .1em; color: var(--navy); }
+
+/* Field Grid */
+.fgrid { display: grid; grid-template-columns: 1fr 1fr; gap: .85rem 1.5rem; }
+.fcol-full { grid-column: 1 / -1; }
+.fcol-half { grid-column: span 1; }
+.field { display: flex; flex-direction: column; gap: 3px; }
+.field label { font-family: 'JetBrains Mono', monospace; font-size: .6rem; font-weight: 500;
+  text-transform: uppercase; letter-spacing: .09em; color: var(--muted); }
+
+/* Filled values (read-only display) */
+.fval { font-family: 'Crimson Pro', serif; font-size: .95rem; color: var(--text);
+  border-bottom: 1.5px solid var(--border); padding: 6px 2px; min-height: 32px; line-height: 1.4; }
+.fval.area { border: 1.5px solid var(--border); border-radius: 6px; padding: 8px 10px;
+  min-height: 56px; white-space: pre-wrap; }
+.fval.empty { color: #bbb; font-style: italic; }
+
+/* Signature Section */
+.sig-section { margin-top: 2.5rem; padding-top: 1.5rem; border-top: 1px solid #e8ecf4; }
+.sig-block { display: flex; flex-direction: column; gap: .5rem; }
+.sig-label { font-family: 'JetBrains Mono', monospace; font-size: .6rem; font-weight: 500;
+  text-transform: uppercase; letter-spacing: .09em; color: var(--muted); }
+.sigpad-wrap { border: 1.5px solid var(--border); border-radius: 8px; background: #fafbff;
+  padding: 6px; display: inline-flex; flex-direction: column; gap: 4px; width: 100%; }
+.sigpad { border: 1.5px dashed #c3cfe2; border-radius: 5px; cursor: crosshair; display: block;
+  touch-action: none; background: #fff; width: 100%; height: 75px; }
+.sig-clear { font-size: .65rem; color: #dc2626; background: none; border: none; cursor: pointer;
+  align-self: flex-end; padding: 2px 6px; font-family: 'DM Sans', sans-serif; font-weight: 600;
+  transition: background .12s; border-radius: 4px; }
+.sig-clear:hover { background: #fee2e2; }
+.sig-name-display { border-bottom: 1.5px solid var(--border); padding: 5px 2px; font-size: .95rem;
+  font-family: 'Crimson Pro', serif; color: var(--text); min-height: 28px; }
+
+/* Approval */
+.approval-block { margin-top: 2rem; padding: 1.25rem 1.5rem; background: #f8f9fc;
+  border: 1px solid var(--border); border-radius: 8px;
+  display: grid; grid-template-columns: 1fr auto 1fr; gap: 1.5rem; align-items: center; }
+.approval-sig { display: flex; flex-direction: column; gap: .5rem; }
+.approval-divider { width: 1px; background: var(--border); align-self: stretch; }
+.director-block { text-align: center; }
+.director-name { font-family: 'Crimson Pro', serif; font-size: 1rem; font-weight: 700; color: var(--navy); }
+.director-title { font-size: .72rem; color: var(--muted); margin-top: .2rem; line-height: 1.5; }
+.director-line { border-bottom: 2px solid var(--navy); margin: .5rem auto; width: 80%; }
+.date-signed-label { font-family: 'JetBrains Mono', monospace; font-size: .6rem; text-transform: uppercase; letter-spacing: .09em; color: var(--muted); margin-top: .75rem; }
+.date-signed-line { border-bottom: 1.5px solid var(--border); padding: 5px 2px; min-height: 28px; }
+
+/* Footer */
+.footer-band { background: #f0f4fb; border-top: 2px solid var(--navy); padding: .85rem 2.5rem;
+  display: flex; justify-content: space-between; font-family: 'JetBrains Mono', monospace;
+  font-size: .62rem; color: var(--muted); letter-spacing: .06em; }
+
+/* Print */
+@media print {
+  .toolbar, .preview-bar { display: none !important; }
+  body { background: #fff; }
+  .doc-outer { padding: 0; margin: 0; max-width: 100%; }
+  .doc-paper { box-shadow: none; border: none; border-radius: 0; }
+  [style*="height:52px"] { display: none !important; }
+}
+@media (max-width: 640px) {
+  .fgrid { grid-template-columns: 1fr; }
+  .fcol-full, .fcol-half { grid-column: auto; }
+  .form-body { padding: 1rem 1.25rem 1.5rem; }
+  .letterhead { padding: 1rem; flex-wrap: wrap; }
+  .lh-dept { margin-left: 0; text-align: left; }
+  .approval-block { grid-template-columns: 1fr; }
+  .approval-divider { display: none; }
+}
+</style>
+</head>
+<body>
+
+
+
+<!-- Toolbar (only for standalone/download view) -->
+<div class="toolbar" id="mainToolbar" style="display:none">
+  <div class="toolbar-left">
+    <strong>NEUST — SIT Application</strong>
+    <span>Auto-filled Form</span>
+  </div>
+  <div class="toolbar-right">
+    <button class="tbtn tbtn-ghost" onclick="window.print()">🖨 Print</button>
+    <button class="tbtn tbtn-warning" onclick="window.history.back()">← Back</button>
+  </div>
+</div>
+
+<div class="doc-outer">
+<div class="doc-paper">
+
+  <!-- Letterhead -->
+  <div class="letterhead">
+    <div class="lh-seal">🏛️</div>
+    <div class="lh-text">
+      <div class="lh-republic">Republic of the Philippines</div>
+      <div class="lh-uni">NUEVA ECIJA UNIVERSITY OF SCIENCE AND TECHNOLOGY</div>
+      <div class="lh-addr">Cabanatuan City, Nueva Ecija</div>
+    </div>
+    <div class="lh-dept">On-the-Job Training<br>and Career Development Center</div>
+  </div>
+
+  <!-- Title Band -->
+  <div class="title-band">
+    <div class="dept-tag">On-the-Job Training and Career Development Center</div>
+    <h1>APPLICATION FOR SUPERVISED INDUSTRIAL TRAINING</h1>
+    <div class="form-meta">
+      <span>Form No.: NEUST-OJT-F002</span>
+      <span>Effectivity: 01.08.2025</span>
+    </div>
+  </div>
+
+  <!-- Date -->
+  <div class="date-line">
+    Date: <span>2026-05-08</span>
+  </div>
+
+  <!-- Addressee -->
+  <div class="addressee">
+    <div>The Director</div>
+    <div>On-the-Job Training and Career Development Office</div>
+    <div class="to">NUEVA ECIJA UNIVERSITY OF SCIENCE AND TECHNOLOGY</div>
+    <div>Cabanatuan City, Nueva Ecija</div>
+    <div class="salutation">Sir/Ma'am:</div>
+  </div>
+
+  <!-- Intro -->
+  <div class="intro-text">
+    &nbsp;&nbsp;&nbsp;&nbsp;May I apply for placement under the On-the-Job Training Program. The following are my particulars and preference for your information and guidance.
+  </div>
+
+  <!-- Form Body -->
+  <div class="form-body">
+
+    <!-- I. Personal Data -->
+    <div class="sec">
+      <div class="sec-title">
+        <div class="sec-num">I</div>
+        <div class="sec-label">Personal Data</div>
+      </div>
+      <div class="fgrid">
+        <div class="field fcol-full">
+          <label>Name (Last Name, First Name, Middle Name)</label>
+          <div class="fval">sales, john lhoyd santos</div>
+        </div>
+        <div class="field fcol-half">
+          <label>Age</label>
+          <div class="fval empty">—</div>
+        </div>
+        <div class="field fcol-half">
+          <label>Sex</label>
+          <div class="fval empty">—</div>
+        </div>
+        <div class="field fcol-half">
+          <label>Civil Status</label>
+          <div class="fval empty">—</div>
+        </div>
+        <div class="field fcol-half">
+          <label>Religion</label>
+          <div class="fval empty">—</div>
+        </div>
+        <div class="field fcol-full">
+          <label>Home Address</label>
+          <div class="fval area">purok 7</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- II. Academic Data -->
+    <div class="sec">
+      <div class="sec-title">
+        <div class="sec-num">II</div>
+        <div class="sec-label">Academic Data</div>
+      </div>
+      <div class="fgrid">
+        <div class="field fcol-half">
+          <label>Course</label>
+          <div class="fval">Bachelor of Science in Information Technology</div>
+        </div>
+        <div class="field fcol-half">
+          <label>Major</label>
+          <div class="fval">WEb</div>
+        </div>
+        <div class="field fcol-half">
+          <label>Year and Section</label>
+          <div class="fval">3-a</div>
+        </div>
+        <div class="field fcol-half" style="display:grid;grid-template-columns:1fr 1fr;gap:.5rem;">
+          <div class="field">
+            <label>Day</label>
+            <div class="fval">M</div>
+          </div>
+          <div class="field">
+            <label>Evening</label>
+            <div class="fval">TT</div>
+          </div>
+        </div>
+        <div class="field fcol-full">
+          <label>Name of OJT Coordinator</label>
+          <div class="fval">rm</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- III. Preference for Placement -->
+    <div class="sec">
+      <div class="sec-title">
+        <div class="sec-num">III</div>
+        <div class="sec-label">Preference for Placement</div>
+      </div>
+      <div class="fgrid">
+        <div class="field fcol-full">
+          <label>Company Name</label>
+          <div class="fval">Nueva Ecija University of Science and Technology Atate</div>
+        </div>
+        <div class="field fcol-full">
+          <label>Address</label>
+          <div class="fval area">purok 7</div>
+        </div>
+        <div class="field fcol-half">
+          <label>Telephone Number</label>
+          <div class="fval">09157679437</div>
+        </div>
+        <div class="field fcol-half">
+          <label>Contact Person</label>
+          <div class="fval">john lhoyd santos sales</div>
+        </div>
+        <div class="field fcol-full">
+          <label>Position / Department</label>
+          <div class="fval">Training Officer</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Signature Section -->
+    <div class="sig-section">
+      <div class="sec-title" style="margin-top:0">
+        <div class="sec-num">✎</div>
+        <div class="sec-label">Student Signature</div>
+      </div>
+      <div style="max-width:380px;">
+        <div class="sig-block">
+          <div class="sig-label">Signature of Student over Printed Name</div>
+          <div class="sigpad-wrap">
+            <canvas class="sigpad" id="canvas_student"></canvas>
+            <button type="button" class="sig-clear" onclick="clearSig('student')">✕ Clear</button>
+          </div>
+          <div class="sig-name-display">john lhoyd santos sales</div>
+          <input type="hidden" id="sig_student">
+        </div>
+      </div>
+    </div>
+
+    <!-- Approval Block -->
+    <div class="approval-block">
+      <div class="approval-sig">
+        <div class="sig-label">Approved By</div>
+        <div class="sigpad-wrap">
+          <canvas class="sigpad" id="canvas_approved"></canvas>
+          <button type="button" class="sig-clear" onclick="clearSig('approved')">✕ Clear</button>
+        </div>
+        <input type="hidden" id="sig_approved">
+      </div>
+      <div class="approval-divider"></div>
+      <div class="director-block">
+        <div class="director-line"></div>
+        <div class="director-name">RANDY M. BAÑEZ, J.D.</div>
+        <div class="director-title">Director<br>On-the-Job Training and Career Development Center</div>
+        <div>
+          <div class="date-signed-label">Date Signed</div>
+          <div class="date-signed-line"></div>
+        </div>
+      </div>
+    </div>
+
+  </div><!-- form-body -->
+
+  <div class="footer-band">
+    <span>NEUST-OJT-F002</span>
+    <span>Rev. 02 (01.08.2025)</span>
+  </div>
+
+</div><!-- doc-paper -->
+</div><!-- doc-outer -->
+
+<script>
+// Signature pads
+(function initSigs() {
+  document.querySelectorAll('.sigpad').forEach(canvas => {
+    const id  = canvas.id.replace('canvas_', '');
+    const ctx = canvas.getContext('2d');
+    ctx.strokeStyle = '#0d2545'; ctx.lineWidth = 2;
+    ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+    let drawing = false;
+    function resize() {
+      const w = canvas.parentElement.clientWidth - 14;
+      canvas.width = w > 0 ? w : 300; canvas.height = 75;
+    }
+    resize();
+    window.addEventListener('resize', resize);
+    function pos(e) {
+      const r = canvas.getBoundingClientRect();
+      const s = e.touches ? e.touches[0] : e;
+      return [s.clientX - r.left, s.clientY - r.top];
+    }
+    canvas.addEventListener('mousedown',  e => { drawing=true; ctx.beginPath(); ctx.moveTo(...pos(e)); });
+    canvas.addEventListener('mousemove',  e => { if(!drawing)return; ctx.lineTo(...pos(e)); ctx.stroke(); });
+    canvas.addEventListener('mouseup',    () => drawing=false);
+    canvas.addEventListener('mouseleave', () => drawing=false);
+    canvas.addEventListener('touchstart', e => { e.preventDefault(); drawing=true; ctx.beginPath(); ctx.moveTo(...pos(e)); }, {passive:false});
+    canvas.addEventListener('touchmove',  e => { e.preventDefault(); if(!drawing)return; ctx.lineTo(...pos(e)); ctx.stroke(); }, {passive:false});
+    canvas.addEventListener('touchend',   () => drawing=false);
+  });
+})();
+
+function clearSig(id) {
+  const c = document.getElementById('canvas_' + id);
+  if (c) c.getContext('2d').clearRect(0, 0, c.width, c.height);
+}
+</script>
+</body>
+</html>

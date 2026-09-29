@@ -1,0 +1,263 @@
+/* RESET */
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+    font-family: "Segoe UI", Arial, sans-serif;
+}
+
+/* BODY */
+body {
+    background: #f4f6f9;
+    padding: 20px;
+    color: #333;
+}
+
+/* TITLE */
+h1 {
+    margin-bottom: 15px;
+    font-weight: 600;
+}
+
+/* BACK BUTTON */
+.back-btn {
+    display: inline-block;
+    margin-bottom: 15px;
+    text-decoration: none;
+    color: white;
+    background: linear-gradient(135deg, #4a90e2, #357abd);
+    padding: 8px 14px;
+    border-radius: 6px;
+    transition: 0.2s;
+}
+
+.back-btn:hover {
+    opacity: 0.9;
+}
+
+/* CONTROLS */
+.controls {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 20px;
+    flex-wrap: wrap;
+}
+
+.controls input,
+.controls select {
+    padding: 8px 10px;
+    border: 1px solid #ccc;
+    border-radius: 6px;
+    outline: none;
+    transition: 0.2s;
+}
+
+.controls input:focus,
+.controls select:focus {
+    border-color: #4a90e2;
+    box-shadow: 0 0 0 2px rgba(74,144,226,0.15);
+}
+
+/* TABLE HEADER */
+.table-header {
+    display: grid;
+    grid-template-columns: 2fr 1.5fr 1.3fr 1.5fr 1.5fr 40px;
+    padding: 12px 15px;
+    background: #4a90e2;
+    color: white;
+    font-weight: 600;
+    border-radius: 10px;
+    margin-bottom: 10px;
+    font-size: 14px;
+}
+
+/* LIST */
+.report-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+/* CARD */
+.report-card {
+    background: white;
+    border-radius: 10px;
+    overflow: hidden;
+    box-shadow: 0 3px 8px rgba(0,0,0,0.05);
+    transition: 0.2s;
+}
+
+.report-card:hover {
+    transform: translateY(-2px);
+}
+
+/* ROW */
+.report-row {
+    display: grid;
+    grid-template-columns: 2fr 1.5fr 1.3fr 1.5fr 1.5fr 40px;
+    padding: 12px 15px;
+    align-items: center;
+    cursor: pointer;
+    transition: 0.2s;
+    border-bottom: 1px solid #eee;
+}
+
+/* HOVER */
+.report-row:hover {
+    background: #f9fbff;
+}
+
+/* TEXT */
+.report-row div {
+    font-size: 14px;
+}
+
+/* STATUS BADGES */
+.status {
+    padding: 4px 8px;
+    border-radius: 20px;
+    font-size: 12px;
+    font-weight: 600;
+    text-align: center;
+    width: fit-content;
+}
+
+/* GREEN */
+.status.report {
+    background: #e6f7ee;
+    color: #1e7e34;
+}
+
+/* YELLOW */
+.status.pending {
+    background: #fff4e5;
+    color: #d48806;
+}
+
+/* RED */
+.status.none {
+    background: #fdecea;
+    color: #c0392b;
+}
+
+/* GRADES */
+.report-row div:nth-child(4),
+.report-row div:nth-child(5) {
+    font-weight: 500;
+}
+
+/* ARROW */
+.arrow {
+    text-align: center;
+    font-size: 14px;
+    transition: 0.2s;
+}
+
+/* DETAILS */
+.report-details {
+    display: none;
+    padding: 15px;
+    animation: fadeIn 0.25s ease;
+    background: #fafafa;
+}
+
+/* ACTIVE */
+.report-card.active .report-details {
+    display: block;
+}
+
+/* DETAILS TEXT */
+.report-details p {
+    margin-bottom: 10px;
+    font-size: 14px;
+}
+
+/* LINKS */
+.report-details a {
+    color: #4a90e2;
+    text-decoration: none;
+    font-weight: 500;
+}
+
+.report-details a:hover {
+    text-decoration: underline;
+}
+
+/* BUTTONS */
+.edit-btn {
+    margin-top: 10px;
+    padding: 6px 12px;
+    background: #f5a623;
+    border: none;
+    color: white;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: 0.2s;
+}
+
+.edit-btn:hover {
+    background: #d48806;
+}
+
+/* FORM */
+.edit-form {
+    display: none;
+    margin-top: 10px;
+}
+
+/* INPUT */
+.edit-form input {
+    padding: 6px;
+    width: 90px;
+    margin-right: 10px;
+    border: 1px solid #ccc;
+    border-radius: 5px;
+}
+
+/* SAVE */
+.save-btn {
+    padding: 6px 12px;
+    background: #28a745;
+    border: none;
+    color: white;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: 0.2s;
+}
+
+.save-btn:hover {
+    background: #1e7e34;
+}
+
+/* ANIMATION */
+@keyframes fadeIn {
+    from {
+        opacity: 0;
+        transform: translateY(-5px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+/* RESPONSIVE */
+@media (max-width: 768px) {
+
+    .table-header {
+        display: none;
+    }
+
+    .report-row {
+        grid-template-columns: 1fr;
+        gap: 6px;
+    }
+
+    .report-row div {
+        font-size: 13px;
+    }
+
+    .arrow {
+        text-align: right;
+    }
+}

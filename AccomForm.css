@@ -1,0 +1,360 @@
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700&display=swap');
+
+body {
+    margin: 0;
+    padding: 0;
+    background-color: #f0f2f5;
+    font-family: 'Plus Jakarta Sans', sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+}
+
+/* TOP BAR */
+.admin-header {
+    background-color: #0038a8;
+    height: 50px;
+    width: 100%;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0 20px;
+    box-sizing: border-box;
+    color: white;
+    position: sticky;
+    top: 0;
+}
+
+/* LOGO FIX */
+.header-left {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.header-left img {
+    height: 35px !important; /* Forces the huge image to stay small */
+    width: auto;
+    object-fit: contain;
+}
+
+.logo-text {
+    font-size: 10px;
+    font-weight: 700;
+    line-height: 1.2;
+}
+
+.logout-btn {
+    border: 1px solid white;
+    color: white;
+    text-decoration: none;
+    padding: 4px 10px;
+    border-radius: 4px;
+    font-size: 11px;
+}
+
+/* MAIN CARD CONTAINER */
+.main-wrapper {
+    width: 100%;
+    max-width: 1100px;
+    padding: 20px;
+}
+
+.card {
+    background: white;
+    border-radius: 8px;
+    padding: 40px;
+    box-shadow: 0 2px 10px rgba(0,0,0,0.05);
+}
+
+/* GRID SYSTEM */
+.grid-container {
+    display: grid;
+    grid-template-columns: 1.5fr 1fr;
+    gap: 30px;
+}
+
+.req-box {
+    border: 1px solid #eee;
+    padding: 15px;
+    border-radius: 8px;
+    margin-bottom: 10px;
+    background: #fafafa;
+}
+
+.preview {
+    width: 60px;
+    height: 60px;
+    object-fit: cover;
+    margin: 10px 0;
+    border-radius: 4px;
+}
+
+/* ================= STATUS BADGE DESIGN ================= */
+
+.status {
+    display: inline-block;
+    padding: 6px 14px;
+    border-radius: 20px;
+    font-size: 12px;
+    font-weight: 600;
+    margin-top: 8px;
+    color: white;
+}
+
+/* Pending */
+.status.pending {
+    background-color: #f6c23e;
+}
+
+/* Verified */
+.status.verified {
+    background-color: #1cc88a;
+}
+
+/* Approved (in case DB uses this) */
+.status.approved {
+    background-color: #1cc88a;
+}
+
+/* Denied */
+.status.denied {
+    background-color: #e74a3b;
+}
+
+input {
+    width: 100%;
+    padding: 8px;
+    margin: 5px 0 15px 0;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+}
+
+button {
+    background: #0038a8;
+    color: white;
+    border: none;
+    padding: 10px 20px;
+    border-radius: 4px;
+    cursor: pointer;
+}
+
+/* ==================== Centering Adjustments ==================== */
+
+/* Center 2x2 photo, status, and remark */
+.card .grid-item:nth-child(2) .req-box {
+    display: flex;
+    flex-direction: column;
+    align-items: center; /* center photo, status, remarks */
+    text-align: center;  /* center text */
+}
+
+.card .grid-item:nth-child(2) .req-box img.preview {
+    width: 150px;      /* appropriate 2x2 size */
+    height: 180px;
+    object-fit: cover;
+    margin-bottom: 10px;
+    border-radius: 4px;
+    border: 1px solid #ccc;
+}
+
+/* Status and denied remark inside 2x2 box */
+.card .grid-item:nth-child(2) .req-box .status,
+.card .grid-item:nth-child(2) .req-box p[style] {
+    margin-top: 5px;
+    font-weight: 600;
+}
+
+/* Center requirements container */
+.card .requirements-container {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center; /* center all requirement boxes */
+    gap: 15px;
+}
+
+/* Individual requirement box content centering */
+.card .requirements-container .req-box {
+    flex: 0 1 200px;       /* box width */
+    padding: 10px;
+    border: 1px solid #ddd;
+    border-radius: 6px;
+    background-color: #f9f9f9;
+    display: flex;
+    flex-direction: column;
+    align-items: center;  /* center image, status, remark */
+    text-align: center;   /* center text */
+}
+
+.card .requirements-container .req-box img.preview {
+    width: 150px;         /* consistent with 2x2 photo */
+    height: 180px;
+    object-fit: cover;
+    border-radius: 4px;
+    margin-bottom: 10px;
+    border: 1px solid #ccc;
+}
+
+/* Status and denied remark inside requirement boxes */
+.card .requirements-container .req-box .status,
+.card .requirements-container .req-box p[style] {
+    margin-top: 5px;
+    font-weight: 600;
+}
+
+/* ==================== Responsive Adjustments ==================== */
+
+/* Tablet screens ≤768px */
+@media (max-width: 768px) {
+    /* 2x2 Photo Box */
+    .card .grid-item:nth-child(2) .req-box img.preview {
+        width: 120px;
+        height: 144px;
+    }
+
+    /* Requirements boxes */
+    .card .requirements-container .req-box {
+        flex: 0 1 45%; /* 2 boxes per row */
+    }
+
+    .card .requirements-container .req-box img.preview {
+        width: 120px;
+        height: 144px;
+    }
+}
+
+/* Mobile screens ≤480px */
+@media (max-width: 480px) {
+    /* 2x2 Photo Box */
+    .card .grid-item:nth-child(2) .req-box img.preview {
+        width: 100px;
+        height: 120px;
+    }
+
+    /* Requirements boxes */
+    .card .requirements-container .req-box {
+        flex: 0 1 90%;  /* 1 box per row */
+    }
+
+    .card .requirements-container .req-box img.preview {
+        width: 100px;
+        height: 120px;
+    }
+}
+/* =============================== */
+/* SIDEBAR LEFT POSITION + SMOOTH TRANSITION */
+/* =============================== */
+
+.sidebar {
+    height: 100vh;
+    width: 220px;
+    background-color: #2c3e50;
+    color: white;
+    display: flex;
+    flex-direction: column;
+    position: fixed;
+    left: 0;
+    top: 0;
+    transition: width 0.4s ease;
+    overflow: hidden;
+    z-index: 1000;
+    padding-top: 10px;
+}
+
+/* Collapse button */
+.sidebar .toggle-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 40px;
+    height: 40px;
+    margin: 0 auto 15px auto;
+    background: none;
+    border: 1px solid white;
+    border-radius: 6px;
+    color: white;
+    cursor: pointer;
+    font-size: 20px;
+    transition: all 0.3s;
+}
+
+.sidebar .toggle-btn:hover {
+    background: #34495e;
+}
+
+/* Sidebar Title */
+.sidebar h2 {
+    text-align: center;
+    padding: 20px 0;
+    border-bottom: 1px solid #34495e;
+    transition: opacity 0.3s ease;
+}
+
+/* Sidebar Links */
+.sidebar a {
+    display: flex;
+    align-items: center;
+    padding: 15px 20px;
+    color: white;
+    text-decoration: none;
+    transition: all 0.3s ease;
+}
+
+.sidebar a .icon {
+    margin-right: 15px;
+    font-size: 18px;
+    transition: margin 0.3s ease;
+}
+
+.sidebar a:hover {
+    background-color: #34495e;
+}
+
+/* Collapsed Sidebar */
+.sidebar.collapsed {
+    width: 60px;
+}
+
+.sidebar.collapsed h2 {
+    opacity: 0;
+    height: 0;
+    margin: 0;
+    padding: 0;
+}
+
+.sidebar.collapsed a .text {
+    display: none;
+}
+
+.sidebar.collapsed a {
+    justify-content: center;
+}
+
+.sidebar.collapsed a .icon {
+    margin-right: 0;
+}
+
+/* =============================== */
+/* PAGE ADJUSTMENT FOR SIDEBAR */
+/* =============================== */
+
+.main-wrapper {
+    margin-left: 220px;
+    transition: margin-left 0.4s ease;
+}
+
+.admin-header {
+    margin-left: 220px;
+    width: calc(100% - 220px);
+    transition: margin-left 0.4s ease, width 0.4s ease;
+}
+
+/* When sidebar collapses */
+.sidebar.collapsed ~ .admin-header {
+    margin-left: 60px;
+    width: calc(100% - 60px);
+}
+
+.sidebar.collapsed ~ .main-wrapper {
+    margin-left: 60px;
+}

@@ -1,0 +1,109 @@
+/* RESET */
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+    font-family: 'Segoe UI', sans-serif;
+}
+
+/* BODY */
+body {
+    background: #f4f7fb;
+    padding: 30px;
+    color: #1e293b;
+}
+
+/* TITLE */
+h1 {
+    font-size: 28px;
+    color: #1e3a8a; /* deep blue */
+    margin-bottom: 20px;
+}
+
+/* SEARCH */
+.controls {
+    margin-bottom: 25px;
+}
+
+#search {
+    width: 100%;
+    max-width: 400px;
+    padding: 12px 15px;
+    border-radius: 10px;
+    border: 2px solid #e2e8f0;
+    outline: none;
+    font-size: 14px;
+    transition: 0.3s;
+}
+
+#search:focus {
+    border-color: #2563eb;
+    box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.2);
+}
+
+/* GRID */
+.company-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 20px;
+}
+
+/* CARD */
+.company-card {
+    background: #ffffff;
+    padding: 20px;
+    border-radius: 15px;
+    text-decoration: none;
+    color: inherit;
+    border-left: 6px solid #facc15; /* yellow accent */
+    box-shadow: 0 5px 15px rgba(0,0,0,0.05);
+    transition: 0.3s;
+    position: relative;
+}
+
+/* HOVER */
+.company-card:hover {
+    transform: translateY(-5px);
+    box-shadow: 0 10px 25px rgba(0,0,0,0.1);
+}
+
+/* COMPANY NAME */
+.company-name {
+    font-size: 16px;
+    font-weight: 600;
+    color: #1e3a8a;
+    margin-bottom: 10px;
+}
+
+/* ACTION */
+.company-action {
+    font-size: 13px;
+    font-weight: 500;
+    color: #2563eb;
+    transition: 0.2s;
+}
+
+/* HOVER ACTION */
+.company-card:hover .company-action {
+    color: #facc15;
+}
+
+/* NO DATA */
+.no-data {
+    grid-column: 1/-1;
+    text-align: center;
+    padding: 40px;
+    color: #64748b;
+    font-size: 16px;
+}
+
+/* RESPONSIVE */
+@media (max-width: 500px) {
+    h1 {
+        font-size: 22px;
+    }
+
+    #search {
+        width: 100%;
+    }
+}

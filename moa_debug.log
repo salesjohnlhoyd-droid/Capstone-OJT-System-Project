@@ -1,0 +1,751 @@
+{"ts":"2026-06-29 10:19:11","step":"ajax_update_moa_status:start","data":{"moa_id":57,"newStatus":"Pending"}}
+{"ts":"2026-06-29 10:19:11","step":"ajax_update_moa_status:status_updated","data":{"moa_id":57,"status":"Pending"}}
+{"ts":"2026-06-29 10:19:12","step":"ajax_update_moa_status:start","data":{"moa_id":57,"newStatus":"Approved"}}
+{"ts":"2026-06-29 10:19:12","step":"ajax_update_moa_status:moaRow_fetched","data":{"found":true,"user_id":123,"company":"Riamea\"s  PUBG Training Center","has_pdf":true,"pdf_len":404411,"pdf_filename":"moa_Riamea_s__PUBG_Training_Center_20260627.pdf"}}
+{"ts":"2026-06-29 10:19:12","step":"ajax_update_moa_status:columns_ensured","data":[]}
+{"ts":"2026-06-29 10:19:12","step":"ajax_update_moa_status:ci_exists","data":{"exists":true}}
+{"ts":"2026-06-29 10:19:12","step":"ajax_update_moa_status:ci_update","data":{"ok":true,"affected":0,"error":null}}
+{"ts":"2026-06-29 10:19:12","step":"ajax_update_moa_status:blob_transfer_start","data":{"blob_bytes":404411}}
+{"ts":"2026-06-29 10:19:12","step":"ajax_update_moa_status:cr_exists","data":{"exists":true}}
+{"ts":"2026-06-29 10:19:12","step":"ajax_update_moa_status:cr_update","data":{"result":true,"error":null}}
+{"ts":"2026-06-29 10:19:12","step":"saveMoaBlobToFolder:start","data":{"user_id":123,"filename":"moa_Riamea_s__PUBG_Training_Center_20260627.pdf","blob_length":404411}}
+{"ts":"2026-06-29 10:19:12","step":"saveMoaBlobToFolder:folder","data":{"path":"Company Folder\/Riamea_s__PUBG_Training_Center"}}
+{"ts":"2026-06-29 10:19:12","step":"saveMoaBlobToFolder:write","data":{"dest":"Company Folder\/Riamea_s__PUBG_Training_Center\/MOA_Document_verified_1782721152.pdf","written":404411}}
+{"ts":"2026-06-29 10:19:12","step":"ajax_update_moa_status:file_saved_to_folder","data":{"result":true}}
+{"ts":"2026-06-29 10:19:12","step":"ajax_update_moa_status:recompute_status","data":{"new_overall":"Pending"}}
+{"ts":"2026-06-29 10:19:12","step":"ajax_update_moa_status:status_updated","data":{"moa_id":57,"status":"Approved"}}
+{"ts":"2026-06-29 10:20:16","step":"ajax_update_moa_status:start","data":{"moa_id":57,"newStatus":"Pending"}}
+{"ts":"2026-06-29 10:20:16","step":"ajax_update_moa_status:status_updated","data":{"moa_id":57,"status":"Pending"}}
+{"ts":"2026-06-29 16:27:21","step":"ajax_update_moa_workflow:start","data":{"moa_id":57,"workflow_status":"reviewing"}}
+{"ts":"2026-06-29 16:27:28","step":"ajax_update_moa_workflow:start","data":{"moa_id":57,"workflow_status":"approved"}}
+{"ts":"2026-06-29 16:27:28","step":"ajax_update_moa_workflow:sync_start","data":{"user_id":123,"company":"Riamea\"s  PUBG Training Center","has_pdf":true}}
+{"ts":"2026-06-29 16:27:28","step":"ajax_update_moa_workflow:ci_update","data":{"ok":true,"error":null}}
+{"ts":"2026-06-29 16:27:28","step":"saveMoaBlobToFolder:start","data":{"user_id":123,"filename":"moa_Riamea_s__PUBG_Training_Center_20260627.pdf","blob_length":404411}}
+{"ts":"2026-06-29 16:27:28","step":"saveMoaBlobToFolder:folder","data":{"path":"Company Folder\/Riamea_s__PUBG_Training_Center"}}
+{"ts":"2026-06-29 16:27:28","step":"saveMoaBlobToFolder:write","data":{"dest":"Company Folder\/Riamea_s__PUBG_Training_Center\/MOA_Document_verified_1782743248.pdf","written":404411}}
+{"ts":"2026-06-29 16:43:52","step":"ajax_update_moa_workflow:start","data":{"moa_id":58,"workflow_status":"reviewing"}}
+{"ts":"2026-06-29 16:59:51","step":"ajax_moa_drawer_action:start","data":{"moa_id":59,"action":"accept"}}
+{"ts":"2026-06-29 16:59:51","step":"transferMoaToRequirements:start","data":{"user_id":123,"moa_id":59,"blob_length":404418,"filename":"moa_Riamea_s__PUBG_Training_Center_20260629.pdf"}}
+{"ts":"2026-06-29 16:59:51","step":"transferMoaToRequirements:insert","data":{"ok":true,"error":null}}
+{"ts":"2026-06-29 16:59:51","step":"saveMoaBlobToFolder:start","data":{"user_id":123,"filename":"moa_Riamea_s__PUBG_Training_Center_20260629.pdf","blob_length":404418}}
+{"ts":"2026-06-29 16:59:51","step":"saveMoaBlobToFolder:mkdir","data":{"result":true}}
+{"ts":"2026-06-29 16:59:51","step":"saveMoaBlobToFolder:write","data":{"dest":"Company Folder\/Riamea_s__PUBG_Training_Center\/MOA_Document_verified_1782745191.pdf","written":404418}}
+{"ts":"2026-06-29 16:59:51","step":"transferMoaToRequirements:delete_moa_row","data":{"moa_id":59,"ok":true}}
+{"ts":"2026-06-29 17:00:38","step":"ajax_update_moa_req_workflow:start","data":{"user_id":123,"stage":"reviewing"}}
+{"ts":"2026-06-29 17:22:50","step":"ajax_moa_drawer_action:start","data":{"moa_id":60,"action":"accept"}}
+{"ts":"2026-06-29 17:22:50","step":"transferMoaToRequirements:start","data":{"user_id":123,"moa_id":60,"blob_length":404411,"filename":"moa_Riamea_s__PUBG_Training_Center_20260629.pdf"}}
+{"ts":"2026-06-29 17:22:51","step":"transferMoaToRequirements:insert","data":{"ok":true,"error":null}}
+{"ts":"2026-06-29 17:22:51","step":"saveMoaBlobToFolder:start","data":{"user_id":123,"filename":"moa_Riamea_s__PUBG_Training_Center_20260629.pdf","blob_length":404411}}
+{"ts":"2026-06-29 17:22:51","step":"saveMoaBlobToFolder:write","data":{"dest":"Company Folder\/Riamea_s__PUBG_Training_Center\/MOA_Document_verified_1782746571.pdf","written":404411}}
+{"ts":"2026-06-29 17:22:51","step":"transferMoaToRequirements:delete_moa_row","data":{"moa_id":60,"ok":true}}
+{"ts":"2026-06-29 17:23:18","step":"ajax_update_moa_req_workflow:start","data":{"user_id":123,"stage":"reviewing"}}
+{"ts":"2026-06-29 17:23:33","step":"ajax_update_moa_req_workflow:start","data":{"user_id":123,"stage":"approved"}}
+{"ts":"2026-06-29 17:23:35","step":"ajax_update_moa_req_workflow:start","data":{"user_id":123,"stage":"scheduled"}}
+{"ts":"2026-06-29 17:23:35","step":"ajax_update_moa_req_workflow:scheduled_verified","data":{"user_id":123,"overall":"Pending"}}
+{"ts":"2026-06-29 17:26:37","step":"ajax_moa_drawer_action:start","data":{"moa_id":61,"action":"accept"}}
+{"ts":"2026-06-29 17:26:37","step":"transferMoaToRequirements:start","data":{"user_id":123,"moa_id":61,"blob_length":404411,"filename":"moa_Riamea_s__PUBG_Training_Center_20260629.pdf"}}
+{"ts":"2026-06-29 17:26:37","step":"transferMoaToRequirements:insert","data":{"ok":true,"error":null}}
+{"ts":"2026-06-29 17:26:37","step":"saveMoaBlobToFolder:start","data":{"user_id":123,"filename":"moa_Riamea_s__PUBG_Training_Center_20260629.pdf","blob_length":404411}}
+{"ts":"2026-06-29 17:26:37","step":"saveMoaBlobToFolder:write","data":{"dest":"Company Folder\/Riamea_s__PUBG_Training_Center\/MOA_Document_verified_1782746797.pdf","written":404411}}
+{"ts":"2026-06-29 17:26:37","step":"transferMoaToRequirements:delete_moa_row","data":{"moa_id":61,"ok":true}}
+{"ts":"2026-06-30 17:30:46","step":"ajax_moa_drawer_action:start","data":{"moa_id":62,"action":"accept"}}
+{"ts":"2026-06-30 17:30:46","step":"transferMoaToRequirements:start","data":{"user_id":123,"moa_id":62,"blob_length":404861,"filename":"moa_Riamae_s_PUBG_Training_Center_20260630.pdf"}}
+{"ts":"2026-06-30 17:30:46","step":"transferMoaToRequirements:insert","data":{"ok":true,"error":null}}
+{"ts":"2026-06-30 17:30:46","step":"saveMoaBlobToFolder:start","data":{"user_id":123,"filename":"moa_Riamae_s_PUBG_Training_Center_20260630.pdf","blob_length":404861}}
+{"ts":"2026-06-30 17:30:46","step":"saveMoaBlobToFolder:mkdir","data":{"result":true}}
+{"ts":"2026-06-30 17:30:46","step":"saveMoaBlobToFolder:write","data":{"dest":"Company Folder\/Riamae_s_PUBG_Training_Center\/MOA_Document_verified_1782833446.pdf","written":404861}}
+{"ts":"2026-06-30 17:30:46","step":"transferMoaToRequirements:delete_moa_row","data":{"moa_id":62,"ok":true}}
+{"ts":"2026-06-30 17:31:42","step":"ajax_update_moa_req_workflow:start","data":{"user_id":123,"stage":"reviewing"}}
+{"ts":"2026-06-30 17:31:46","step":"ajax_update_moa_req_workflow:start","data":{"user_id":123,"stage":"approved"}}
+{"ts":"2026-06-30 17:32:15","step":"ajax_update_moa_req_workflow:start","data":{"user_id":123,"stage":"scheduled"}}
+{"ts":"2026-06-30 17:32:15","step":"ajax_update_moa_req_workflow:scheduled_verified","data":{"user_id":123,"overall":"Verified"}}
+{"ts":"2026-06-30 17:52:54","step":"ajax_moa_drawer_action:start","data":{"moa_id":63,"action":"accept"}}
+{"ts":"2026-06-30 17:52:54","step":"transferMoaToRequirements:start","data":{"user_id":123,"moa_id":63,"blob_length":404408,"filename":"moa_Riamae_s_PUBG_Training_Center_20260630.pdf"}}
+{"ts":"2026-06-30 17:52:54","step":"transferMoaToRequirements:insert","data":{"ok":true,"error":null}}
+{"ts":"2026-06-30 17:52:54","step":"saveMoaBlobToFolder:start","data":{"user_id":123,"filename":"moa_Riamae_s_PUBG_Training_Center_20260630.pdf","blob_length":404408}}
+{"ts":"2026-06-30 17:52:54","step":"saveMoaBlobToFolder:write","data":{"dest":"Company Folder\/Riamae_s_PUBG_Training_Center\/MOA_Document_verified_1782834774.pdf","written":404408}}
+{"ts":"2026-06-30 17:52:54","step":"transferMoaToRequirements:delete_moa_row","data":{"moa_id":63,"ok":true}}
+{"ts":"2026-06-30 17:54:34","step":"ajax_update_moa_req_workflow:start","data":{"user_id":123,"stage":"reviewing","comment":"Hi! Your document request has been approved. I've completed the review, and your requested document is now ready. Please check your account to view or download it. Let me know if you need any help or have any concerns. Have a great day!","schedule":null}}
+{"ts":"2026-06-30 17:54:53","step":"ajax_update_moa_req_workflow:start","data":{"user_id":123,"stage":"reviewing","comment":"Hi! Your document request has been approved. I've completed the review, and your requested document is now ready. Please check your account to view or download it. Let me know if you need any help or have any concerns. Have a great day!","schedule":null}}
+{"ts":"2026-06-30 18:10:35","step":"ajax_moa_drawer_action:start","data":{"moa_id":64,"action":"accept"}}
+{"ts":"2026-06-30 18:10:35","step":"transferMoaToRequirements:start","data":{"user_id":123,"moa_id":64,"blob_length":404033,"filename":"moa_Riamae_s_PUBG_Training_Center_20260630.pdf"}}
+{"ts":"2026-06-30 18:10:35","step":"transferMoaToRequirements:insert","data":{"ok":true,"error":null}}
+{"ts":"2026-06-30 18:10:35","step":"saveMoaBlobToFolder:start","data":{"user_id":123,"filename":"moa_Riamae_s_PUBG_Training_Center_20260630.pdf","blob_length":404033}}
+{"ts":"2026-06-30 18:10:35","step":"saveMoaBlobToFolder:write","data":{"dest":"Company Folder\/Riamae_s_PUBG_Training_Center\/MOA_Document_verified_1782835835.pdf","written":404033}}
+{"ts":"2026-06-30 18:10:35","step":"transferMoaToRequirements:delete_moa_row","data":{"moa_id":64,"ok":true}}
+{"ts":"2026-06-30 18:10:45","step":"ajax_update_moa_req_workflow:start","data":{"user_id":123,"stage":"reviewing","comment":"Hi","schedule":null}}
+{"ts":"2026-06-30 18:10:50","step":"sendMoaStageEmail:result","data":{"user_id":123,"stage":"reviewing","has_comment":true,"schedule":null,"ok":true}}
+{"ts":"2026-06-30 18:15:57","step":"ajax_moa_drawer_action:start","data":{"moa_id":65,"action":"accept"}}
+{"ts":"2026-06-30 18:15:57","step":"transferMoaToRequirements:start","data":{"user_id":123,"moa_id":65,"blob_length":404033,"filename":"moa_Riamae_s_PUBG_Training_Center_20260630.pdf"}}
+{"ts":"2026-06-30 18:15:57","step":"transferMoaToRequirements:insert","data":{"ok":true,"error":null}}
+{"ts":"2026-06-30 18:15:57","step":"saveMoaBlobToFolder:start","data":{"user_id":123,"filename":"moa_Riamae_s_PUBG_Training_Center_20260630.pdf","blob_length":404033}}
+{"ts":"2026-06-30 18:15:58","step":"saveMoaBlobToFolder:write","data":{"dest":"Company Folder\/Riamae_s_PUBG_Training_Center\/MOA_Document_verified_1782836158.pdf","written":404033}}
+{"ts":"2026-06-30 18:15:58","step":"transferMoaToRequirements:delete_moa_row","data":{"moa_id":65,"ok":true}}
+{"ts":"2026-06-30 18:16:06","step":"sendMoaStageEmail:result","data":{"user_id":123,"stage":"pending","has_comment":false,"schedule":null,"ok":true}}
+{"ts":"2026-06-30 18:20:23","step":"ajax_moa_drawer_action:start","data":{"moa_id":66,"action":"accept"}}
+{"ts":"2026-06-30 18:20:23","step":"transferMoaToRequirements:start","data":{"user_id":123,"moa_id":66,"blob_length":404033,"filename":"moa_Riamae_s_PUBG_Training_Center_20260630.pdf"}}
+{"ts":"2026-06-30 18:20:23","step":"transferMoaToRequirements:insert","data":{"ok":true,"error":null}}
+{"ts":"2026-06-30 18:20:23","step":"saveMoaBlobToFolder:start","data":{"user_id":123,"filename":"moa_Riamae_s_PUBG_Training_Center_20260630.pdf","blob_length":404033}}
+{"ts":"2026-06-30 18:20:23","step":"saveMoaBlobToFolder:write","data":{"dest":"Company Folder\/Riamae_s_PUBG_Training_Center\/MOA_Document_verified_1782836423.pdf","written":404033}}
+{"ts":"2026-06-30 18:20:24","step":"transferMoaToRequirements:delete_moa_row","data":{"moa_id":66,"ok":true}}
+{"ts":"2026-06-30 18:20:30","step":"sendMoaStageEmail:result","data":{"user_id":123,"stage":"pending","has_comment":false,"schedule":null,"ok":true}}
+{"ts":"2026-06-30 18:21:06","step":"ajax_update_moa_req_workflow:start","data":{"user_id":123,"stage":"reviewing","comment":"","schedule":null}}
+{"ts":"2026-06-30 18:21:11","step":"sendMoaStageEmail:result","data":{"user_id":123,"stage":"reviewing","has_comment":false,"schedule":null,"ok":true}}
+{"ts":"2026-06-30 18:21:17","step":"ajax_update_moa_req_workflow:start","data":{"user_id":123,"stage":"approved","comment":"","schedule":null}}
+{"ts":"2026-06-30 18:21:21","step":"sendMoaStageEmail:result","data":{"user_id":123,"stage":"approved","has_comment":false,"schedule":null,"ok":true}}
+{"ts":"2026-06-30 18:38:23","step":"ajax_update_moa_req_workflow:start","data":{"user_id":123,"stage":"scheduled","comment":"","schedule":"2026-07-02 09:00:00"}}
+{"ts":"2026-06-30 18:38:23","step":"ajax_update_moa_req_workflow:scheduled_verified","data":{"user_id":123,"overall":"Verified"}}
+{"ts":"2026-06-30 18:38:29","step":"sendMoaStageEmail:result","data":{"user_id":123,"stage":"scheduled","has_comment":false,"schedule":"2026-07-02 09:00:00","ok":true}}
+{"ts":"2026-07-01 10:41:39","step":"ajax_moa_drawer_action:start","data":{"moa_id":67,"action":"accept"}}
+{"ts":"2026-07-01 10:41:39","step":"transferMoaToRequirements:start","data":{"user_id":123,"moa_id":67,"blob_length":404408,"filename":"moa_Riamae_s_PUBG_Training_Center_20260701.pdf"}}
+{"ts":"2026-07-01 10:41:39","step":"transferMoaToRequirements:insert","data":{"ok":true,"error":null}}
+{"ts":"2026-07-01 10:41:39","step":"saveMoaBlobToFolder:start","data":{"user_id":123,"filename":"moa_Riamae_s_PUBG_Training_Center_20260701.pdf","blob_length":404408}}
+{"ts":"2026-07-01 10:41:39","step":"saveMoaBlobToFolder:write","data":{"dest":"Company Folder\/Riamae_s_PUBG_Training_Center\/MOA_Document_verified_1782895299.pdf","written":404408}}
+{"ts":"2026-07-01 10:41:39","step":"transferMoaToRequirements:delete_moa_row","data":{"moa_id":67,"ok":true}}
+{"ts":"2026-07-01 10:41:43","step":"sendMoaStageEmail:result","data":{"user_id":123,"stage":"pending","has_comment":false,"schedule":null,"ok":true}}
+{"ts":"2026-07-01 10:57:04","step":"ajax_update_moa_req_workflow:start","data":{"user_id":123,"stage":"reviewing","comment":"","schedule":null}}
+{"ts":"2026-07-01 10:57:08","step":"sendMoaStageEmail:result","data":{"user_id":123,"stage":"reviewing","has_comment":false,"schedule":null,"ok":true}}
+{"ts":"2026-07-01 11:17:02","step":"ajax_moa_drawer_action:start","data":{"moa_id":68,"action":"accept"}}
+{"ts":"2026-07-01 11:17:02","step":"transferMoaToRequirements:start","data":{"user_id":123,"moa_id":68,"blob_length":404408,"filename":"moa_Riamae_s_PUBG_Training_Center_20260701.pdf"}}
+{"ts":"2026-07-01 11:17:02","step":"transferMoaToRequirements:insert","data":{"ok":true,"error":null}}
+{"ts":"2026-07-01 11:17:02","step":"saveMoaBlobToFolder:start","data":{"user_id":123,"filename":"moa_Riamae_s_PUBG_Training_Center_20260701.pdf","blob_length":404408}}
+{"ts":"2026-07-01 11:17:02","step":"saveMoaBlobToFolder:write","data":{"dest":"Company Folder\/Riamae_s_PUBG_Training_Center\/MOA_Document_verified_1782897422.pdf","written":404408}}
+{"ts":"2026-07-01 11:17:02","step":"transferMoaToRequirements:delete_moa_row","data":{"moa_id":68,"ok":true}}
+{"ts":"2026-07-01 11:17:07","step":"sendMoaStageEmail:result","data":{"user_id":123,"stage":"pending","has_comment":false,"schedule":null,"ok":true}}
+{"ts":"2026-07-01 11:31:30","step":"ajax_moa_drawer_action:start","data":{"moa_id":69,"action":"accept"}}
+{"ts":"2026-07-01 11:31:30","step":"transferMoaToRequirements:start","data":{"user_id":123,"moa_id":69,"blob_length":404408,"filename":"moa_Riamae_s_PUBG_Training_Center_20260701.pdf"}}
+{"ts":"2026-07-01 11:31:30","step":"transferMoaToRequirements:insert","data":{"ok":true,"error":null}}
+{"ts":"2026-07-01 11:31:30","step":"saveMoaBlobToFolder:start","data":{"user_id":123,"filename":"moa_Riamae_s_PUBG_Training_Center_20260701.pdf","blob_length":404408}}
+{"ts":"2026-07-01 11:31:31","step":"saveMoaBlobToFolder:write","data":{"dest":"Company Folder\/Riamae_s_PUBG_Training_Center\/MOA_Document_verified_1782898290.pdf","written":404408}}
+{"ts":"2026-07-01 11:31:31","step":"transferMoaToRequirements:delete_moa_row","data":{"moa_id":69,"ok":true}}
+{"ts":"2026-07-01 11:31:35","step":"sendMoaStageEmail:result","data":{"user_id":123,"stage":"pending","has_comment":false,"schedule":null,"ok":true}}
+{"ts":"2026-07-01 11:46:25","step":"ajax_moa_drawer_action:start","data":{"moa_id":70,"action":"accept"}}
+{"ts":"2026-07-01 11:46:25","step":"transferMoaToRequirements:start","data":{"user_id":123,"moa_id":70,"blob_length":404408,"filename":"moa_Riamae_s_PUBG_Training_Center_20260701.pdf"}}
+{"ts":"2026-07-01 11:46:25","step":"transferMoaToRequirements:insert","data":{"ok":true,"error":null}}
+{"ts":"2026-07-01 11:46:25","step":"saveMoaBlobToFolder:start","data":{"user_id":123,"filename":"moa_Riamae_s_PUBG_Training_Center_20260701.pdf","blob_length":404408}}
+{"ts":"2026-07-01 11:46:25","step":"saveMoaBlobToFolder:write","data":{"dest":"Company Folder\/Riamae_s_PUBG_Training_Center\/MOA_Document_verified_1782899185.pdf","written":404408}}
+{"ts":"2026-07-01 11:46:25","step":"transferMoaToRequirements:delete_moa_row","data":{"moa_id":70,"ok":true}}
+{"ts":"2026-07-01 11:46:30","step":"sendMoaStageEmail:result","data":{"user_id":123,"stage":"pending","has_comment":false,"schedule":null,"ok":true}}
+{"ts":"2026-07-01 11:47:02","step":"ajax_update_moa_req_workflow:start","data":{"user_id":123,"stage":"reviewing","comment":"","schedule":null}}
+{"ts":"2026-07-01 11:47:06","step":"sendMoaStageEmail:result","data":{"user_id":123,"stage":"reviewing","has_comment":false,"schedule":null,"ok":true}}
+{"ts":"2026-07-02 17:15:30","step":"ajax_moa_drawer_action:start","data":{"moa_id":71,"action":"accept"}}
+{"ts":"2026-07-02 17:15:30","step":"transferMoaToRequirements:start","data":{"user_id":123,"moa_id":71,"blob_length":404408,"filename":"moa_Riamae_s_PUBG_Training_Center_20260702.pdf"}}
+{"ts":"2026-07-02 17:15:30","step":"transferMoaToRequirements:insert","data":{"ok":true,"error":null}}
+{"ts":"2026-07-02 17:15:30","step":"saveMoaBlobToFolder:start","data":{"user_id":123,"filename":"moa_Riamae_s_PUBG_Training_Center_20260702.pdf","blob_length":404408}}
+{"ts":"2026-07-02 17:15:30","step":"saveMoaBlobToFolder:write","data":{"dest":"Company Folder\/Riamae_s_PUBG_Training_Center\/MOA_Document_verified_1783005330.pdf","written":404408}}
+{"ts":"2026-07-02 17:15:30","step":"transferMoaToRequirements:delete_moa_row","data":{"moa_id":71,"ok":true}}
+{"ts":"2026-07-02 17:15:36","step":"sendMoaStageEmail:result","data":{"user_id":123,"stage":"pending","has_comment":false,"schedule":null,"ok":true}}
+{"ts":"2026-07-02 17:20:47","step":"ajax_moa_drawer_action:start","data":{"moa_id":72,"action":"accept"}}
+{"ts":"2026-07-02 17:20:47","step":"transferMoaToRequirements:start","data":{"user_id":123,"moa_id":72,"blob_length":404408,"filename":"moa_Riamae_s_PUBG_Training_Center_20260702.pdf"}}
+{"ts":"2026-07-02 17:20:47","step":"transferMoaToRequirements:insert","data":{"ok":true,"error":null}}
+{"ts":"2026-07-02 17:20:47","step":"saveMoaBlobToFolder:start","data":{"user_id":123,"filename":"moa_Riamae_s_PUBG_Training_Center_20260702.pdf","blob_length":404408}}
+{"ts":"2026-07-02 17:20:47","step":"saveMoaBlobToFolder:write","data":{"dest":"Company Folder\/Riamae_s_PUBG_Training_Center\/MOA_Document_verified_1783005647.pdf","written":404408}}
+{"ts":"2026-07-02 17:20:47","step":"transferMoaToRequirements:delete_moa_row","data":{"moa_id":72,"ok":true}}
+{"ts":"2026-07-02 17:20:52","step":"sendMoaStageEmail:result","data":{"user_id":123,"stage":"pending","has_comment":false,"schedule":null,"ok":true}}
+{"ts":"2026-07-02 17:23:46","step":"ajax_moa_drawer_action:start","data":{"moa_id":73,"action":"accept"}}
+{"ts":"2026-07-02 17:23:48","step":"transferMoaToRequirements:start","data":{"user_id":123,"moa_id":73,"blob_length":404408,"filename":"moa_Riamae_s_PUBG_Training_Center_20260702.pdf"}}
+{"ts":"2026-07-02 17:23:48","step":"transferMoaToRequirements:insert","data":{"ok":true,"error":null}}
+{"ts":"2026-07-02 17:23:48","step":"saveMoaBlobToFolder:start","data":{"user_id":123,"filename":"moa_Riamae_s_PUBG_Training_Center_20260702.pdf","blob_length":404408}}
+{"ts":"2026-07-02 17:23:48","step":"saveMoaBlobToFolder:write","data":{"dest":"Company Folder\/Riamae_s_PUBG_Training_Center\/MOA_Document_verified_1783005828.pdf","written":404408}}
+{"ts":"2026-07-02 17:23:48","step":"transferMoaToRequirements:delete_moa_row","data":{"moa_id":73,"ok":true}}
+{"ts":"2026-07-02 17:23:53","step":"sendMoaStageEmail:result","data":{"user_id":123,"stage":"pending","has_comment":false,"schedule":null,"ok":true}}
+{"ts":"2026-07-02 17:43:17","step":"ajax_moa_drawer_action:start","data":{"moa_id":74,"action":"accept"}}
+{"ts":"2026-07-02 17:43:18","step":"transferMoaToRequirements:start","data":{"user_id":123,"moa_id":74,"blob_length":404408,"filename":"moa_Riamae_s_PUBG_Training_Center_20260702.pdf"}}
+{"ts":"2026-07-02 17:43:18","step":"transferMoaToRequirements:insert","data":{"ok":true,"error":null}}
+{"ts":"2026-07-02 17:43:18","step":"saveMoaBlobToFolder:start","data":{"user_id":123,"filename":"moa_Riamae_s_PUBG_Training_Center_20260702.pdf","blob_length":404408}}
+{"ts":"2026-07-02 17:43:18","step":"saveMoaBlobToFolder:write","data":{"dest":"Company Folder\/Riamae_s_PUBG_Training_Center\/MOA_Document_verified_1783006998.pdf","written":404408}}
+{"ts":"2026-07-02 17:43:21","step":"transferMoaToRequirements:delete_moa_row","data":{"moa_id":74,"ok":true}}
+{"ts":"2026-07-02 17:43:57","step":"sendMoaStageEmail:result","data":{"user_id":123,"stage":"pending","has_comment":false,"schedule":null,"ok":false}}
+{"ts":"2026-07-02 17:48:17","step":"ajax_moa_drawer_action:start","data":{"moa_id":75,"action":"accept"}}
+{"ts":"2026-07-02 17:48:18","step":"transferMoaToRequirements:start","data":{"user_id":123,"moa_id":75,"blob_length":404408,"filename":"moa_Riamae_s_PUBG_Training_Center_20260702.pdf"}}
+{"ts":"2026-07-02 17:48:18","step":"transferMoaToRequirements:insert","data":{"ok":true,"error":null}}
+{"ts":"2026-07-02 17:48:18","step":"saveMoaBlobToFolder:start","data":{"user_id":123,"filename":"moa_Riamae_s_PUBG_Training_Center_20260702.pdf","blob_length":404408}}
+{"ts":"2026-07-02 17:48:18","step":"saveMoaBlobToFolder:write","data":{"dest":"Company Folder\/Riamae_s_PUBG_Training_Center\/MOA_Document_verified_1783007298.pdf","written":404408}}
+{"ts":"2026-07-02 17:48:18","step":"transferMoaToRequirements:delete_moa_row","data":{"moa_id":75,"ok":true}}
+{"ts":"2026-07-02 17:48:24","step":"sendMoaStageEmail:result","data":{"user_id":123,"stage":"pending","has_comment":false,"schedule":null,"ok":true}}
+{"ts":"2026-07-02 18:07:24","step":"ajax_moa_drawer_action:start","data":{"moa_id":76,"action":"accept"}}
+{"ts":"2026-07-02 18:07:24","step":"transferMoaToRequirements:start","data":{"user_id":123,"moa_id":76,"blob_length":404408,"filename":"moa_Riamae_s_PUBG_Training_Center_20260702.pdf"}}
+{"ts":"2026-07-02 18:07:24","step":"transferMoaToRequirements:insert","data":{"ok":true,"error":null}}
+{"ts":"2026-07-02 18:07:24","step":"saveMoaBlobToFolder:start","data":{"user_id":123,"filename":"moa_Riamae_s_PUBG_Training_Center_20260702.pdf","blob_length":404408}}
+{"ts":"2026-07-02 18:07:24","step":"saveMoaBlobToFolder:write","data":{"dest":"Company Folder\/Riamae_s_PUBG_Training_Center\/MOA_Document_verified_1783008444.pdf","written":404408}}
+{"ts":"2026-07-02 18:07:24","step":"transferMoaToRequirements:delete_moa_row","data":{"moa_id":76,"ok":true}}
+{"ts":"2026-07-02 18:07:29","step":"sendMoaStageEmail:result","data":{"user_id":123,"stage":"pending","has_comment":false,"schedule":null,"ok":true}}
+{"ts":"2026-07-02 18:11:27","step":"ajax_moa_drawer_action:start","data":{"moa_id":77,"action":"accept"}}
+{"ts":"2026-07-02 18:11:28","step":"transferMoaToRequirements:start","data":{"user_id":123,"moa_id":77,"blob_length":404408,"filename":"moa_Riamae_s_PUBG_Training_Center_20260702.pdf"}}
+{"ts":"2026-07-02 18:11:28","step":"transferMoaToRequirements:insert","data":{"ok":true,"error":null}}
+{"ts":"2026-07-02 18:11:28","step":"saveMoaBlobToFolder:start","data":{"user_id":123,"filename":"moa_Riamae_s_PUBG_Training_Center_20260702.pdf","blob_length":404408}}
+{"ts":"2026-07-02 18:11:28","step":"saveMoaBlobToFolder:write","data":{"dest":"Company Folder\/Riamae_s_PUBG_Training_Center\/MOA_Document_verified_1783008688.pdf","written":404408}}
+{"ts":"2026-07-02 18:11:28","step":"transferMoaToRequirements:delete_moa_row","data":{"moa_id":77,"ok":true}}
+{"ts":"2026-07-02 18:11:41","step":"sendMoaStageEmail:result","data":{"user_id":123,"stage":"pending","has_comment":false,"schedule":null,"ok":false}}
+{"ts":"2026-07-04 16:47:53","step":"ajax_moa_drawer_action:start","data":{"moa_id":83,"action":"accept"}}
+{"ts":"2026-07-04 16:47:53","step":"transferMoaToRequirements:start","data":{"user_id":123,"moa_id":83,"blob_length":404411,"filename":"moa_Riamea_s__PUBG_Training_Center_20260627-5.pdf"}}
+{"ts":"2026-07-04 16:48:11","step":"transferMoaToRequirements:insert","data":{"ok":true,"error":null}}
+{"ts":"2026-07-04 16:48:11","step":"saveMoaBlobToFolder:start","data":{"user_id":123,"filename":"moa_Riamea_s__PUBG_Training_Center_20260627-5.pdf","blob_length":404411}}
+{"ts":"2026-07-04 16:48:11","step":"saveMoaBlobToFolder:write","data":{"dest":"Company Folder\/Riamae_s_PUBG_Training_Center\/MOA_Document_verified_1783176491.pdf","written":404411}}
+{"ts":"2026-07-04 16:48:12","step":"transferMoaToRequirements:delete_moa_row","data":{"moa_id":83,"ok":true}}
+{"ts":"2026-07-04 16:48:22","step":"sendMoaStageEmail:result","data":{"user_id":123,"stage":"pending","has_comment":false,"schedule":null,"ok":true}}
+{"ts":"2026-07-04 16:48:49","step":"ajax_update_moa_req_workflow:start","data":{"user_id":123,"stage":"reviewing","comment":"hello?","schedule":null}}
+{"ts":"2026-07-04 16:48:53","step":"sendMoaStageEmail:result","data":{"user_id":123,"stage":"reviewing","has_comment":true,"schedule":null,"ok":true}}
+{"ts":"2026-07-04 17:19:58","step":"ajax_moa_drawer_action:start","data":{"moa_id":84,"action":"accept"}}
+{"ts":"2026-07-04 17:19:58","step":"transferMoaToRequirements:start","data":{"user_id":123,"moa_id":84,"blob_length":403643,"filename":"moa_JL_20260704.pdf"}}
+{"ts":"2026-07-04 17:19:58","step":"transferMoaToRequirements:insert","data":{"ok":true,"error":null}}
+{"ts":"2026-07-04 17:19:58","step":"saveMoaBlobToFolder:start","data":{"user_id":123,"filename":"moa_JL_20260704.pdf","blob_length":403643}}
+{"ts":"2026-07-04 17:19:58","step":"saveMoaBlobToFolder:mkdir","data":{"result":true}}
+{"ts":"2026-07-04 17:19:58","step":"saveMoaBlobToFolder:write","data":{"dest":"Company Folder\/JL\/MOA_Document_verified_1783178398.pdf","written":403643}}
+{"ts":"2026-07-04 17:19:58","step":"transferMoaToRequirements:delete_moa_row","data":{"moa_id":84,"ok":true}}
+{"ts":"2026-07-04 17:20:06","step":"sendMoaStageEmail:result","data":{"user_id":123,"stage":"pending","has_comment":false,"schedule":null,"ok":true}}
+{"ts":"2026-07-04 17:26:36","step":"ajax_moa_drawer_action:start","data":{"moa_id":85,"action":"accept"}}
+{"ts":"2026-07-04 17:26:36","step":"transferMoaToRequirements:start","data":{"user_id":123,"moa_id":85,"blob_length":768185,"filename":"Memorandum-of-Agreement-Generic (NEW).docx.pdf"}}
+{"ts":"2026-07-04 17:26:36","step":"transferMoaToRequirements:insert","data":{"ok":true,"error":null}}
+{"ts":"2026-07-04 17:26:36","step":"saveMoaBlobToFolder:start","data":{"user_id":123,"filename":"Memorandum-of-Agreement-Generic (NEW).docx.pdf","blob_length":768185}}
+{"ts":"2026-07-04 17:26:36","step":"saveMoaBlobToFolder:write","data":{"dest":"Company Folder\/JL\/MOA_Document_verified_1783178796.pdf","written":768185}}
+{"ts":"2026-07-04 17:26:36","step":"transferMoaToRequirements:delete_moa_row","data":{"moa_id":85,"ok":true}}
+{"ts":"2026-07-04 17:26:41","step":"sendMoaStageEmail:result","data":{"user_id":123,"stage":"pending","has_comment":false,"schedule":null,"ok":true}}
+{"ts":"2026-07-04 17:30:05","step":"ajax_moa_drawer_action:start","data":{"moa_id":86,"action":"accept"}}
+{"ts":"2026-07-04 17:30:05","step":"transferMoaToRequirements:start","data":{"user_id":123,"moa_id":86,"blob_length":275033,"filename":"Mi Mi Marinas_PerformanceEvaluation (2).pdf"}}
+{"ts":"2026-07-04 17:30:05","step":"transferMoaToRequirements:insert","data":{"ok":true,"error":null}}
+{"ts":"2026-07-04 17:30:05","step":"saveMoaBlobToFolder:start","data":{"user_id":123,"filename":"Mi Mi Marinas_PerformanceEvaluation (2).pdf","blob_length":275033}}
+{"ts":"2026-07-04 17:30:05","step":"saveMoaBlobToFolder:write","data":{"dest":"Company Folder\/JL\/MOA_Document_verified_1783179005.pdf","written":275033}}
+{"ts":"2026-07-04 17:30:05","step":"transferMoaToRequirements:delete_moa_row","data":{"moa_id":86,"ok":true}}
+{"ts":"2026-07-04 17:30:10","step":"sendMoaStageEmail:result","data":{"user_id":123,"stage":"pending","has_comment":false,"schedule":null,"ok":true}}
+{"ts":"2026-07-06 16:52:25","step":"ajax_moa_drawer_action:start","data":{"moa_id":88,"action":"accept"}}
+{"ts":"2026-07-06 16:52:25","step":"transferMoaToRequirements:start","data":{"user_id":123,"moa_id":88,"blob_length":470404,"filename":"john lhoyd santos sales - Accomplishment Form (10).pdf"}}
+{"ts":"2026-07-06 16:52:25","step":"transferMoaToRequirements:insert","data":{"ok":true,"error":null}}
+{"ts":"2026-07-06 16:52:25","step":"saveMoaBlobToFolder:start","data":{"user_id":123,"filename":"john lhoyd santos sales - Accomplishment Form (10).pdf","blob_length":470404}}
+{"ts":"2026-07-06 16:52:25","step":"saveMoaBlobToFolder:write","data":{"dest":"Company Folder\/Riamae_s_PUBG_Training_Center\/MOA_Document_verified_1783349545.pdf","written":470404}}
+{"ts":"2026-07-06 16:52:26","step":"transferMoaToRequirements:delete_moa_row","data":{"moa_id":88,"ok":true}}
+{"ts":"2026-07-06 16:52:32","step":"sendMoaStageEmail:result","data":{"user_id":123,"stage":"pending","has_comment":false,"schedule":null,"ok":true}}
+{"ts":"2026-07-06 16:52:41","step":"ajax_update_moa_req_workflow:start","data":{"user_id":123,"stage":"reviewing","comment":"","schedule":null}}
+{"ts":"2026-07-06 16:52:52","step":"sendMoaStageEmail:result","data":{"user_id":123,"stage":"reviewing","has_comment":false,"schedule":null,"ok":true}}
+{"ts":"2026-07-06 16:54:30","step":"ajax_update_moa_req_workflow:start","data":{"user_id":123,"stage":"approved","comment":"","schedule":null}}
+{"ts":"2026-07-06 16:54:35","step":"sendMoaStageEmail:result","data":{"user_id":123,"stage":"approved","has_comment":false,"schedule":null,"ok":true}}
+{"ts":"2026-07-06 17:06:38","step":"ajax_update_moa_req_workflow:start","data":{"user_id":123,"stage":"scheduled","comment":"","schedule":"2026-07-07 09:00:00"}}
+{"ts":"2026-07-06 17:06:38","step":"ajax_update_moa_req_workflow:scheduled_verified","data":{"user_id":123,"overall":"Verified"}}
+{"ts":"2026-07-06 17:06:43","step":"sendMoaStageEmail:result","data":{"user_id":123,"stage":"scheduled","has_comment":false,"schedule":"2026-07-07 09:00:00","ok":true}}
+{"ts":"2026-07-06 17:19:46","step":"ajax_moa_drawer_action:start","data":{"moa_id":89,"action":"accept"}}
+{"ts":"2026-07-06 17:19:46","step":"transferMoaToRequirements:start","data":{"user_id":123,"moa_id":89,"blob_length":180462,"filename":"Example.pdf"}}
+{"ts":"2026-07-06 17:19:46","step":"transferMoaToRequirements:insert","data":{"ok":true,"error":null}}
+{"ts":"2026-07-06 17:19:46","step":"saveMoaBlobToFolder:start","data":{"user_id":123,"filename":"Example.pdf","blob_length":180462}}
+{"ts":"2026-07-06 17:19:46","step":"saveMoaBlobToFolder:write","data":{"dest":"Company Folder\/Riamae_s_PUBG_Training_Center\/MOA_Document_verified_1783351186.pdf","written":180462}}
+{"ts":"2026-07-06 17:19:46","step":"transferMoaToRequirements:delete_moa_row","data":{"moa_id":89,"ok":true}}
+{"ts":"2026-07-06 17:19:52","step":"sendMoaStageEmail:result","data":{"user_id":123,"stage":"pending","has_comment":false,"schedule":null,"ok":true}}
+{"ts":"2026-07-07 16:45:37","step":"ajax_moa_drawer_action:start","data":{"moa_id":90,"action":"accept"}}
+{"ts":"2026-07-07 16:45:37","step":"transferMoaToRequirements:start","data":{"user_id":123,"moa_id":90,"blob_length":404856,"filename":"moa_Riamae_s_PUBG_Training_Center_20260707.pdf"}}
+{"ts":"2026-07-07 16:45:37","step":"transferMoaToRequirements:insert","data":{"ok":true,"error":null}}
+{"ts":"2026-07-07 16:45:37","step":"saveMoaBlobToFolder:start","data":{"user_id":123,"filename":"moa_Riamae_s_PUBG_Training_Center_20260707.pdf","blob_length":404856}}
+{"ts":"2026-07-07 16:45:37","step":"saveMoaBlobToFolder:write","data":{"dest":"Company Folder\/Riamae_s_PUBG_Training_Center\/MOA_Document_verified_1783435537.pdf","written":404856}}
+{"ts":"2026-07-07 16:45:37","step":"transferMoaToRequirements:delete_moa_row","data":{"moa_id":90,"ok":true}}
+{"ts":"2026-07-07 16:45:44","step":"sendMoaStageEmail:result","data":{"user_id":123,"stage":"pending","has_comment":false,"schedule":null,"ok":true}}
+{"ts":"2026-07-07 16:45:49","step":"ajax_update_moa_req_workflow:start","data":{"user_id":123,"stage":"reviewing","comment":"","schedule":null}}
+{"ts":"2026-07-07 16:45:54","step":"sendMoaStageEmail:result","data":{"user_id":123,"stage":"reviewing","has_comment":false,"schedule":null,"ok":true}}
+{"ts":"2026-07-07 16:46:02","step":"ajax_update_moa_req_workflow:start","data":{"user_id":123,"stage":"approved","comment":"","schedule":null}}
+{"ts":"2026-07-07 16:46:06","step":"sendMoaStageEmail:result","data":{"user_id":123,"stage":"approved","has_comment":false,"schedule":null,"ok":true}}
+{"ts":"2026-07-07 16:46:30","step":"ajax_update_moa_req_workflow:start","data":{"user_id":123,"stage":"scheduled","comment":"","schedule":"2026-07-14 10:00:00"}}
+{"ts":"2026-07-07 16:46:30","step":"ajax_update_moa_req_workflow:scheduled_set","data":{"user_id":123,"overall":"Pending","schedule":"2026-07-14 10:00:00"}}
+{"ts":"2026-07-07 16:46:34","step":"sendMoaStageEmail:result","data":{"user_id":123,"stage":"scheduled","has_comment":false,"schedule":"2026-07-14 10:00:00","ok":true}}
+{"ts":"2026-07-07 16:48:56","step":"ajax_update_moa_req_workflow:start","data":{"user_id":123,"stage":"scheduled","comment":"","schedule":"2026-07-08 14:00:00"}}
+{"ts":"2026-07-07 16:48:56","step":"ajax_update_moa_req_workflow:scheduled_set","data":{"user_id":123,"overall":"Pending","schedule":"2026-07-08 14:00:00"}}
+{"ts":"2026-07-07 16:49:00","step":"sendMoaStageEmail:result","data":{"user_id":123,"stage":"scheduled","has_comment":false,"schedule":"2026-07-08 14:00:00","ok":true}}
+{"ts":"2026-07-22 09:36:41","step":"ajax_moa_drawer_action:start","data":{"moa_id":92,"action":"reject"}}
+{"ts":"2026-07-22 09:36:54","step":"ajax_moa_drawer_action:start","data":{"moa_id":93,"action":"accept"}}
+{"ts":"2026-07-22 09:36:54","step":"transferMoaToRequirements:start","data":{"user_id":88,"moa_id":93,"blob_length":403765,"filename":"moa_Salon_20260722.pdf"}}
+{"ts":"2026-07-22 09:36:54","step":"transferMoaToRequirements:insert","data":{"ok":true,"error":null}}
+{"ts":"2026-07-22 09:36:54","step":"saveMoaBlobToFolder:start","data":{"user_id":88,"filename":"moa_Salon_20260722.pdf","blob_length":403765}}
+{"ts":"2026-07-22 09:36:54","step":"saveMoaBlobToFolder:mkdir","data":{"result":true}}
+{"ts":"2026-07-22 09:36:54","step":"saveMoaBlobToFolder:write","data":{"dest":"Company Folder\/Salon\/MOA_Document_verified_1784705814.pdf","written":403765}}
+{"ts":"2026-07-22 09:36:54","step":"transferMoaToRequirements:delete_moa_row","data":{"moa_id":93,"ok":true}}
+{"ts":"2026-07-22 09:36:54","step":"sendMoaStageEmail:result","data":{"user_id":88,"stage":"pending","has_comment":false,"schedule":null,"ok":false}}
+{"ts":"2026-07-22 09:37:34","step":"ajax_update_moa_req_workflow:start","data":{"user_id":88,"stage":"reviewing","comment":"asvasdbasjsdj","schedule":null}}
+{"ts":"2026-07-22 09:37:34","step":"sendMoaStageEmail:result","data":{"user_id":88,"stage":"reviewing","has_comment":true,"schedule":null,"ok":false}}
+{"ts":"2026-07-22 09:37:46","step":"ajax_update_moa_req_workflow:start","data":{"user_id":88,"stage":"approved","comment":"","schedule":null}}
+{"ts":"2026-07-22 09:37:46","step":"sendMoaStageEmail:result","data":{"user_id":88,"stage":"approved","has_comment":false,"schedule":null,"ok":false}}
+{"ts":"2026-07-22 09:38:03","step":"ajax_update_moa_req_workflow:start","data":{"user_id":88,"stage":"scheduled","comment":"","schedule":"2026-07-23 14:00:00"}}
+{"ts":"2026-07-22 09:38:03","step":"ajax_update_moa_req_workflow:scheduled_set","data":{"user_id":88,"overall":"Pending","schedule":"2026-07-23 14:00:00"}}
+{"ts":"2026-07-22 09:38:03","step":"sendMoaStageEmail:result","data":{"user_id":88,"stage":"scheduled","has_comment":false,"schedule":"2026-07-23 14:00:00","ok":false}}
+{"ts":"2026-07-24 11:57:52","step":"ajax_moa_mark_done:start","data":{"user_id":88}}
+{"ts":"2026-07-24 11:57:52","step":"ajax_moa_mark_done:verified","data":{"user_id":88,"overall":"Verified"}}
+{"ts":"2026-07-24 12:06:53","step":"ajax_moa_drawer_action:start","data":{"moa_id":94,"action":"accept"}}
+{"ts":"2026-07-24 12:06:53","step":"transferMoaToRequirements:start","data":{"user_id":123,"moa_id":94,"blob_length":404411,"filename":"moa_Riamea_s__PUBG_Training_Center_20260627.pdf"}}
+{"ts":"2026-07-24 12:06:53","step":"transferMoaToRequirements:insert","data":{"ok":true,"error":null}}
+{"ts":"2026-07-24 12:06:53","step":"saveMoaBlobToFolder:start","data":{"user_id":123,"filename":"moa_Riamea_s__PUBG_Training_Center_20260627.pdf","blob_length":404411}}
+{"ts":"2026-07-24 12:06:53","step":"saveMoaBlobToFolder:write","data":{"dest":"Company Folder\/Riamae_s_PUBG_Training_Center\/MOA_Document_verified_1784887613.pdf","written":404411}}
+{"ts":"2026-07-24 12:06:53","step":"transferMoaToRequirements:delete_moa_row","data":{"moa_id":94,"ok":true}}
+{"ts":"2026-07-24 12:06:58","step":"sendMoaStageEmail:result","data":{"user_id":123,"stage":"pending","has_comment":false,"schedule":null,"ok":true}}
+{"ts":"2026-07-24 12:07:15","step":"ajax_update_moa_req_workflow:start","data":{"user_id":123,"stage":"reviewing","comment":"","schedule":null}}
+{"ts":"2026-07-24 12:07:19","step":"sendMoaStageEmail:result","data":{"user_id":123,"stage":"reviewing","has_comment":false,"schedule":null,"ok":true}}
+{"ts":"2026-07-24 12:07:20","step":"ajax_update_moa_req_workflow:start","data":{"user_id":123,"stage":"approved","comment":"","schedule":null}}
+{"ts":"2026-07-24 12:07:25","step":"sendMoaStageEmail:result","data":{"user_id":123,"stage":"approved","has_comment":false,"schedule":null,"ok":true}}
+{"ts":"2026-07-24 12:07:32","step":"ajax_update_moa_req_workflow:start","data":{"user_id":123,"stage":"scheduled","comment":"","schedule":"2026-07-25 14:00:00"}}
+{"ts":"2026-07-24 12:07:32","step":"ajax_update_moa_req_workflow:scheduled_set","data":{"user_id":123,"overall":"Pending","schedule":"2026-07-25 14:00:00"}}
+{"ts":"2026-07-24 12:07:37","step":"sendMoaStageEmail:result","data":{"user_id":123,"stage":"scheduled","has_comment":false,"schedule":"2026-07-25 14:00:00","ok":true}}
+{"ts":"2026-07-24 12:07:39","step":"ajax_moa_mark_done:start","data":{"user_id":123}}
+{"ts":"2026-07-24 12:07:39","step":"ajax_moa_mark_done:verified","data":{"user_id":123,"overall":"Verified"}}
+{"ts":"2026-07-24 13:00:34","step":"ajax_moa_reject_send:start","data":{"moa_id":95}}
+{"ts":"2026-07-24 13:00:36","step":"sendMoaRejectionEmailWithAttachment:result","data":{"to":"alloyds.sales@gmail.com","has_attachment":true,"sent":false}}
+{"ts":"2026-07-24 13:00:36","step":"ajax_moa_reject_send:mail_result","data":{"moa_id":95,"to":"alloyds.sales@gmail.com","sent":false}}
+{"ts":"2026-07-24 13:00:47","step":"ajax_moa_reject_send:start","data":{"moa_id":95}}
+{"ts":"2026-07-24 13:00:49","step":"sendMoaRejectionEmailWithAttachment:result","data":{"to":"alloyds.sales@gmail.com","has_attachment":true,"sent":false}}
+{"ts":"2026-07-24 13:00:49","step":"ajax_moa_reject_send:mail_result","data":{"moa_id":95,"to":"alloyds.sales@gmail.com","sent":false}}
+{"ts":"2026-07-24 13:09:24","step":"ajax_moa_drawer_action:start","data":{"moa_id":95,"action":"accept"}}
+{"ts":"2026-07-24 13:09:24","step":"transferMoaToRequirements:start","data":{"user_id":123,"moa_id":95,"blob_length":404410,"filename":"moa_Riamae_s_PUBG_Training_Center_20260724.pdf"}}
+{"ts":"2026-07-24 13:09:24","step":"transferMoaToRequirements:insert","data":{"ok":true,"error":null}}
+{"ts":"2026-07-24 13:09:24","step":"saveMoaBlobToFolder:start","data":{"user_id":123,"filename":"moa_Riamae_s_PUBG_Training_Center_20260724.pdf","blob_length":404410}}
+{"ts":"2026-07-24 13:09:24","step":"saveMoaBlobToFolder:write","data":{"dest":"Company Folder\/Riamae_s_PUBG_Training_Center\/MOA_Document_verified_1784891364.pdf","written":404410}}
+{"ts":"2026-07-24 13:09:24","step":"transferMoaToRequirements:delete_moa_row","data":{"moa_id":95,"ok":true}}
+{"ts":"2026-07-24 13:09:30","step":"sendMoaStageEmail:result","data":{"user_id":123,"stage":"pending","has_comment":false,"schedule":null,"ok":true}}
+{"ts":"2026-07-24 13:18:39","step":"ajax_moa_reject_send:start","data":{"moa_id":96,"comment_length":247}}
+{"ts":"2026-07-24 13:18:39","step":"ajax_moa_reject_send:moa_row_fetched","data":{"moa_id":96,"user_id":123,"company":"Riamae's PUBG Training Center","has_pdf":true,"pdf_bytes":404404}}
+{"ts":"2026-07-24 13:18:39","step":"sendMoaRejectionEmailWithAttachment:pre_send","data":{"to":"alloyds.sales@gmail.com","subject":"Update on Your MOA Request - Riamae's PUBG Training Center","message_bytes":554747,"has_attachment":true,"attachment_bytes":404404,"ini_sendmail_path":"","ini_SMTP":"localhost","ini_smtp_port":"25","php_mail_function_exists":true}}
+{"ts":"2026-07-24 13:18:41","step":"sendMoaRejectionEmailWithAttachment:result","data":{"to":"alloyds.sales@gmail.com","has_attachment":true,"sent":false,"php_warning":"mail(): Failed to connect to mailserver at &quot;localhost&quot; port 25, verify your &quot;SMTP&quot; and &quot;smtp_port&quot; setting in php.ini or use ini_set()"}}
+{"ts":"2026-07-24 13:18:41","step":"ajax_moa_reject_send:mail_result","data":{"moa_id":96,"to":"alloyds.sales@gmail.com","sent":false,"debug":{"error":"PHP mail() reported: mail(): Failed to connect to mailserver at &quot;localhost&quot; port 25, verify your &quot;SMTP&quot; and &quot;smtp_port&quot; setting in php.ini or use ini_set()"}}}
+{"ts":"2026-07-25 08:09:29","step":"ajax_moa_reject_send:start","data":{"moa_id":96,"comment_length":247}}
+{"ts":"2026-07-25 08:09:29","step":"ajax_moa_reject_send:moa_row_fetched","data":{"moa_id":96,"user_id":123,"company":"Riamae's PUBG Training Center","has_pdf":true,"pdf_bytes":404404}}
+{"ts":"2026-07-25 08:09:29","step":"sendMoaRejectionEmailWithAttachment:pre_send","data":{"to":"alloyds.sales@gmail.com","subject":"Update on Your MOA Request - Riamae's PUBG Training Center","message_bytes":554747,"has_attachment":true,"attachment_bytes":404404,"ini_sendmail_path":"","ini_SMTP":"localhost","ini_smtp_port":"25","php_mail_function_exists":true}}
+{"ts":"2026-07-25 08:09:31","step":"sendMoaRejectionEmailWithAttachment:result","data":{"to":"alloyds.sales@gmail.com","has_attachment":true,"sent":false,"php_warning":"mail(): Failed to connect to mailserver at &quot;localhost&quot; port 25, verify your &quot;SMTP&quot; and &quot;smtp_port&quot; setting in php.ini or use ini_set()"}}
+{"ts":"2026-07-25 08:09:31","step":"ajax_moa_reject_send:mail_result","data":{"moa_id":96,"to":"alloyds.sales@gmail.com","sent":false,"debug":{"error":"PHP mail() reported: mail(): Failed to connect to mailserver at &quot;localhost&quot; port 25, verify your &quot;SMTP&quot; and &quot;smtp_port&quot; setting in php.ini or use ini_set()"}}}
+{"ts":"2026-07-25 08:55:28","step":"ajax_moa_reject_send:start","data":{"moa_id":96,"comment_length":247,"flags":["company_name","company_address"]}}
+{"ts":"2026-07-25 08:55:28","step":"ajax_moa_reject_send:moa_row_fetched","data":{"moa_id":96,"user_id":123,"company":"Riamae's PUBG Training Center","has_pdf":true,"pdf_bytes":404404}}
+{"ts":"2026-07-25 08:55:28","step":"sendMoaRejectionEmailWithAttachment:pre_send","data":{"to":"alloyds.sales@gmail.com","subject":"Update on Your MOA Request - Riamae's PUBG Training Center","message_bytes":554814,"has_attachment":true,"attachment_bytes":404404,"flagged_labels":["Company Name","Company Address"],"ini_sendmail_path":"","ini_SMTP":"localhost","ini_smtp_port":"25","php_mail_function_exists":true}}
+{"ts":"2026-07-25 08:55:30","step":"sendMoaRejectionEmailWithAttachment:result","data":{"to":"alloyds.sales@gmail.com","has_attachment":true,"sent":false,"php_warning":"mail(): Failed to connect to mailserver at &quot;localhost&quot; port 25, verify your &quot;SMTP&quot; and &quot;smtp_port&quot; setting in php.ini or use ini_set()"}}
+{"ts":"2026-07-25 08:55:30","step":"ajax_moa_reject_send:mail_result","data":{"moa_id":96,"to":"alloyds.sales@gmail.com","sent":false,"debug":{"error":"PHP mail() reported: mail(): Failed to connect to mailserver at &quot;localhost&quot; port 25, verify your &quot;SMTP&quot; and &quot;smtp_port&quot; setting in php.ini or use ini_set()"}}}
+{"ts":"2026-07-25 09:08:59","step":"ajax_moa_reject_send:start","data":{"moa_id":96,"comment_length":247,"flags":["company_name","company_address","contact_first_name","contact_last_name"]}}
+{"ts":"2026-07-25 09:08:59","step":"ajax_moa_reject_send:moa_row_fetched","data":{"moa_id":96,"user_id":123,"company":"Riamae's PUBG Training Center","has_pdf":true,"pdf_bytes":404404}}
+{"ts":"2026-07-25 09:08:59","step":"sendMoaRejectionEmailWithAttachment:pre_send","data":{"to":"alloyds.sales@gmail.com","subject":"Update on Your MOA Request - Riamae's PUBG Training Center","body_bytes":1054,"has_attachment":true,"attachment_bytes":404404,"flagged_labels":["Company Name","Company Address","Contact First Name","Contact Last Name"],"transport":"PHPMailer SMTP (smtp.gmail.com:587 STARTTLS)"}}
+{"ts":"2026-07-25 09:09:08","step":"sendMoaRejectionEmailWithAttachment:result","data":{"to":"alloyds.sales@gmail.com","has_attachment":true,"sent":true}}
+{"ts":"2026-07-25 09:09:08","step":"ajax_moa_reject_send:mail_result","data":{"moa_id":96,"to":"alloyds.sales@gmail.com","sent":true,"debug":[]}}
+{"ts":"2026-07-25 09:09:08","step":"ajax_moa_reject_send:exception","data":{"moa_id":96,"message":"Call to undefined function buildRecreatedMoaRequestRow()","trace":"#0 {main}"}}
+{"ts":"2026-07-25 09:26:56","step":"ajax_moa_reject_send:start","data":{"moa_id":96,"comment_length":16,"flags":["company_name","company_address"]}}
+{"ts":"2026-07-25 09:26:56","step":"ajax_moa_reject_send:moa_row_fetched","data":{"moa_id":96,"user_id":123,"company":"Riamae's PUBG Training Center","has_pdf":true,"pdf_bytes":404404}}
+{"ts":"2026-07-25 09:26:56","step":"sendMoaRejectionEmailWithAttachment:pre_send","data":{"to":"alloyds.sales@gmail.com","subject":"Update on Your MOA Request - Riamae's PUBG Training Center","body_bytes":782,"has_attachment":true,"attachment_bytes":404404,"flagged_labels":["Company Name","Company Address"],"transport":"PHPMailer SMTP (smtp.gmail.com:587 STARTTLS)"}}
+{"ts":"2026-07-25 09:27:05","step":"sendMoaRejectionEmailWithAttachment:result","data":{"to":"alloyds.sales@gmail.com","has_attachment":true,"sent":true}}
+{"ts":"2026-07-25 09:27:05","step":"ajax_moa_reject_send:mail_result","data":{"moa_id":96,"to":"alloyds.sales@gmail.com","sent":true,"debug":[]}}
+{"ts":"2026-07-25 09:27:05","step":"buildRecreatedMoaRequestRow","data":{"flagged":["company_name","company_address"],"result":{"request_type":"new","company_name":"","company_profile":"The training center is committed to fostering discipline, teamwork, and sportsmanship while creating a supportive environment for learning and growth. Riamea's PUBG Training Center serves as a hub for gamers who aspire to improve their abilities, participate in esports tournaments, and pursue opportunities in professional gaming. By combining modern training methods with a passion for esports excellence, the center aims to help individuals reach their full potential both as players and as members of the gaming community.","company_address":"","telephone":"000000","position":"Training Officer","contact_first_name":"Heaven","contact_middle_name":"E","contact_last_name":"Marinas"}}}
+{"ts":"2026-07-25 09:27:05","step":"ajax_moa_reject_send:exception","data":{"moa_id":96,"message":"The number of elements in the type definition string must match the number of bind variables","trace":"#0 C:\\xampp\\htdocs\\phpmailer\\company_validation.php(792): mysqli_stmt->bind_param('issssssssssbsss', 123, 'new', '', 'The training ce...', '', '000000', 'Training Office...', 'Heaven', 'E', 'Marinas', 'Pending', 'pending', '%PDF-1.7\\n1 0 ob...', 'moa_Riamae_s_PU...', '[\"company_name\"...', 'Try, Test, Erro...')\n#1 {main}"}}
+{"ts":"2026-07-25 09:45:17","step":"ajax_moa_reject_send:start","data":{"moa_id":96,"comment_length":247,"flags":["company_name","contact_first_name"]}}
+{"ts":"2026-07-25 09:45:17","step":"ajax_moa_reject_send:moa_row_fetched","data":{"moa_id":96,"user_id":123,"company":"Riamae's PUBG Training Center","has_pdf":true,"pdf_bytes":404404}}
+{"ts":"2026-07-25 09:45:17","step":"sendMoaRejectionEmailWithAttachment:pre_send","data":{"to":"alloyds.sales@gmail.com","subject":"Update on Your MOA Request - Riamae's PUBG Training Center","body_bytes":1016,"has_attachment":true,"attachment_bytes":404404,"flagged_labels":["Company Name","Contact First Name"],"transport":"PHPMailer SMTP (smtp.gmail.com:587 STARTTLS)"}}
+{"ts":"2026-07-25 09:45:27","step":"sendMoaRejectionEmailWithAttachment:result","data":{"to":"alloyds.sales@gmail.com","has_attachment":true,"sent":true}}
+{"ts":"2026-07-25 09:45:27","step":"ajax_moa_reject_send:mail_result","data":{"moa_id":96,"to":"alloyds.sales@gmail.com","sent":true,"debug":[]}}
+{"ts":"2026-07-25 09:45:27","step":"buildRecreatedMoaRequestRow","data":{"flagged":["company_name","contact_first_name"],"result":{"request_type":"new","company_name":"","company_profile":"The training center is committed to fostering discipline, teamwork, and sportsmanship while creating a supportive environment for learning and growth. Riamea's PUBG Training Center serves as a hub for gamers who aspire to improve their abilities, participate in esports tournaments, and pursue opportunities in professional gaming. By combining modern training methods with a passion for esports excellence, the center aims to help individuals reach their full potential both as players and as members of the gaming community.","company_address":"245 Valor Avenue, Riverside Heights, New Metro City, Philippines 1100","telephone":"000000","position":"Training Officer","contact_first_name":"","contact_middle_name":"E","contact_last_name":"Marinas"}}}
+{"ts":"2026-07-25 09:45:27","step":"ajax_moa_reject_send:recreate_bind_check","data":{"moa_id":96,"type_string":"isssssssssssbsss","type_string_len":16,"variable_count":16,"match":true}}
+{"ts":"2026-07-25 09:45:27","step":"ajax_moa_reject_send:recreate_send_long_data","data":{"moa_id":96,"param_index":12,"blob_bytes":404404}}
+{"ts":"2026-07-25 09:45:27","step":"ajax_moa_reject_send:recreate_pre_execute","data":{"moa_id":96,"has_pdf_blob":true,"pdf_blob_bytes":404404}}
+{"ts":"2026-07-25 09:45:27","step":"ajax_moa_reject_send:recreated","data":{"old_moa_id":96,"new_moa_id":97,"ok":true,"error":null,"flags":["company_name","contact_first_name"]}}
+{"ts":"2026-07-25 09:45:27","step":"ajax_moa_reject_send:old_deleted","data":{"moa_id":96}}
+{"ts":"2026-07-25 16:06:46","step":"ajax_moa_reject_send:start","data":{"moa_id":97,"comment_length":15,"flags":["company_name","company_address","contact_first_name"]}}
+{"ts":"2026-07-25 16:06:46","step":"ajax_moa_reject_send:moa_row_fetched","data":{"moa_id":97,"user_id":123,"company":"","has_pdf":true,"pdf_bytes":404404}}
+{"ts":"2026-07-25 16:06:46","step":"sendMoaRejectionEmailWithAttachment:pre_send","data":{"to":"alloyds.sales@gmail.com","subject":"Update on Your MOA Request - ","body_bytes":773,"has_attachment":true,"attachment_bytes":404404,"flagged_labels":["Company Name","Company Address","Contact First Name"],"transport":"PHPMailer SMTP (smtp.gmail.com:587 STARTTLS)"}}
+{"ts":"2026-07-25 16:06:55","step":"sendMoaRejectionEmailWithAttachment:result","data":{"to":"alloyds.sales@gmail.com","has_attachment":true,"sent":true}}
+{"ts":"2026-07-25 16:06:55","step":"ajax_moa_reject_send:mail_result","data":{"moa_id":97,"to":"alloyds.sales@gmail.com","sent":true,"debug":[]}}
+{"ts":"2026-07-25 16:06:55","step":"buildRecreatedMoaRequestRow","data":{"flagged":["company_name","company_address","contact_first_name"],"result":{"request_type":"new","company_name":"","company_profile":"The training center is committed to fostering discipline, teamwork, and sportsmanship while creating a supportive environment for learning and growth. Riamea's PUBG Training Center serves as a hub for gamers who aspire to improve their abilities, participate in esports tournaments, and pursue opportunities in professional gaming. By combining modern training methods with a passion for esports excellence, the center aims to help individuals reach their full potential both as players and as members of the gaming community.","company_address":"","telephone":"000000","position":"Training Officer","contact_first_name":"","contact_middle_name":"E","contact_last_name":"Marinas"}}}
+{"ts":"2026-07-25 16:06:55","step":"ajax_moa_reject_send:recreate_bind_check","data":{"moa_id":97,"type_string":"isssssssssssbsss","type_string_len":16,"variable_count":16,"match":true}}
+{"ts":"2026-07-25 16:06:55","step":"ajax_moa_reject_send:recreate_send_long_data","data":{"moa_id":97,"param_index":12,"blob_bytes":404404}}
+{"ts":"2026-07-25 16:06:55","step":"ajax_moa_reject_send:recreate_pre_execute","data":{"moa_id":97,"has_pdf_blob":true,"pdf_blob_bytes":404404}}
+{"ts":"2026-07-25 16:06:55","step":"ajax_moa_reject_send:recreated","data":{"old_moa_id":97,"new_moa_id":98,"ok":true,"error":null,"flags":["company_name","company_address","contact_first_name"]}}
+{"ts":"2026-07-25 16:06:55","step":"ajax_moa_reject_send:old_deleted","data":{"moa_id":97}}
+{"ts":"2026-07-26 10:22:59","step":"ajax_moa_reject_send:start","data":{"moa_id":99,"comment_length":247,"flags":["company_name"]}}
+{"ts":"2026-07-26 10:22:59","step":"ajax_moa_reject_send:moa_row_fetched","data":{"moa_id":99,"user_id":123,"company":"Riamae's PUBG Training Center","has_pdf":true,"pdf_bytes":404410}}
+{"ts":"2026-07-26 10:22:59","step":"sendMoaRejectionEmailWithAttachment:pre_send","data":{"to":"alloyds.sales@gmail.com","subject":"Update on Your MOA Request - Riamae's PUBG Training Center","body_bytes":995,"has_attachment":true,"attachment_bytes":404410,"flagged_labels":["Company Name"],"transport":"PHPMailer SMTP (smtp.gmail.com:587 STARTTLS)"}}
+{"ts":"2026-07-26 10:23:08","step":"sendMoaRejectionEmailWithAttachment:result","data":{"to":"alloyds.sales@gmail.com","has_attachment":true,"sent":true}}
+{"ts":"2026-07-26 10:23:08","step":"ajax_moa_reject_send:mail_result","data":{"moa_id":99,"to":"alloyds.sales@gmail.com","sent":true,"debug":[]}}
+{"ts":"2026-07-26 10:23:08","step":"buildRecreatedMoaRequestRow","data":{"flagged":["company_name"],"result":{"request_type":"new","company_name":"","company_profile":"Riamea's PUBG Training Center is a premier esports training facility dedicated to developing skilled and competitive players in PUBG and other battle royale games. Established to support aspiring gamers, the center provides comprehensive training programs that focus on game mechanics, strategic planning, team coordination, communication, and competitive performance. Through guided coaching sessions and hands-on practice, trainees are equipped with the knowledge and skills needed to excel in the rapidly growing esports industry.","company_address":"245 Valor Avenue, Riverside Heights, New Metro City, Philippines 1100","telephone":"000000","position":"Training Officer","contact_first_name":"Heaven","contact_middle_name":"E","contact_last_name":"Marinas"}}}
+{"ts":"2026-07-26 10:23:08","step":"ajax_moa_reject_send:recreate_bind_check","data":{"moa_id":99,"type_string":"isssssssssssbsss","type_string_len":16,"variable_count":16,"match":true}}
+{"ts":"2026-07-26 10:23:08","step":"ajax_moa_reject_send:recreate_send_long_data","data":{"moa_id":99,"param_index":12,"blob_bytes":404410}}
+{"ts":"2026-07-26 10:23:08","step":"ajax_moa_reject_send:recreate_pre_execute","data":{"moa_id":99,"has_pdf_blob":true,"pdf_blob_bytes":404410}}
+{"ts":"2026-07-26 10:23:08","step":"ajax_moa_reject_send:recreated","data":{"old_moa_id":99,"new_moa_id":100,"ok":true,"error":null,"flags":["company_name"]}}
+{"ts":"2026-07-26 10:23:08","step":"ajax_moa_reject_send:old_deleted","data":{"moa_id":99}}
+{"ts":"2026-07-26 11:01:52","step":"ajax_moa_reject_send:start","data":{"moa_id":101,"comment_length":55,"flags":["company_name","company_profile","company_address","position","contact_last_name","telephone"]}}
+{"ts":"2026-07-26 11:01:52","step":"ajax_moa_reject_send:moa_row_fetched","data":{"moa_id":101,"user_id":123,"company":"Riamae's PUBG Training Center","has_pdf":true,"pdf_bytes":404076}}
+{"ts":"2026-07-26 11:01:53","step":"sendMoaRejectionEmailWithAttachment:pre_send","data":{"to":"alloyds.sales@gmail.com","subject":"Update on Your MOA Request - Riamae's PUBG Training Center","body_bytes":882,"has_attachment":true,"attachment_bytes":404076,"flagged_labels":["Company Name","Company Profile","Company Address","Position","Contact Last Name","Telephone"],"transport":"PHPMailer SMTP (smtp.gmail.com:587 STARTTLS)"}}
+{"ts":"2026-07-26 11:02:02","step":"sendMoaRejectionEmailWithAttachment:result","data":{"to":"alloyds.sales@gmail.com","has_attachment":true,"sent":true}}
+{"ts":"2026-07-26 11:02:02","step":"ajax_moa_reject_send:mail_result","data":{"moa_id":101,"to":"alloyds.sales@gmail.com","sent":true,"debug":[]}}
+{"ts":"2026-07-26 11:02:02","step":"buildRecreatedMoaRequestRow","data":{"flagged":["company_name","company_profile","company_address","position","contact_last_name","telephone"],"result":{"request_type":"new","company_name":"","company_profile":"","company_address":"","telephone":"","position":"","contact_first_name":"Heaven","contact_middle_name":"E","contact_last_name":""}}}
+{"ts":"2026-07-26 11:02:02","step":"ajax_moa_reject_send:recreate_bind_check","data":{"moa_id":101,"type_string":"isssssssssssbsss","type_string_len":16,"variable_count":16,"match":true}}
+{"ts":"2026-07-26 11:02:02","step":"ajax_moa_reject_send:recreate_send_long_data","data":{"moa_id":101,"param_index":12,"blob_bytes":404076}}
+{"ts":"2026-07-26 11:02:02","step":"ajax_moa_reject_send:recreate_pre_execute","data":{"moa_id":101,"has_pdf_blob":true,"pdf_blob_bytes":404076}}
+{"ts":"2026-07-26 11:02:02","step":"ajax_moa_reject_send:recreated","data":{"old_moa_id":101,"new_moa_id":102,"ok":true,"error":null,"flags":["company_name","company_profile","company_address","position","contact_last_name","telephone"]}}
+{"ts":"2026-07-26 11:02:02","step":"ajax_moa_reject_send:old_deleted","data":{"moa_id":101}}
+{"ts":"2026-07-26 16:06:25","step":"ajax_moa_reject_send:start","data":{"moa_id":103,"comment_length":35,"flags":["company_name","company_profile","company_address","position","contact_first_name","contact_middle_name","contact_last_name","telephone"]}}
+{"ts":"2026-07-26 16:06:25","step":"ajax_moa_reject_send:moa_row_fetched","data":{"moa_id":103,"user_id":123,"company":"Riamae's PUBG Training Center","has_pdf":true,"pdf_bytes":403924}}
+{"ts":"2026-07-26 16:06:25","step":"sendMoaRejectionEmailWithAttachment:pre_send","data":{"to":"alloyds.sales@gmail.com","subject":"Update on Your MOA Request - Riamae's PUBG Training Center","body_bytes":905,"has_attachment":true,"attachment_bytes":403924,"flagged_labels":["Company Name","Company Profile","Company Address","Position","Contact First Name","Contact Middle Name","Contact Last Name","Telephone"],"transport":"PHPMailer SMTP (smtp.gmail.com:587 STARTTLS)"}}
+{"ts":"2026-07-26 16:06:34","step":"sendMoaRejectionEmailWithAttachment:result","data":{"to":"alloyds.sales@gmail.com","has_attachment":true,"sent":true}}
+{"ts":"2026-07-26 16:06:34","step":"ajax_moa_reject_send:mail_result","data":{"moa_id":103,"to":"alloyds.sales@gmail.com","sent":true,"debug":[]}}
+{"ts":"2026-07-26 16:06:34","step":"ajax_moa_reject_send:marked_rejected","data":{"moa_id":103,"ok":true,"error":null,"flags":["company_name","company_profile","company_address","position","contact_first_name","contact_middle_name","contact_last_name","telephone"]}}
+{"ts":"2026-07-26 16:28:18","step":"ajax_moa_drawer_action:start","data":{"moa_id":103,"action":"accept"}}
+{"ts":"2026-07-26 16:28:18","step":"transferMoaToRequirements:start","data":{"user_id":123,"moa_id":103,"blob_length":403663,"filename":"moa_11111_20260726.pdf"}}
+{"ts":"2026-07-26 16:28:18","step":"transferMoaToRequirements:insert","data":{"ok":true,"error":null}}
+{"ts":"2026-07-26 16:28:18","step":"saveMoaBlobToFolder:start","data":{"user_id":123,"filename":"moa_11111_20260726.pdf","blob_length":403663}}
+{"ts":"2026-07-26 16:28:18","step":"saveMoaBlobToFolder:mkdir","data":{"result":true}}
+{"ts":"2026-07-26 16:28:18","step":"saveMoaBlobToFolder:write","data":{"dest":"Company Folder\/11111\/MOA_Document_verified_1785076098.pdf","written":403663}}
+{"ts":"2026-07-26 16:28:19","step":"transferMoaToRequirements:delete_moa_row","data":{"moa_id":103,"ok":true}}
+{"ts":"2026-07-26 16:28:25","step":"sendMoaStageEmail:result","data":{"user_id":123,"stage":"pending","has_comment":false,"schedule":null,"ok":true}}
+{"ts":"2026-07-26 16:31:09","step":"ajax_moa_reject_send:start","data":{"moa_id":104,"comment_length":5,"flags":["company_name","company_profile","company_address","position","contact_first_name","contact_middle_name","contact_last_name","telephone"]}}
+{"ts":"2026-07-26 16:31:09","step":"ajax_moa_reject_send:moa_row_fetched","data":{"moa_id":104,"user_id":123,"company":"Testing","has_pdf":true,"pdf_bytes":403635}}
+{"ts":"2026-07-26 16:31:09","step":"sendMoaRejectionEmailWithAttachment:pre_send","data":{"to":"alloyds.sales@gmail.com","subject":"Update on Your MOA Request - Testing","body_bytes":853,"has_attachment":true,"attachment_bytes":403635,"flagged_labels":["Company Name","Company Profile","Company Address","Position","Contact First Name","Contact Middle Name","Contact Last Name","Telephone"],"transport":"PHPMailer SMTP (smtp.gmail.com:587 STARTTLS)"}}
+{"ts":"2026-07-26 16:31:17","step":"sendMoaRejectionEmailWithAttachment:result","data":{"to":"alloyds.sales@gmail.com","has_attachment":true,"sent":true}}
+{"ts":"2026-07-26 16:31:17","step":"ajax_moa_reject_send:mail_result","data":{"moa_id":104,"to":"alloyds.sales@gmail.com","sent":true,"debug":[]}}
+{"ts":"2026-07-26 16:31:17","step":"ajax_moa_reject_send:marked_rejected","data":{"moa_id":104,"ok":true,"error":null,"flags":["company_name","company_profile","company_address","position","contact_first_name","contact_middle_name","contact_last_name","telephone"]}}
+{"ts":"2026-07-28 01:20:28","step":"ajax_moa_reject_send:start","data":{"moa_id":105,"comment_length":5,"flags":["company_address","contact_first_name","contact_last_name"]}}
+{"ts":"2026-07-28 01:20:29","step":"ajax_moa_reject_send:moa_row_fetched","data":{"moa_id":105,"user_id":123,"company":"Try","has_pdf":true,"pdf_bytes":273847}}
+{"ts":"2026-07-28 01:20:29","step":"sendMoaRejectionEmailWithAttachment:pre_send","data":{"to":"alloyds.sales@gmail.com","subject":"Update on Your MOA Request - Try","body_bytes":771,"has_attachment":true,"attachment_bytes":273847,"flagged_labels":["Company Address","Contact First Name","Contact Last Name"],"transport":"PHPMailer SMTP (smtp.gmail.com:587 STARTTLS)"}}
+{"ts":"2026-07-28 01:20:36","step":"sendMoaRejectionEmailWithAttachment:result","data":{"to":"alloyds.sales@gmail.com","has_attachment":true,"sent":true}}
+{"ts":"2026-07-28 01:20:36","step":"ajax_moa_reject_send:mail_result","data":{"moa_id":105,"to":"alloyds.sales@gmail.com","sent":true,"debug":[]}}
+{"ts":"2026-07-28 01:20:36","step":"ajax_moa_reject_send:marked_rejected","data":{"moa_id":105,"ok":true,"error":null,"flags":["company_address","contact_first_name","contact_last_name"]}}
+{"ts":"2026-07-28 01:34:46","step":"ajax_moa_reject_send:start","data":{"moa_id":105,"comment_length":3,"flags":["moa_document"]}}
+{"ts":"2026-07-28 01:34:46","step":"ajax_moa_reject_send:moa_row_fetched","data":{"moa_id":105,"user_id":123,"company":"Try","has_pdf":true,"pdf_bytes":273847}}
+{"ts":"2026-07-28 01:34:46","step":"sendMoaRejectionEmailWithAttachment:pre_send","data":{"to":"alloyds.sales@gmail.com","subject":"Update on Your MOA Request - Try","body_bytes":734,"has_attachment":true,"attachment_bytes":273847,"flagged_labels":["Uploaded MOA Document"],"transport":"PHPMailer SMTP (smtp.gmail.com:587 STARTTLS)"}}
+{"ts":"2026-07-28 01:34:54","step":"sendMoaRejectionEmailWithAttachment:result","data":{"to":"alloyds.sales@gmail.com","has_attachment":true,"sent":true}}
+{"ts":"2026-07-28 01:34:54","step":"ajax_moa_reject_send:mail_result","data":{"moa_id":105,"to":"alloyds.sales@gmail.com","sent":true,"debug":[]}}
+{"ts":"2026-07-28 01:34:54","step":"ajax_moa_reject_send:marked_rejected","data":{"moa_id":105,"ok":true,"error":null,"flags":["moa_document"]}}
+{"ts":"2026-07-28 01:57:53","step":"ajax_moa_reject_send:start","data":{"moa_id":105,"comment_length":5,"flags":["company_name","company_profile","company_address","position","contact_first_name","contact_middle_name","contact_last_name","telephone","moa_document"]}}
+{"ts":"2026-07-28 01:57:53","step":"ajax_moa_reject_send:moa_row_fetched","data":{"moa_id":105,"user_id":123,"company":"Try","has_pdf":true,"pdf_bytes":768185}}
+{"ts":"2026-07-28 01:57:53","step":"sendMoaRejectionEmailWithAttachment:pre_send","data":{"to":"alloyds.sales@gmail.com","subject":"Update on Your MOA Request - Try","body_bytes":873,"has_attachment":true,"attachment_bytes":768185,"flagged_labels":["Company Name","Company Profile","Company Address","Position","Contact First Name","Contact Middle Name","Contact Last Name","Telephone","Uploaded MOA Document"],"transport":"PHPMailer SMTP (smtp.gmail.com:587 STARTTLS)"}}
+{"ts":"2026-07-28 01:58:03","step":"sendMoaRejectionEmailWithAttachment:result","data":{"to":"alloyds.sales@gmail.com","has_attachment":true,"sent":true}}
+{"ts":"2026-07-28 01:58:03","step":"ajax_moa_reject_send:mail_result","data":{"moa_id":105,"to":"alloyds.sales@gmail.com","sent":true,"debug":[]}}
+{"ts":"2026-07-28 01:58:03","step":"ajax_moa_reject_send:marked_rejected","data":{"moa_id":105,"ok":true,"error":null,"flags":["company_name","company_profile","company_address","position","contact_first_name","contact_middle_name","contact_last_name","telephone","moa_document"]}}
+{"ts":"2026-07-28 02:03:09","step":"ajax_moa_reject_send:start","data":{"moa_id":105,"comment_length":5,"flags":["moa_document"]}}
+{"ts":"2026-07-28 02:03:09","step":"ajax_moa_reject_send:moa_row_fetched","data":{"moa_id":105,"user_id":123,"company":"Try","has_pdf":true,"pdf_bytes":768185}}
+{"ts":"2026-07-28 02:03:09","step":"sendMoaRejectionEmailWithAttachment:pre_send","data":{"to":"alloyds.sales@gmail.com","subject":"Update on Your MOA Request - Try","body_bytes":736,"has_attachment":true,"attachment_bytes":768185,"flagged_labels":["Uploaded MOA Document"],"transport":"PHPMailer SMTP (smtp.gmail.com:587 STARTTLS)"}}
+{"ts":"2026-07-28 02:03:21","step":"sendMoaRejectionEmailWithAttachment:result","data":{"to":"alloyds.sales@gmail.com","has_attachment":true,"sent":true}}
+{"ts":"2026-07-28 02:03:21","step":"ajax_moa_reject_send:mail_result","data":{"moa_id":105,"to":"alloyds.sales@gmail.com","sent":true,"debug":[]}}
+{"ts":"2026-07-28 02:03:21","step":"ajax_moa_reject_send:marked_rejected","data":{"moa_id":105,"ok":true,"error":null,"flags":["moa_document"]}}
+{"ts":"2026-07-28 02:20:34","step":"ajax_moa_reject_send:start","data":{"moa_id":105,"comment_length":5,"flags":["company_name","company_profile","company_address","position","contact_first_name","contact_middle_name","contact_last_name","telephone","moa_document"]}}
+{"ts":"2026-07-28 02:20:34","step":"ajax_moa_reject_send:moa_row_fetched","data":{"moa_id":105,"user_id":123,"company":"PUBG Training Center","has_pdf":true,"pdf_bytes":738935}}
+{"ts":"2026-07-28 02:20:34","step":"sendMoaRejectionEmailWithAttachment:pre_send","data":{"to":"alloyds.sales@gmail.com","subject":"Update on Your MOA Request - PUBG Training Center","body_bytes":890,"has_attachment":true,"attachment_bytes":738935,"flagged_labels":["Company Name","Company Profile","Company Address","Position","Contact First Name","Contact Middle Name","Contact Last Name","Telephone","Uploaded MOA Document"],"transport":"PHPMailer SMTP (smtp.gmail.com:587 STARTTLS)"}}
+{"ts":"2026-07-28 02:20:45","step":"sendMoaRejectionEmailWithAttachment:result","data":{"to":"alloyds.sales@gmail.com","has_attachment":true,"sent":true}}
+{"ts":"2026-07-28 02:20:45","step":"ajax_moa_reject_send:mail_result","data":{"moa_id":105,"to":"alloyds.sales@gmail.com","sent":true,"debug":[]}}
+{"ts":"2026-07-28 02:20:45","step":"ajax_moa_reject_send:marked_rejected","data":{"moa_id":105,"ok":true,"error":null,"flags":["company_name","company_profile","company_address","position","contact_first_name","contact_middle_name","contact_last_name","telephone","moa_document"]}}
+{"ts":"2026-07-28 02:39:39","step":"ajax_moa_reject_send:start","data":{"moa_id":105,"comment_length":4,"flags":["company_name"]}}
+{"ts":"2026-07-28 02:39:39","step":"ajax_moa_reject_send:moa_row_fetched","data":{"moa_id":105,"user_id":123,"company":"TRY","has_pdf":true,"pdf_bytes":563930}}
+{"ts":"2026-07-28 02:39:39","step":"sendMoaRejectionEmailWithAttachment:pre_send","data":{"to":"alloyds.sales@gmail.com","subject":"Update on Your MOA Request - TRY","body_bytes":726,"has_attachment":true,"attachment_bytes":563930,"flagged_labels":["Company Name"],"transport":"PHPMailer SMTP (smtp.gmail.com:587 STARTTLS)"}}
+{"ts":"2026-07-28 02:39:50","step":"sendMoaRejectionEmailWithAttachment:result","data":{"to":"alloyds.sales@gmail.com","has_attachment":true,"sent":true}}
+{"ts":"2026-07-28 02:39:50","step":"ajax_moa_reject_send:mail_result","data":{"moa_id":105,"to":"alloyds.sales@gmail.com","sent":true,"debug":[]}}
+{"ts":"2026-07-28 02:39:51","step":"ajax_moa_reject_send:marked_rejected","data":{"moa_id":105,"ok":true,"error":null,"flags":["company_name"]}}
+{"ts":"2026-07-28 16:46:50","step":"ajax_moa_drawer_action:start","data":{"moa_id":105,"action":"accept"}}
+{"ts":"2026-07-28 16:46:50","step":"transferMoaToRequirements:start","data":{"user_id":123,"moa_id":105,"blob_length":563930,"filename":"Digital Requirements Submission.pdf"}}
+{"ts":"2026-07-28 16:46:51","step":"transferMoaToRequirements:insert","data":{"ok":true,"error":null}}
+{"ts":"2026-07-28 16:46:51","step":"saveMoaBlobToFolder:start","data":{"user_id":123,"filename":"Digital Requirements Submission.pdf","blob_length":563930}}
+{"ts":"2026-07-28 16:46:51","step":"saveMoaBlobToFolder:mkdir","data":{"result":true}}
+{"ts":"2026-07-28 16:46:51","step":"saveMoaBlobToFolder:write","data":{"dest":"Company Folder\/NAME\/MOA_Document_verified_1785250011.pdf","written":563930}}
+{"ts":"2026-07-28 16:46:51","step":"transferMoaToRequirements:delete_moa_row","data":{"moa_id":105,"ok":true}}
+{"ts":"2026-07-28 16:46:56","step":"sendMoaStageEmail:result","data":{"user_id":123,"stage":"pending","has_comment":false,"schedule":null,"ok":true}}
+{"ts":"2026-07-28 17:21:50","step":"ajax_moa_drawer_action:start","data":{"moa_id":106,"action":"accept"}}
+{"ts":"2026-07-28 17:21:50","step":"transferMoaToRequirements:start","data":{"user_id":123,"moa_id":106,"blob_length":403632,"filename":"moa_Try_20260728.pdf","request_type":"new"}}
+{"ts":"2026-07-28 17:21:50","step":"transferMoaToRequirements:insert","data":{"ok":true,"error":null,"request_type":"new"}}
+{"ts":"2026-07-28 17:21:50","step":"saveMoaBlobToFolder:start","data":{"user_id":123,"filename":"moa_Try_20260728.pdf","blob_length":403632}}
+{"ts":"2026-07-28 17:21:50","step":"saveMoaBlobToFolder:mkdir","data":{"result":true}}
+{"ts":"2026-07-28 17:21:50","step":"saveMoaBlobToFolder:write","data":{"dest":"Company Folder\/Try\/MOA_Document_verified_1785252110.pdf","written":403632}}
+{"ts":"2026-07-28 17:21:50","step":"transferMoaToRequirements:delete_moa_row","data":{"moa_id":106,"ok":true}}
+{"ts":"2026-07-28 17:21:57","step":"sendMoaStageEmail:result","data":{"user_id":123,"stage":"pending","has_comment":false,"schedule":null,"ok":true}}
+{"ts":"2026-08-02 16:40:44","step":"ajax_moa_drawer_action:start","data":{"moa_id":107,"action":"accept"}}
+{"ts":"2026-08-02 16:40:44","step":"transferMoaToRequirements:start","data":{"user_id":123,"moa_id":107,"blob_length":403627,"filename":"moa_Try_20260728.pdf","request_type":"new"}}
+{"ts":"2026-08-02 16:40:44","step":"transferMoaToRequirements:insert","data":{"ok":true,"error":null,"request_type":"new"}}
+{"ts":"2026-08-02 16:40:44","step":"saveMoaBlobToFolder:start","data":{"user_id":123,"filename":"moa_Try_20260728.pdf","blob_length":403627}}
+{"ts":"2026-08-02 16:40:45","step":"saveMoaBlobToFolder:write","data":{"dest":"Company Folder\/Try\/MOA_Document_verified_1785681645.pdf","written":403627}}
+{"ts":"2026-08-02 16:40:45","step":"transferMoaToRequirements:delete_moa_row","data":{"moa_id":107,"ok":true}}
+{"ts":"2026-08-02 16:40:51","step":"sendMoaStageEmail:result","data":{"user_id":123,"stage":"pending","has_comment":false,"schedule":null,"ok":true}}
+{"ts":"2026-08-02 16:40:59","step":"ajax_update_moa_req_workflow:start","data":{"user_id":123,"stage":"reviewing","comment":"","schedule":null}}
+{"ts":"2026-08-02 16:41:05","step":"sendMoaStageEmail:result","data":{"user_id":123,"stage":"reviewing","has_comment":false,"schedule":null,"ok":true}}
+{"ts":"2026-08-02 16:41:08","step":"ajax_update_moa_req_workflow:start","data":{"user_id":123,"stage":"approved","comment":"","schedule":null}}
+{"ts":"2026-08-02 16:41:12","step":"sendMoaStageEmail:result","data":{"user_id":123,"stage":"approved","has_comment":false,"schedule":null,"ok":true}}
+{"ts":"2026-08-02 16:41:15","step":"ajax_update_moa_req_workflow:start","data":{"user_id":123,"stage":"scheduled","comment":"","schedule":"2026-08-03 09:00:00"}}
+{"ts":"2026-08-02 16:41:15","step":"ajax_update_moa_req_workflow:scheduled_set","data":{"user_id":123,"overall":"Pending","schedule":"2026-08-03 09:00:00"}}
+{"ts":"2026-08-02 16:41:19","step":"sendMoaStageEmail:result","data":{"user_id":123,"stage":"scheduled","has_comment":false,"schedule":"2026-08-03 09:00:00","ok":true}}
+{"ts":"2026-08-02 16:41:22","step":"ajax_moa_mark_done:start","data":{"user_id":123}}
+{"ts":"2026-08-02 16:41:22","step":"ajax_moa_mark_done:verified","data":{"user_id":123,"overall":"Verified"}}
+{"ts":"2026-09-09 07:15:40","step":"ajax_moa_drawer_action:start","data":{"moa_id":114,"action":"accept"}}
+{"ts":"2026-09-09 07:15:41","step":"transferMoaToRequirements:start","data":{"user_id":125,"moa_id":114,"blob_length":403817,"filename":"moa_Nueva_Ecija_University_of_Science_and_Te_20260909.pdf","request_type":"new"}}
+{"ts":"2026-09-09 07:15:42","step":"transferMoaToRequirements:insert","data":{"ok":true,"error":null,"request_type":"new"}}
+{"ts":"2026-09-09 07:15:42","step":"saveMoaBlobToFolder:start","data":{"user_id":125,"filename":"moa_Nueva_Ecija_University_of_Science_and_Te_20260909.pdf","blob_length":403817}}
+{"ts":"2026-09-09 07:15:42","step":"saveMoaBlobToFolder:write","data":{"dest":"Company Folder\/Nueva_Ecija_University_of_Science_and_Technology_Atate\/MOA_Document_verified_1788930942.pdf","written":403817}}
+{"ts":"2026-09-09 07:15:43","step":"transferMoaToRequirements:delete_moa_row","data":{"moa_id":114,"ok":true}}
+{"ts":"2026-09-09 07:15:57","step":"sendMoaStageEmail:result","data":{"user_id":125,"stage":"pending","has_comment":false,"schedule":null,"ok":true}}
+{"ts":"2026-09-09 07:16:22","step":"ajax_update_moa_req_workflow:start","data":{"user_id":125,"stage":"reviewing","comment":"","schedule":null}}
+{"ts":"2026-09-09 07:16:29","step":"sendMoaStageEmail:result","data":{"user_id":125,"stage":"reviewing","has_comment":false,"schedule":null,"ok":true}}
+{"ts":"2026-09-09 07:18:21","step":"ajax_update_moa_req_workflow:start","data":{"user_id":125,"stage":"approved","comment":"","schedule":null}}
+{"ts":"2026-09-09 07:18:29","step":"sendMoaStageEmail:result","data":{"user_id":125,"stage":"approved","has_comment":false,"schedule":null,"ok":true}}
+{"ts":"2026-09-09 07:18:55","step":"ajax_update_moa_req_workflow:start","data":{"user_id":125,"stage":"scheduled","comment":"","schedule":"2026-09-10 14:00:00"}}
+{"ts":"2026-09-09 07:18:55","step":"ajax_update_moa_req_workflow:scheduled_set","data":{"user_id":125,"overall":"Pending","schedule":"2026-09-10 14:00:00"}}
+{"ts":"2026-09-09 07:19:03","step":"sendMoaStageEmail:result","data":{"user_id":125,"stage":"scheduled","has_comment":false,"schedule":"2026-09-10 14:00:00","ok":true}}
+{"ts":"2026-09-09 07:23:05","step":"ajax_moa_mark_done:start","data":{"user_id":125}}
+{"ts":"2026-09-09 07:23:05","step":"ajax_moa_mark_done:verified","data":{"user_id":125,"overall":"Verified"}}
+{"ts":"2026-09-17 11:15:33","step":"ajax_moa_table_flag_revision:start","data":{"user_id":264,"comment_length":16,"flags":["company_profile"]}}
+{"ts":"2026-09-17 11:15:33","step":"ajax_moa_table_flag_revision:not_found","data":{"user_id":264}}
+{"ts":"2026-09-17 11:15:36","step":"ajax_moa_table_flag_revision:start","data":{"user_id":264,"comment_length":16,"flags":["company_profile"]}}
+{"ts":"2026-09-17 11:15:36","step":"ajax_moa_table_flag_revision:not_found","data":{"user_id":264}}
+{"ts":"2026-09-17 11:18:58","step":"ajax_moa_table_flag_revision:start","data":{"user_id":264,"comment_length":10,"flags":["company_profile"]}}
+{"ts":"2026-09-17 11:18:58","step":"ajax_moa_table_flag_revision:moa_row_lookup","data":{"user_id":264,"found":false}}
+{"ts":"2026-09-17 11:18:59","step":"sendMoaRejectionEmailWithAttachment:pre_send","data":{"to":"alloyds.sales@gmail.com","subject":"Update on Your MOA Request - Palayan City LGU","body_bytes":745,"has_attachment":true,"attachment_bytes":404214,"flagged_labels":["Company Profile"],"transport":"PHPMailer SMTP (smtp.gmail.com:587 STARTTLS)"}}
+{"ts":"2026-09-17 11:19:08","step":"sendMoaRejectionEmailWithAttachment:result","data":{"to":"alloyds.sales@gmail.com","has_attachment":true,"sent":true}}
+{"ts":"2026-09-17 11:19:08","step":"ajax_moa_table_flag_revision:mail_result","data":{"user_id":264,"to":"alloyds.sales@gmail.com","sent":true,"debug":[]}}
+{"ts":"2026-09-17 11:19:08","step":"ajax_moa_table_flag_revision:no_moa_requests_row_to_update","data":{"user_id":264}}
+{"ts":"2026-09-17 11:30:41","step":"ajax_moa_table_flag_revision:start","data":{"user_id":264,"comment_length":11,"flags":["company_profile"]}}
+{"ts":"2026-09-17 11:30:41","step":"ajax_moa_table_flag_revision:moa_row_lookup","data":{"user_id":264,"found":false}}
+{"ts":"2026-09-17 11:30:42","step":"sendMoaRejectionEmailWithAttachment:pre_send","data":{"to":"alloyds.sales@gmail.com","subject":"Update on Your MOA Request - Palayan City LGU","body_bytes":746,"has_attachment":true,"attachment_bytes":404214,"flagged_labels":["Company Profile"],"transport":"PHPMailer SMTP (smtp.gmail.com:587 STARTTLS)"}}
+{"ts":"2026-09-17 11:30:50","step":"sendMoaRejectionEmailWithAttachment:result","data":{"to":"alloyds.sales@gmail.com","has_attachment":true,"sent":true}}
+{"ts":"2026-09-17 11:30:50","step":"ajax_moa_table_flag_revision:mail_result","data":{"user_id":264,"to":"alloyds.sales@gmail.com","sent":true,"debug":[]}}
+{"ts":"2026-09-17 11:30:50","step":"ajax_moa_table_flag_revision:no_moa_requests_row_to_update","data":{"user_id":264}}
+{"ts":"2026-09-17 11:30:50","step":"blankFlaggedCompanyInfoFields:cleared","data":{"user_id":264,"flag":"company_profile","column":"company_profile"}}
+{"ts":"2026-09-17 11:30:56","step":"regenerateAndReturnMoaToCompany:saved","data":{"user_id":264,"ok":true,"bytes":403839}}
+{"ts":"2026-09-18 01:45:35","step":"detectAndNotifyDirectMoaEntries:notified","data":{"user_id":241,"company_requirements_id":180,"request_type":"existing"}}
+{"ts":"2026-09-18 01:45:35","step":"detectAndNotifyDirectMoaEntries:notified","data":{"user_id":242,"company_requirements_id":191,"request_type":"existing"}}
+{"ts":"2026-09-18 01:45:35","step":"detectAndNotifyDirectMoaEntries:notified","data":{"user_id":243,"company_requirements_id":205,"request_type":"existing"}}
+{"ts":"2026-09-18 01:45:35","step":"detectAndNotifyDirectMoaEntries:notified","data":{"user_id":264,"company_requirements_id":212,"request_type":"new"}}
+{"ts":"2026-09-18 01:45:35","step":"detectAndNotifyDirectMoaEntries:notified","data":{"user_id":265,"company_requirements_id":216,"request_type":"existing"}}
+{"ts":"2026-09-18 02:02:26","step":"detectAndNotifyDirectMoaEntries:notified","data":{"user_id":266,"company_requirements_id":217,"request_type":"new"}}
+{"ts":"2026-09-18 02:18:10","step":"ajax_update_moa_req_workflow:start","data":{"user_id":264,"stage":"approved","comment":"","schedule":null}}
+{"ts":"2026-09-18 02:18:20","step":"sendMoaStageEmail:result","data":{"user_id":264,"stage":"approved","has_comment":false,"schedule":null,"ok":true}}
+{"ts":"2026-09-18 04:03:19","step":"ajax_update_moa_req_workflow:start","data":{"user_id":266,"stage":"approved","comment":"","schedule":null}}
+{"ts":"2026-09-18 04:03:24","step":"sendMoaStageEmail:result","data":{"user_id":266,"stage":"approved","has_comment":false,"schedule":null,"ok":true}}
+{"ts":"2026-09-18 16:31:55","step":"ajax_update_moa_req_workflow:start","data":{"user_id":264,"stage":"scheduled","comment":"","schedule":"2026-09-18 01:00:00"}}
+{"ts":"2026-09-18 16:31:55","step":"ajax_update_moa_req_workflow:scheduled_set","data":{"user_id":264,"overall":"Pending","schedule":"2026-09-18 01:00:00"}}
+{"ts":"2026-09-18 16:32:02","step":"sendMoaStageEmail:result","data":{"user_id":264,"stage":"scheduled","has_comment":false,"schedule":"2026-09-18 01:00:00","ok":true}}
+{"ts":"2026-09-18 16:42:44","step":"ajax_update_moa_req_workflow:start","data":{"user_id":264,"stage":"scheduled","comment":"","schedule":"2026-09-23 05:00:00"}}
+{"ts":"2026-09-18 16:42:44","step":"ajax_update_moa_req_workflow:scheduled_set","data":{"user_id":264,"overall":"Pending","schedule":"2026-09-23 05:00:00"}}
+{"ts":"2026-09-18 16:42:51","step":"sendMoaStageEmail:result","data":{"user_id":264,"stage":"scheduled","has_comment":false,"schedule":"2026-09-23 05:00:00","ok":true}}
+{"ts":"2026-09-19 02:21:23","step":"ajax_update_moa_req_workflow:start","data":{"user_id":264,"stage":"scheduled","comment":"","schedule":"2026-09-19 14:01:00"}}
+{"ts":"2026-09-19 02:21:23","step":"ajax_update_moa_req_workflow:scheduled_set","data":{"user_id":264,"overall":"Pending","schedule":"2026-09-19 14:01:00"}}
+{"ts":"2026-09-19 02:21:30","step":"sendMoaStageEmail:result","data":{"user_id":264,"stage":"scheduled","has_comment":false,"schedule":"2026-09-19 14:01:00","ok":true}}
+{"ts":"2026-09-19 02:22:07","step":"detectAndNotifyComplianceEvents:notified","data":{"user_id":264,"company_requirements_id":212,"event_type":"schedule_declined"}}
+{"ts":"2026-09-19 07:04:17","step":"ajax_update_moa_req_workflow:start","data":{"user_id":264,"stage":"scheduled","comment":"","schedule":"2026-09-19 01:00:00"}}
+{"ts":"2026-09-19 07:04:17","step":"ajax_update_moa_req_workflow:scheduled_set","data":{"user_id":264,"overall":"Pending","schedule":"2026-09-19 01:00:00"}}
+{"ts":"2026-09-19 07:04:24","step":"sendMoaStageEmail:result","data":{"user_id":264,"stage":"scheduled","has_comment":false,"schedule":"2026-09-19 01:00:00","ok":true}}
+{"ts":"2026-09-19 07:04:59","step":"detectAndNotifyComplianceEvents:notified","data":{"user_id":264,"company_requirements_id":212,"event_type":"schedule_declined"}}
+{"ts":"2026-09-19 07:05:20","step":"sendMoaStageEmail:result","data":{"user_id":264,"stage":"scheduled","has_comment":true,"schedule":"2026-09-23 14:04:00","ok":true}}
+{"ts":"2026-09-19 07:15:58","step":"ajax_update_moa_req_workflow:start","data":{"user_id":266,"stage":"scheduled","comment":"","schedule":"2026-09-19 13:01:00"}}
+{"ts":"2026-09-19 07:15:59","step":"ajax_update_moa_req_workflow:scheduled_set","data":{"user_id":266,"overall":"Pending","schedule":"2026-09-19 13:01:00"}}
+{"ts":"2026-09-19 07:16:05","step":"sendMoaStageEmail:result","data":{"user_id":266,"stage":"scheduled","has_comment":false,"schedule":"2026-09-19 13:01:00","ok":true}}
+{"ts":"2026-09-19 07:17:00","step":"detectAndNotifyComplianceEvents:notified","data":{"user_id":266,"company_requirements_id":217,"event_type":"schedule_declined"}}
+{"ts":"2026-09-19 07:17:15","step":"sendMoaStageEmail:result","data":{"user_id":266,"stage":"scheduled","has_comment":true,"schedule":"2026-09-19 18:16:00","ok":true}}
+{"ts":"2026-09-19 07:48:46","step":"detectAndNotifyDirectMoaEntries:notified","data":{"user_id":289,"company_requirements_id":218,"request_type":"new"}}
+{"ts":"2026-09-19 09:39:36","step":"detectAndNotifyDirectMoaEntries:notified","data":{"user_id":290,"company_requirements_id":231,"request_type":"new"}}
+{"ts":"2026-09-19 09:59:13","step":"ajax_moa_table_flag_revision:start","data":{"user_id":289,"comment_length":68,"flags":["telephone"]}}
+{"ts":"2026-09-19 09:59:13","step":"ajax_moa_table_flag_revision:moa_row_lookup","data":{"user_id":289,"found":true}}
+{"ts":"2026-09-19 09:59:13","step":"sendMoaRejectionEmailWithAttachment:pre_send","data":{"to":"alloyds.sales@gmail.com","subject":"Update on Your MOA Request - Editha's Chicken Company","body_bytes":806,"has_attachment":true,"attachment_bytes":404136,"flagged_labels":["Telephone"],"transport":"PHPMailer SMTP (smtp.gmail.com:587 STARTTLS)"}}
+{"ts":"2026-09-19 09:59:21","step":"sendMoaRejectionEmailWithAttachment:result","data":{"to":"alloyds.sales@gmail.com","has_attachment":true,"sent":true}}
+{"ts":"2026-09-19 09:59:21","step":"ajax_moa_table_flag_revision:mail_result","data":{"user_id":289,"to":"alloyds.sales@gmail.com","sent":true,"debug":[]}}
+{"ts":"2026-09-19 09:59:21","step":"blankFlaggedCompanyInfoFields:cleared","data":{"user_id":289,"flag":"telephone","column":"telephone"}}
+{"ts":"2026-09-19 09:59:26","step":"regenerateAndReturnMoaToCompany:saved","data":{"user_id":289,"ok":true,"bytes":404136}}
+{"ts":"2026-09-19 10:00:14","step":"detectAndNotifyComplianceEvents:notified","data":{"user_id":289,"company_requirements_id":218,"event_type":"revision_complied"}}
+{"ts":"2026-09-19 18:06:04","step":"ajax_moa_table_flag_revision:start","data":{"user_id":289,"comment_length":3,"flags":["telephone"]}}
+{"ts":"2026-09-19 18:06:04","step":"ajax_moa_table_flag_revision:moa_row_lookup","data":{"user_id":289,"found":true}}
+{"ts":"2026-09-19 18:06:04","step":"sendMoaRejectionEmailWithAttachment:pre_send","data":{"to":"alloyds.sales@gmail.com","subject":"Update on Your MOA Request - Editha's Chicken Company","body_bytes":741,"has_attachment":true,"attachment_bytes":404136,"flagged_labels":["Telephone"],"transport":"PHPMailer SMTP (smtp.gmail.com:587 STARTTLS)"}}
+{"ts":"2026-09-19 18:06:13","step":"sendMoaRejectionEmailWithAttachment:result","data":{"to":"alloyds.sales@gmail.com","has_attachment":true,"sent":true}}
+{"ts":"2026-09-19 18:06:13","step":"ajax_moa_table_flag_revision:mail_result","data":{"user_id":289,"to":"alloyds.sales@gmail.com","sent":true,"debug":[]}}
+{"ts":"2026-09-19 18:06:13","step":"blankFlaggedCompanyInfoFields:cleared","data":{"user_id":289,"flag":"telephone","column":"telephone"}}
+{"ts":"2026-09-19 18:06:36","step":"regenerateAndReturnMoaToCompany:saved","data":{"user_id":289,"ok":true,"bytes":404136}}
+{"ts":"2026-09-19 18:07:08","step":"detectAndNotifyComplianceEvents:notified","data":{"user_id":289,"company_requirements_id":218,"event_type":"revision_complied"}}
+{"ts":"2026-09-19 18:07:23","step":"ajax_update_moa_req_workflow:start","data":{"user_id":289,"stage":"approved","comment":"","schedule":null}}
+{"ts":"2026-09-19 18:07:29","step":"sendMoaStageEmail:result","data":{"user_id":289,"stage":"approved","has_comment":false,"schedule":null,"ok":true}}
+{"ts":"2026-09-19 18:07:39","step":"ajax_update_moa_req_workflow:start","data":{"user_id":289,"stage":"scheduled","comment":"","schedule":"2026-09-20 01:00:00"}}
+{"ts":"2026-09-19 18:07:40","step":"ajax_update_moa_req_workflow:scheduled_set","data":{"user_id":289,"overall":"Pending","schedule":"2026-09-20 01:00:00"}}
+{"ts":"2026-09-19 18:07:46","step":"sendMoaStageEmail:result","data":{"user_id":289,"stage":"scheduled","has_comment":false,"schedule":"2026-09-20 01:00:00","ok":true}}
+{"ts":"2026-09-19 18:08:26","step":"detectAndNotifyComplianceEvents:notified","data":{"user_id":289,"company_requirements_id":218,"event_type":"schedule_declined"}}
+{"ts":"2026-09-20 05:36:54","step":"detectAndNotifyRequirementUploads:notified","data":{"user_id":289,"requirements":["legislative_charter"],"merged":false}}
+{"ts":"2026-09-20 05:49:15","step":"detectAndNotifyRequirementUploads:notified","data":{"user_id":289,"requirements":["legislative_charter"],"merged":false}}
+{"ts":"2026-09-20 06:20:52","step":"detectAndNotifyRequirementUploads:notified","data":{"user_id":289,"requirements":["legislative_charter"],"merged":false}}
+{"ts":"2026-09-20 12:29:07","step":"detectAndNotifyRequirementUploads:notified","data":{"user_id":289,"requirements":["legislative_charter"],"merged":false}}
+{"ts":"2026-09-20 17:27:33","step":"ajax_update_moa_req_workflow:start","data":{"user_id":289,"stage":"scheduled","comment":"","schedule":"2026-09-26 01:00:00"}}
+{"ts":"2026-09-20 17:27:33","step":"ajax_update_moa_req_workflow:scheduled_set","data":{"user_id":289,"overall":"Pending","schedule":"2026-09-26 01:00:00"}}
+{"ts":"2026-09-20 17:27:41","step":"sendMoaStageEmail:result","data":{"user_id":289,"stage":"scheduled","has_comment":false,"schedule":"2026-09-26 01:00:00","ok":true}}
+{"ts":"2026-09-20 18:28:04","step":"detectAndNotifyComplianceEvents:notified","data":{"user_id":289,"company_requirements_id":218,"event_type":"schedule_agreed"}}
+{"ts":"2026-09-20 18:52:44","step":"detectAndNotifyRequirementUploads:notified","data":{"user_id":289,"requirements":["legislative_charter"],"merged":false}}
+{"ts":"2026-09-20 19:17:57","step":"detectAndNotifyRequirementUploads:notified","data":{"user_id":289,"requirements":["legislative_charter"],"merged":false}}
+{"ts":"2026-09-20 19:18:41","step":"detectAndNotifyRequirementUploads:notified","data":{"user_id":289,"requirements":["legislative_charter"],"merged":false}}
+{"ts":"2026-09-20 19:50:03","step":"detectAndNotifyRequirementUploads:notified","data":{"user_id":289,"requirements":["legislative_charter"],"merged":false}}
+{"ts":"2026-09-21 02:32:56","step":"detectAndNotifyRequirementUploads:notified","data":{"user_id":289,"requirements":["legislative_charter"],"merged":false}}
+{"ts":"2026-09-21 03:06:02","step":"detectAndNotifyRequirementUploads:notified","data":{"user_id":289,"requirements":["legislative_charter"],"merged":false}}
+{"ts":"2026-09-21 03:35:48","step":"detectAndNotifyRequirementUploads:notified","data":{"user_id":289,"requirements":["legislative_charter"],"merged":false}}
+{"ts":"2026-09-21 03:54:25","step":"detectAndNotifyRequirementUploads:notified","data":{"user_id":289,"requirements":["legislative_charter"],"merged":false}}
+{"ts":"2026-09-21 03:55:11","step":"detectAndNotifyRequirementUploads:notified","data":{"user_id":289,"requirements":["legislative_charter"],"merged":false}}
+{"ts":"2026-09-21 03:56:26","step":"detectAndNotifyRequirementUploads:notified","data":{"user_id":289,"requirements":["legislative_charter"],"merged":false}}
+{"ts":"2026-09-21 03:56:41","step":"ajax_moa_mark_done:start","data":{"user_id":289}}
+{"ts":"2026-09-21 03:56:41","step":"ajax_moa_mark_done:verified","data":{"user_id":289,"overall":"Verified"}}
+{"ts":"2026-09-21 14:50:48","step":"ajax_moa_table_flag_revision:start","data":{"user_id":290,"comment_length":7,"flags":["company_name","company_profile","company_address","position","contact_first_name","contact_middle_name","contact_last_name","telephone"]}}
+{"ts":"2026-09-21 14:50:48","step":"ajax_moa_table_flag_revision:moa_row_lookup","data":{"user_id":290,"found":true}}
+{"ts":"2026-09-21 14:50:48","step":"sendMoaRejectionEmailWithAttachment:pre_send","data":{"to":"rmechalas4@gmail.com","subject":"Update on Your MOA Request - Riamea's Printing And School Supplies Business","body_bytes":892,"has_attachment":true,"attachment_bytes":404235,"flagged_labels":["Company Name","Company Profile","Company Address","Position","Contact First Name","Contact Middle Name","Contact Last Name","Telephone"],"transport":"PHPMailer SMTP (smtp.gmail.com:587 STARTTLS)"}}
+{"ts":"2026-09-21 14:50:59","step":"sendMoaRejectionEmailWithAttachment:result","data":{"to":"rmechalas4@gmail.com","has_attachment":true,"sent":true}}
+{"ts":"2026-09-21 14:50:59","step":"ajax_moa_table_flag_revision:mail_result","data":{"user_id":290,"to":"rmechalas4@gmail.com","sent":true,"debug":[]}}
+{"ts":"2026-09-21 14:50:59","step":"blankFlaggedCompanyInfoFields:cleared","data":{"user_id":290,"flag":"company_name","column":"company"}}
+{"ts":"2026-09-21 14:50:59","step":"blankFlaggedCompanyInfoFields:cleared","data":{"user_id":290,"flag":"company_profile","column":"company_profile"}}
+{"ts":"2026-09-21 14:50:59","step":"blankFlaggedCompanyInfoFields:cleared","data":{"user_id":290,"flag":"company_address","column":"company_address"}}
+{"ts":"2026-09-21 14:50:59","step":"blankFlaggedCompanyInfoFields:cleared","data":{"user_id":290,"flag":"position","column":"position"}}
+{"ts":"2026-09-21 14:50:59","step":"blankFlaggedCompanyInfoFields:cleared","data":{"user_id":290,"flag":"contact_first_name","column":"contact_first_name"}}
+{"ts":"2026-09-21 14:50:59","step":"blankFlaggedCompanyInfoFields:cleared","data":{"user_id":290,"flag":"contact_middle_name","column":"contact_middle_initial"}}
+{"ts":"2026-09-21 14:50:59","step":"blankFlaggedCompanyInfoFields:cleared","data":{"user_id":290,"flag":"contact_last_name","column":"contact_last_name"}}
+{"ts":"2026-09-21 14:50:59","step":"blankFlaggedCompanyInfoFields:cleared","data":{"user_id":290,"flag":"telephone","column":"telephone"}}
+{"ts":"2026-09-21 14:51:14","step":"regenerateAndReturnMoaToCompany:saved","data":{"user_id":290,"ok":true,"bytes":403827}}
+{"ts":"2026-09-21 15:05:46","step":"detectAndNotifyComplianceEvents:notified","data":{"user_id":290,"company_requirements_id":231,"event_type":"revision_complied"}}
+{"ts":"2026-09-21 15:39:01","step":"detectAndNotifyRequirementUploads:notified","data":{"user_id":290,"requirements":["sec_registration"],"merged":false}}
+{"ts":"2026-09-21 15:58:49","step":"ajax_moa_table_flag_revision:start","data":{"user_id":290,"comment_length":4,"flags":["company_name","company_profile","company_address","position","contact_first_name","contact_middle_name","contact_last_name","telephone"]}}
+{"ts":"2026-09-21 15:58:49","step":"ajax_moa_table_flag_revision:moa_row_lookup","data":{"user_id":290,"found":true}}
+{"ts":"2026-09-21 15:58:49","step":"sendMoaRejectionEmailWithAttachment:pre_send","data":{"to":"rmechalas4@gmail.com","subject":"Update on Your MOA Request - K\/D\/A","body_bytes":848,"has_attachment":true,"attachment_bytes":403667,"flagged_labels":["Company Name","Company Profile","Company Address","Position","Contact First Name","Contact Middle Name","Contact Last Name","Telephone"],"transport":"PHPMailer SMTP (smtp.gmail.com:587 STARTTLS)"}}
+{"ts":"2026-09-21 15:58:56","step":"sendMoaRejectionEmailWithAttachment:result","data":{"to":"rmechalas4@gmail.com","has_attachment":true,"sent":true}}
+{"ts":"2026-09-21 15:58:56","step":"ajax_moa_table_flag_revision:mail_result","data":{"user_id":290,"to":"rmechalas4@gmail.com","sent":true,"debug":[]}}
+{"ts":"2026-09-21 15:58:56","step":"blankFlaggedCompanyInfoFields:cleared","data":{"user_id":290,"flag":"company_name","column":"company"}}
+{"ts":"2026-09-21 15:58:56","step":"blankFlaggedCompanyInfoFields:cleared","data":{"user_id":290,"flag":"company_profile","column":"company_profile"}}
+{"ts":"2026-09-21 15:58:56","step":"blankFlaggedCompanyInfoFields:cleared","data":{"user_id":290,"flag":"company_address","column":"company_address"}}
+{"ts":"2026-09-21 15:58:56","step":"blankFlaggedCompanyInfoFields:cleared","data":{"user_id":290,"flag":"position","column":"position"}}
+{"ts":"2026-09-21 15:58:56","step":"blankFlaggedCompanyInfoFields:cleared","data":{"user_id":290,"flag":"contact_first_name","column":"contact_first_name"}}
+{"ts":"2026-09-21 15:58:56","step":"blankFlaggedCompanyInfoFields:cleared","data":{"user_id":290,"flag":"contact_middle_name","column":"contact_middle_initial"}}
+{"ts":"2026-09-21 15:58:56","step":"blankFlaggedCompanyInfoFields:cleared","data":{"user_id":290,"flag":"contact_last_name","column":"contact_last_name"}}
+{"ts":"2026-09-21 15:58:56","step":"blankFlaggedCompanyInfoFields:cleared","data":{"user_id":290,"flag":"telephone","column":"telephone"}}
+{"ts":"2026-09-21 15:59:01","step":"regenerateAndReturnMoaToCompany:saved","data":{"user_id":290,"ok":true,"bytes":403827}}
+{"ts":"2026-09-21 16:45:51","step":"detectAndNotifyComplianceEvents:notified","data":{"user_id":290,"company_requirements_id":231,"event_type":"revision_complied"}}
+{"ts":"2026-09-21 16:46:19","step":"ajax_update_moa_req_workflow:start","data":{"user_id":290,"stage":"approved","comment":"","schedule":null}}
+{"ts":"2026-09-21 16:46:29","step":"sendMoaStageEmail:result","data":{"user_id":290,"stage":"approved","has_comment":false,"schedule":null,"ok":true}}
+{"ts":"2026-09-21 16:46:34","step":"ajax_update_moa_req_workflow:start","data":{"user_id":290,"stage":"scheduled","comment":"","schedule":"2026-09-21 01:00:00"}}
+{"ts":"2026-09-21 16:46:34","step":"ajax_update_moa_req_workflow:scheduled_set","data":{"user_id":290,"overall":"Pending","schedule":"2026-09-21 01:00:00"}}
+{"ts":"2026-09-21 16:46:51","step":"ajax_update_moa_req_workflow:start","data":{"user_id":290,"stage":"scheduled","comment":"","schedule":"2026-09-21 01:00:00"}}
+{"ts":"2026-09-21 16:46:52","step":"ajax_update_moa_req_workflow:scheduled_set","data":{"user_id":290,"overall":"Pending","schedule":"2026-09-21 01:00:00"}}
+{"ts":"2026-09-21 16:47:05","step":"sendMoaStageEmail:result","data":{"user_id":290,"stage":"scheduled","has_comment":false,"schedule":"2026-09-21 01:00:00","ok":true}}
+{"ts":"2026-09-21 16:55:34","step":"detectAndNotifyComplianceEvents:notified","data":{"user_id":290,"company_requirements_id":231,"event_type":"schedule_agreed"}}
+{"ts":"2026-09-21 16:58:55","step":"ajax_moa_mark_done:start","data":{"user_id":290}}
+{"ts":"2026-09-21 16:58:55","step":"ajax_moa_mark_done:verified","data":{"user_id":290,"overall":"Pending"}}
+{"ts":"2026-09-22 16:15:34","step":"detectAndNotifyRequirementUploads:notified","data":{"user_id":88,"requirements":["authority_moa_public","legislative_charter","moa_existing_upload","training_supervisor_pds"],"merged":false}}
+{"ts":"2026-09-22 16:21:07","step":"detectAndNotifyRequirementUploads:notified","data":{"user_id":88,"requirements":["cda_registration","dti_registration","training_supervisor_cv"],"merged":false}}
+{"ts":"2026-09-22 17:07:09","step":"detectAndNotifyDirectMoaEntries:notified","data":{"user_id":292,"company_requirements_id":259,"request_type":"new"}}
+{"ts":"2026-09-22 17:07:09","step":"detectAndNotifyRequirementUploads:notified","data":{"user_id":292,"requirements":["authority_moa_public","legislative_charter","training_supervisor_pds"],"merged":false}}
+{"ts":"2026-09-23 17:50:24","step":"ajax_moa_table_flag_revision:start","data":{"user_id":292,"comment_length":3,"flags":["contact_first_name","contact_middle_name","contact_last_name"]}}
+{"ts":"2026-09-23 17:50:24","step":"ajax_moa_table_flag_revision:moa_row_lookup","data":{"user_id":292,"found":true}}
+{"ts":"2026-09-23 17:50:24","step":"ajax_moa_table_flag_revision:mail_result","data":{"user_id":292,"to":"1@gmail.com","sent":true,"debug":null}}
+{"ts":"2026-09-23 17:50:25","step":"blankFlaggedCompanyInfoFields:cleared","data":{"user_id":292,"flag":"contact_first_name","column":"contact_first_name"}}
+{"ts":"2026-09-23 17:50:25","step":"blankFlaggedCompanyInfoFields:cleared","data":{"user_id":292,"flag":"contact_middle_name","column":"contact_middle_initial"}}
+{"ts":"2026-09-23 17:50:25","step":"blankFlaggedCompanyInfoFields:cleared","data":{"user_id":292,"flag":"contact_last_name","column":"contact_last_name"}}
+{"ts":"2026-09-23 17:50:46","step":"regenerateAndReturnMoaToCompany:saved","data":{"user_id":292,"ok":true,"bytes":403695}}
+{"ts":"2026-09-23 17:51:40","step":"ajax_moa_table_flag_revision:start","data":{"user_id":292,"comment_length":1,"flags":["company_name","company_profile","company_address","position","telephone"]}}
+{"ts":"2026-09-23 17:51:40","step":"ajax_moa_table_flag_revision:moa_row_lookup","data":{"user_id":292,"found":true}}
+{"ts":"2026-09-23 17:51:40","step":"ajax_moa_table_flag_revision:mail_result","data":{"user_id":292,"to":"1@gmail.com","sent":true,"debug":null}}
+{"ts":"2026-09-23 17:51:40","step":"blankFlaggedCompanyInfoFields:cleared","data":{"user_id":292,"flag":"company_name","column":"company"}}
+{"ts":"2026-09-23 17:51:40","step":"blankFlaggedCompanyInfoFields:cleared","data":{"user_id":292,"flag":"company_profile","column":"company_profile"}}
+{"ts":"2026-09-23 17:51:40","step":"blankFlaggedCompanyInfoFields:cleared","data":{"user_id":292,"flag":"company_address","column":"company_address"}}
+{"ts":"2026-09-23 17:51:40","step":"blankFlaggedCompanyInfoFields:cleared","data":{"user_id":292,"flag":"position","column":"position"}}
+{"ts":"2026-09-23 17:51:40","step":"blankFlaggedCompanyInfoFields:cleared","data":{"user_id":292,"flag":"telephone","column":"telephone"}}
+{"ts":"2026-09-23 17:51:51","step":"regenerateAndReturnMoaToCompany:saved","data":{"user_id":292,"ok":true,"bytes":403827}}
+{"ts":"2026-09-23 17:51:51","step":"sendMoaRejectionEmailWithAttachment:pre_send","data":{"to":"1@gmail.com","subject":"Update on Your MOA Request - Mmhvm","body_bytes":765,"has_attachment":true,"attachment_bytes":403647,"flagged_labels":["Contact First Name","Contact Middle Name","Contact Last Name"],"transport":"PHPMailer SMTP (smtp.gmail.com:587 STARTTLS)"}}
+{"ts":"2026-09-23 17:51:59","step":"sendMoaRejectionEmailWithAttachment:result","data":{"to":"1@gmail.com","has_attachment":true,"sent":true}}
+{"ts":"2026-09-23 17:51:59","step":"cvMoaUndoSendPending:flag_mail","data":{"to":"1@gmail.com","sent":true,"debug":[]}}
+{"ts":"2026-09-23 17:52:12","step":"sendMoaRejectionEmailWithAttachment:pre_send","data":{"to":"1@gmail.com","subject":"Update on Your MOA Request - Mmhvm","body_bytes":774,"has_attachment":true,"attachment_bytes":403695,"flagged_labels":["Company Name","Company Profile","Company Address","Position","Telephone"],"transport":"PHPMailer SMTP (smtp.gmail.com:587 STARTTLS)"}}
+{"ts":"2026-09-23 17:52:20","step":"sendMoaRejectionEmailWithAttachment:result","data":{"to":"1@gmail.com","has_attachment":true,"sent":true}}
+{"ts":"2026-09-23 17:52:20","step":"cvMoaUndoSendPending:flag_mail","data":{"to":"1@gmail.com","sent":true,"debug":[]}}
+{"ts":"2026-09-23 17:53:09","step":"detectAndNotifyComplianceEvents:notified","data":{"user_id":292,"company_requirements_id":259,"event_type":"revision_complied"}}
+{"ts":"2026-09-23 18:08:58","step":"detectAndNotifyRequirementUploads:notified","data":{"user_id":292,"requirements":["authority_moa_public"],"merged":false}}
+{"ts":"2026-09-23 18:11:06","step":"ajax_moa_table_flag_revision:start","data":{"user_id":292,"comment_length":3,"flags":["contact_first_name","contact_middle_name","contact_last_name"]}}
+{"ts":"2026-09-23 18:11:06","step":"ajax_moa_table_flag_revision:moa_row_lookup","data":{"user_id":292,"found":true}}
+{"ts":"2026-09-23 18:11:06","step":"ajax_moa_table_flag_revision:mail_result","data":{"user_id":292,"to":"1@gmail.com","sent":true,"debug":null}}
+{"ts":"2026-09-23 18:11:07","step":"blankFlaggedCompanyInfoFields:cleared","data":{"user_id":292,"flag":"contact_first_name","column":"contact_first_name"}}
+{"ts":"2026-09-23 18:11:07","step":"blankFlaggedCompanyInfoFields:cleared","data":{"user_id":292,"flag":"contact_middle_name","column":"contact_middle_initial"}}
+{"ts":"2026-09-23 18:11:07","step":"blankFlaggedCompanyInfoFields:cleared","data":{"user_id":292,"flag":"contact_last_name","column":"contact_last_name"}}
+{"ts":"2026-09-23 18:11:15","step":"regenerateAndReturnMoaToCompany:saved","data":{"user_id":292,"ok":true,"bytes":403662}}
+{"ts":"2026-09-23 18:11:32","step":"ajax_moa_table_flag_revision:start","data":{"user_id":292,"comment_length":2,"flags":["company_name","company_profile","company_address","position"]}}
+{"ts":"2026-09-23 18:11:32","step":"ajax_moa_table_flag_revision:merged_outstanding_flags","data":{"user_id":292,"outstanding":["contact_first_name","contact_middle_name","contact_last_name"],"new":["company_name","company_profile","company_address","position"],"merged":["company_name","company_profile","company_address","position","contact_first_name","contact_middle_name","contact_last_name"]}}
+{"ts":"2026-09-23 18:11:32","step":"ajax_moa_table_flag_revision:moa_row_lookup","data":{"user_id":292,"found":true}}
+{"ts":"2026-09-23 18:11:32","step":"ajax_moa_table_flag_revision:mail_result","data":{"user_id":292,"to":"1@gmail.com","sent":true,"debug":null}}
+{"ts":"2026-09-23 18:11:32","step":"blankFlaggedCompanyInfoFields:cleared","data":{"user_id":292,"flag":"company_name","column":"company"}}
+{"ts":"2026-09-23 18:11:32","step":"blankFlaggedCompanyInfoFields:cleared","data":{"user_id":292,"flag":"company_profile","column":"company_profile"}}
+{"ts":"2026-09-23 18:11:32","step":"blankFlaggedCompanyInfoFields:cleared","data":{"user_id":292,"flag":"company_address","column":"company_address"}}
+{"ts":"2026-09-23 18:11:32","step":"blankFlaggedCompanyInfoFields:cleared","data":{"user_id":292,"flag":"position","column":"position"}}
+{"ts":"2026-09-23 18:11:32","step":"blankFlaggedCompanyInfoFields:cleared","data":{"user_id":292,"flag":"contact_first_name","column":"contact_first_name"}}
+{"ts":"2026-09-23 18:11:32","step":"blankFlaggedCompanyInfoFields:cleared","data":{"user_id":292,"flag":"contact_middle_name","column":"contact_middle_initial"}}
+{"ts":"2026-09-23 18:11:32","step":"blankFlaggedCompanyInfoFields:cleared","data":{"user_id":292,"flag":"contact_last_name","column":"contact_last_name"}}
+{"ts":"2026-09-23 18:11:39","step":"regenerateAndReturnMoaToCompany:saved","data":{"user_id":292,"ok":true,"bytes":403827}}
+{"ts":"2026-09-23 18:11:40","step":"sendMoaRejectionEmailWithAttachment:pre_send","data":{"to":"1@gmail.com","subject":"Update on Your MOA Request - S","body_bytes":769,"has_attachment":true,"attachment_bytes":403662,"flagged_labels":["Contact First Name","Contact Middle Name","Contact Last Name"],"transport":"PHPMailer SMTP (smtp.gmail.com:587 STARTTLS)"}}
+{"ts":"2026-09-23 18:11:47","step":"sendMoaRejectionEmailWithAttachment:result","data":{"to":"1@gmail.com","has_attachment":true,"sent":true}}
+{"ts":"2026-09-23 18:11:47","step":"cvMoaUndoSendPending:flag_mail","data":{"to":"1@gmail.com","sent":true,"debug":[]}}
+{"ts":"2026-09-23 18:12:35","step":"sendMoaRejectionEmailWithAttachment:pre_send","data":{"to":"1@gmail.com","subject":"Update on Your MOA Request - S","body_bytes":830,"has_attachment":true,"attachment_bytes":403662,"flagged_labels":["Company Name","Company Profile","Company Address","Position","Contact First Name","Contact Middle Name","Contact Last Name"],"transport":"PHPMailer SMTP (smtp.gmail.com:587 STARTTLS)"}}
+{"ts":"2026-09-23 18:12:46","step":"sendMoaRejectionEmailWithAttachment:result","data":{"to":"1@gmail.com","has_attachment":true,"sent":true}}
+{"ts":"2026-09-23 18:12:46","step":"cvMoaUndoSendPending:flag_mail","data":{"to":"1@gmail.com","sent":true,"debug":[]}}
+{"ts":"2026-09-23 18:15:18","step":"detectAndNotifyComplianceEvents:notified","data":{"user_id":292,"company_requirements_id":259,"event_type":"revision_complied"}}
+{"ts":"2026-09-24 17:03:10","step":"ajax_moa_table_flag_revision:start","data":{"user_id":292,"comment_length":3,"flags":["company_name","company_address","position","contact_first_name","contact_middle_name","contact_last_name"]}}
+{"ts":"2026-09-24 17:03:10","step":"ajax_moa_table_flag_revision:moa_row_lookup","data":{"user_id":292,"found":true}}
+{"ts":"2026-09-24 17:03:10","step":"ajax_moa_table_flag_revision:mail_result","data":{"user_id":292,"to":"1@gmail.com","sent":true,"debug":null}}
+{"ts":"2026-09-24 17:03:10","step":"blankFlaggedCompanyInfoFields:cleared","data":{"user_id":292,"flag":"company_name","column":"company"}}
+{"ts":"2026-09-24 17:03:10","step":"blankFlaggedCompanyInfoFields:cleared","data":{"user_id":292,"flag":"company_address","column":"company_address"}}
+{"ts":"2026-09-24 17:03:10","step":"blankFlaggedCompanyInfoFields:cleared","data":{"user_id":292,"flag":"position","column":"position"}}
+{"ts":"2026-09-24 17:03:10","step":"blankFlaggedCompanyInfoFields:cleared","data":{"user_id":292,"flag":"contact_first_name","column":"contact_first_name"}}
+{"ts":"2026-09-24 17:03:10","step":"blankFlaggedCompanyInfoFields:cleared","data":{"user_id":292,"flag":"contact_middle_name","column":"contact_middle_initial"}}
+{"ts":"2026-09-24 17:03:10","step":"blankFlaggedCompanyInfoFields:cleared","data":{"user_id":292,"flag":"contact_last_name","column":"contact_last_name"}}
+{"ts":"2026-09-24 17:03:21","step":"regenerateAndReturnMoaToCompany:saved","data":{"user_id":292,"ok":true,"bytes":403758}}
+{"ts":"2026-09-24 17:04:07","step":"detectAndNotifyComplianceEvents:notified","data":{"user_id":292,"company_requirements_id":259,"event_type":"revision_complied"}}
+{"ts":"2026-09-24 17:04:38","step":"sendMoaRejectionEmailWithAttachment:pre_send","data":{"to":"1@gmail.com","subject":"Update on Your MOA Request - Backery Shop","body_bytes":824,"has_attachment":true,"attachment_bytes":403706,"flagged_labels":["Company Name","Company Address","Position","Contact First Name","Contact Middle Name","Contact Last Name"],"transport":"PHPMailer SMTP (smtp.gmail.com:587 STARTTLS)"}}
+{"ts":"2026-09-24 17:04:55","step":"sendMoaRejectionEmailWithAttachment:result","data":{"to":"1@gmail.com","has_attachment":true,"sent":true}}
+{"ts":"2026-09-24 17:04:55","step":"cvMoaUndoSendPending:flag_mail","data":{"to":"1@gmail.com","sent":true,"debug":[]}}
+{"ts":"2026-09-24 17:20:53","step":"ajax_moa_table_flag_revision:start","data":{"user_id":292,"comment_length":2,"flags":["company_name","company_address","position","contact_first_name","contact_middle_name","contact_last_name"]}}
+{"ts":"2026-09-24 17:20:53","step":"ajax_moa_table_flag_revision:moa_row_lookup","data":{"user_id":292,"found":true}}
+{"ts":"2026-09-24 17:20:53","step":"ajax_moa_table_flag_revision:mail_result","data":{"user_id":292,"to":"1@gmail.com","sent":true,"debug":null}}
+{"ts":"2026-09-24 17:20:53","step":"blankFlaggedCompanyInfoFields:cleared","data":{"user_id":292,"flag":"company_name","column":"company"}}
+{"ts":"2026-09-24 17:20:53","step":"blankFlaggedCompanyInfoFields:cleared","data":{"user_id":292,"flag":"company_address","column":"company_address"}}
+{"ts":"2026-09-24 17:20:53","step":"blankFlaggedCompanyInfoFields:cleared","data":{"user_id":292,"flag":"position","column":"position"}}
+{"ts":"2026-09-24 17:20:53","step":"blankFlaggedCompanyInfoFields:cleared","data":{"user_id":292,"flag":"contact_first_name","column":"contact_first_name"}}
+{"ts":"2026-09-24 17:20:53","step":"blankFlaggedCompanyInfoFields:cleared","data":{"user_id":292,"flag":"contact_middle_name","column":"contact_middle_initial"}}
+{"ts":"2026-09-24 17:20:53","step":"blankFlaggedCompanyInfoFields:cleared","data":{"user_id":292,"flag":"contact_last_name","column":"contact_last_name"}}
+{"ts":"2026-09-24 17:21:02","step":"regenerateAndReturnMoaToCompany:saved","data":{"user_id":292,"ok":true,"bytes":403758}}
+{"ts":"2026-09-24 17:21:06","step":"sendMoaRejectionEmailWithAttachment:pre_send","data":{"to":"1@gmail.com","subject":"Update on Your MOA Request - Bakery Shop","body_bytes":822,"has_attachment":true,"attachment_bytes":403737,"flagged_labels":["Company Name","Company Address","Position","Contact First Name","Contact Middle Name","Contact Last Name"],"transport":"PHPMailer SMTP (smtp.gmail.com:587 STARTTLS)"}}
+{"ts":"2026-09-24 17:21:19","step":"sendMoaRejectionEmailWithAttachment:result","data":{"to":"1@gmail.com","has_attachment":true,"sent":true}}
+{"ts":"2026-09-24 17:21:19","step":"cvMoaUndoSendPending:flag_mail","data":{"to":"1@gmail.com","sent":true,"debug":[]}}
+{"ts":"2026-09-24 17:21:34","step":"detectAndNotifyComplianceEvents:notified","data":{"user_id":292,"company_requirements_id":259,"event_type":"revision_complied"}}
+{"ts":"2026-09-27 03:29:15","step":"detectAndNotifyDirectMoaEntries:notified","data":{"user_id":303,"company_requirements_id":265,"request_type":"new"}}
+{"ts":"2026-09-27 03:29:34","step":"ajax_moa_table_flag_revision:start","data":{"user_id":303,"comment_length":6,"flags":["contact_first_name"]}}
+{"ts":"2026-09-27 03:29:34","step":"ajax_moa_table_flag_revision:moa_row_lookup","data":{"user_id":303,"found":true}}
+{"ts":"2026-09-27 03:29:34","step":"ajax_moa_table_flag_revision:mail_result","data":{"user_id":303,"to":"1@gmail.com","sent":true,"debug":null}}
+{"ts":"2026-09-27 03:29:34","step":"blankFlaggedCompanyInfoFields:cleared","data":{"user_id":303,"flag":"contact_first_name","column":"contact_first_name"}}
+{"ts":"2026-09-27 03:29:39","step":"regenerateAndReturnMoaToCompany:saved","data":{"user_id":303,"ok":true,"bytes":403697}}
+{"ts":"2026-09-27 03:40:16","step":"detectAndNotifyRequirementUploads:notified","data":{"user_id":303,"requirements":["authority_moa_public"],"merged":false}}
+{"ts":"2026-09-27 03:41:15","step":"ajax_moa_table_flag_revision:start","data":{"user_id":303,"comment_length":5,"flags":["contact_first_name"]}}
+{"ts":"2026-09-27 03:41:15","step":"ajax_moa_table_flag_revision:moa_row_lookup","data":{"user_id":303,"found":true}}
+{"ts":"2026-09-27 03:41:15","step":"ajax_moa_table_flag_revision:mail_result","data":{"user_id":303,"to":"1@gmail.com","sent":true,"debug":null}}
+{"ts":"2026-09-27 03:41:15","step":"blankFlaggedCompanyInfoFields:cleared","data":{"user_id":303,"flag":"contact_first_name","column":"contact_first_name"}}
+{"ts":"2026-09-27 03:41:35","step":"regenerateAndReturnMoaToCompany:saved","data":{"user_id":303,"ok":true,"bytes":403697}}
+{"ts":"2026-09-27 03:41:40","step":"sendMoaRejectionEmailWithAttachment:pre_send","data":{"to":"1@gmail.com","subject":"Update on Your MOA Request - Mathew's Bakery","body_bytes":746,"has_attachment":true,"attachment_bytes":403673,"flagged_labels":["Contact First Name"],"transport":"PHPMailer SMTP (smtp.gmail.com:587 STARTTLS)"}}
+{"ts":"2026-09-27 03:41:48","step":"sendMoaRejectionEmailWithAttachment:result","data":{"to":"1@gmail.com","has_attachment":true,"sent":true}}
+{"ts":"2026-09-27 03:41:48","step":"cvMoaUndoSendPending:flag_mail","data":{"to":"1@gmail.com","sent":true,"debug":[]}}
+{"ts":"2026-09-27 03:42:06","step":"detectAndNotifyComplianceEvents:notified","data":{"user_id":303,"company_requirements_id":265,"event_type":"revision_complied"}}
+{"ts":"2026-09-27 03:43:46","step":"detectAndNotifyRequirementUploads:notified","data":{"user_id":303,"requirements":["training_supervisor_pds"],"merged":false}}
+{"ts":"2026-09-27 03:44:11","step":"detectAndNotifyRequirementUploads:notified","data":{"user_id":303,"requirements":["legislative_charter"],"merged":false}}
+{"ts":"2026-09-27 03:45:48","step":"ajax_moa_table_flag_revision:start","data":{"user_id":303,"comment_length":3,"flags":["contact_first_name"]}}
+{"ts":"2026-09-27 03:45:48","step":"ajax_moa_table_flag_revision:moa_row_lookup","data":{"user_id":303,"found":true}}
+{"ts":"2026-09-27 03:45:48","step":"ajax_moa_table_flag_revision:mail_result","data":{"user_id":303,"to":"1@gmail.com","sent":true,"debug":null}}
+{"ts":"2026-09-27 03:45:48","step":"blankFlaggedCompanyInfoFields:cleared","data":{"user_id":303,"flag":"contact_first_name","column":"contact_first_name"}}
+{"ts":"2026-09-27 03:45:53","step":"regenerateAndReturnMoaToCompany:saved","data":{"user_id":303,"ok":true,"bytes":403697}}
+{"ts":"2026-09-27 03:45:57","step":"sendMoaRejectionEmailWithAttachment:pre_send","data":{"to":"1@gmail.com","subject":"Update on Your MOA Request - Mathew's Bakery","body_bytes":744,"has_attachment":true,"attachment_bytes":403678,"flagged_labels":["Contact First Name"],"transport":"PHPMailer SMTP (smtp.gmail.com:587 STARTTLS)"}}
+{"ts":"2026-09-27 03:46:05","step":"sendMoaRejectionEmailWithAttachment:result","data":{"to":"1@gmail.com","has_attachment":true,"sent":true}}
+{"ts":"2026-09-27 03:46:05","step":"cvMoaUndoSendPending:flag_mail","data":{"to":"1@gmail.com","sent":true,"debug":[]}}
+{"ts":"2026-09-27 03:46:23","step":"detectAndNotifyRequirementUploads:notified","data":{"user_id":303,"requirements":["authority_moa_public"],"merged":false}}
+{"ts":"2026-09-27 03:49:08","step":"detectAndNotifyComplianceEvents:notified","data":{"user_id":303,"company_requirements_id":265,"event_type":"revision_complied"}}
+{"ts":"2026-09-27 03:49:33","step":"detectAndNotifyRequirementUploads:notified","data":{"user_id":303,"requirements":["training_supervisor_pds"],"merged":false}}
+{"ts":"2026-09-27 03:49:56","step":"detectAndNotifyRequirementUploads:notified","data":{"user_id":303,"requirements":["legislative_charter"],"merged":false}}
+{"ts":"2026-09-27 03:51:05","step":"detectAndNotifyRequirementUploads:notified","data":{"user_id":303,"requirements":["authority_moa_public"],"merged":false}}
+{"ts":"2026-09-27 03:53:17","step":"detectAndNotifyRequirementUploads:notified","data":{"user_id":303,"requirements":["legislative_charter","training_supervisor_pds"],"merged":false}}
+{"ts":"2026-09-27 04:39:52","step":"ajax_moa_table_flag_revision:start","data":{"user_id":303,"comment_length":2,"flags":["contact_first_name"]}}
+{"ts":"2026-09-27 04:39:52","step":"ajax_moa_table_flag_revision:moa_row_lookup","data":{"user_id":303,"found":true}}
+{"ts":"2026-09-27 04:39:52","step":"ajax_moa_table_flag_revision:mail_result","data":{"user_id":303,"to":"1@gmail.com","sent":true,"debug":null}}
+{"ts":"2026-09-27 04:39:52","step":"blankFlaggedCompanyInfoFields:cleared","data":{"user_id":303,"flag":"contact_first_name","column":"contact_first_name"}}
+{"ts":"2026-09-27 04:39:58","step":"regenerateAndReturnMoaToCompany:saved","data":{"user_id":303,"ok":true,"bytes":403697}}
+{"ts":"2026-09-27 04:40:01","step":"sendMoaRejectionEmailWithAttachment:pre_send","data":{"to":"1@gmail.com","subject":"Update on Your MOA Request - Mathew's Bakery","body_bytes":743,"has_attachment":true,"attachment_bytes":403689,"flagged_labels":["Contact First Name"],"transport":"PHPMailer SMTP (smtp.gmail.com:587 STARTTLS)"}}
+{"ts":"2026-09-27 04:40:10","step":"sendMoaRejectionEmailWithAttachment:result","data":{"to":"1@gmail.com","has_attachment":true,"sent":true}}
+{"ts":"2026-09-27 04:40:10","step":"cvMoaUndoSendPending:flag_mail","data":{"to":"1@gmail.com","sent":true,"debug":[]}}
+{"ts":"2026-09-27 04:41:16","step":"detectAndNotifyComplianceEvents:notified","data":{"user_id":303,"company_requirements_id":265,"event_type":"revision_complied"}}
+{"ts":"2026-09-27 04:42:01","step":"detectAndNotifyRequirementUploads:notified","data":{"user_id":303,"requirements":["authority_moa_public"],"merged":false}}
+{"ts":"2026-09-27 04:42:41","step":"detectAndNotifyRequirementUploads:notified","data":{"user_id":303,"requirements":["training_supervisor_pds"],"merged":false}}
+{"ts":"2026-09-27 04:43:17","step":"detectAndNotifyRequirementUploads:notified","data":{"user_id":303,"requirements":["legislative_charter"],"merged":false}}
+{"ts":"2026-09-27 04:43:36","step":"ajax_moa_table_flag_revision:start","data":{"user_id":303,"comment_length":6,"flags":["contact_first_name"]}}
+{"ts":"2026-09-27 04:43:36","step":"ajax_moa_table_flag_revision:moa_row_lookup","data":{"user_id":303,"found":true}}
+{"ts":"2026-09-27 04:43:36","step":"ajax_moa_table_flag_revision:mail_result","data":{"user_id":303,"to":"1@gmail.com","sent":true,"debug":null}}
+{"ts":"2026-09-27 04:43:36","step":"blankFlaggedCompanyInfoFields:cleared","data":{"user_id":303,"flag":"contact_first_name","column":"contact_first_name"}}
+{"ts":"2026-09-27 04:43:41","step":"regenerateAndReturnMoaToCompany:saved","data":{"user_id":303,"ok":true,"bytes":403697}}
+{"ts":"2026-09-27 04:43:45","step":"sendMoaRejectionEmailWithAttachment:pre_send","data":{"to":"1@gmail.com","subject":"Update on Your MOA Request - Mathew's Bakery","body_bytes":747,"has_attachment":true,"attachment_bytes":403678,"flagged_labels":["Contact First Name"],"transport":"PHPMailer SMTP (smtp.gmail.com:587 STARTTLS)"}}
+{"ts":"2026-09-27 04:43:53","step":"sendMoaRejectionEmailWithAttachment:result","data":{"to":"1@gmail.com","has_attachment":true,"sent":true}}
+{"ts":"2026-09-27 04:43:53","step":"cvMoaUndoSendPending:flag_mail","data":{"to":"1@gmail.com","sent":true,"debug":[]}}
+{"ts":"2026-09-27 04:44:37","step":"detectAndNotifyComplianceEvents:notified","data":{"user_id":303,"company_requirements_id":265,"event_type":"revision_complied"}}
+{"ts":"2026-09-27 04:46:20","step":"ajax_moa_table_flag_revision:start","data":{"user_id":303,"comment_length":8,"flags":["contact_first_name"]}}
+{"ts":"2026-09-27 04:46:20","step":"ajax_moa_table_flag_revision:moa_row_lookup","data":{"user_id":303,"found":true}}
+{"ts":"2026-09-27 04:46:20","step":"ajax_moa_table_flag_revision:mail_result","data":{"user_id":303,"to":"1@gmail.com","sent":true,"debug":null}}
+{"ts":"2026-09-27 04:46:20","step":"blankFlaggedCompanyInfoFields:cleared","data":{"user_id":303,"flag":"contact_first_name","column":"contact_first_name"}}
+{"ts":"2026-09-27 04:46:25","step":"regenerateAndReturnMoaToCompany:saved","data":{"user_id":303,"ok":true,"bytes":403697}}
+{"ts":"2026-09-27 04:46:30","step":"sendMoaRejectionEmailWithAttachment:pre_send","data":{"to":"1@gmail.com","subject":"Update on Your MOA Request - Mathew's Bakery","body_bytes":749,"has_attachment":true,"attachment_bytes":403678,"flagged_labels":["Contact First Name"],"transport":"PHPMailer SMTP (smtp.gmail.com:587 STARTTLS)"}}
+{"ts":"2026-09-27 04:46:39","step":"sendMoaRejectionEmailWithAttachment:result","data":{"to":"1@gmail.com","has_attachment":true,"sent":true}}
+{"ts":"2026-09-27 04:46:39","step":"cvMoaUndoSendPending:flag_mail","data":{"to":"1@gmail.com","sent":true,"debug":[]}}
+{"ts":"2026-09-27 04:47:04","step":"detectAndNotifyComplianceEvents:notified","data":{"user_id":303,"company_requirements_id":265,"event_type":"revision_complied"}}
+{"ts":"2026-09-27 04:48:14","step":"detectAndNotifyRequirementUploads:notified","data":{"user_id":303,"requirements":["authority_moa_public"],"merged":false}}
+{"ts":"2026-09-27 04:50:13","step":"detectAndNotifyRequirementUploads:notified","data":{"user_id":303,"requirements":["training_supervisor_pds"],"merged":false}}
+{"ts":"2026-09-27 04:52:05","step":"detectAndNotifyRequirementUploads:notified","data":{"user_id":303,"requirements":["legislative_charter"],"merged":false}}

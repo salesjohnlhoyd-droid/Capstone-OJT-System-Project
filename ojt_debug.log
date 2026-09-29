@@ -1,0 +1,341 @@
+[29-May-2026 08:42:29 Asia/Manila] [OJT Submit] POST handler reached. ajax=1 user=87 day=5
+[29-May-2026 08:42:29 Asia/Manila] [OJT Submit] date(N)=5 is_ajax=true
+[29-May-2026 08:42:29 Asia/Manila] [OJT Submit] week_start=2026-05-25 company_id=88
+[29-May-2026 08:42:29 Asia/Manila] PHP Fatal error:  Uncaught mysqli_sql_exception: Unknown column 'name' in 'field list' in C:\xampp\htdocs\phpmailer\student_report.php:489
+Stack trace:
+#0 C:\xampp\htdocs\phpmailer\student_report.php(489): mysqli->prepare('SELECT name, su...')
+#1 {main}
+  thrown in C:\xampp\htdocs\phpmailer\student_report.php on line 489
+[29-May-2026 08:53:54 Asia/Manila] [OJT Submit] POST handler reached. ajax=1 user=87 day=5
+[29-May-2026 08:53:54 Asia/Manila] [OJT Submit] date(N)=5 is_ajax=true
+[29-May-2026 08:53:54 Asia/Manila] [OJT Submit] week_start=2026-05-25 company_id=88
+[29-May-2026 08:53:54 Asia/Manila] PHP Fatal error:  Uncaught mysqli_sql_exception: Unknown column 'name' in 'field list' in C:\xampp\htdocs\phpmailer\student_report.php:495
+Stack trace:
+#0 C:\xampp\htdocs\phpmailer\student_report.php(495): mysqli->prepare('SELECT name, su...')
+#1 {main}
+  thrown in C:\xampp\htdocs\phpmailer\student_report.php on line 495
+[29-May-2026 08:54:47 Asia/Manila] [OJT Submit] POST handler reached. ajax=1 user=87 day=5
+[29-May-2026 08:54:47 Asia/Manila] [OJT Submit] date(N)=5 is_ajax=true
+[29-May-2026 08:54:47 Asia/Manila] [OJT Submit] week_start=2026-05-25 company_id=88
+[29-May-2026 08:54:47 Asia/Manila] PHP Fatal error:  Uncaught mysqli_sql_exception: Unknown column 'name' in 'field list' in C:\xampp\htdocs\phpmailer\student_report.php:495
+Stack trace:
+#0 C:\xampp\htdocs\phpmailer\student_report.php(495): mysqli->prepare('SELECT name, su...')
+#1 {main}
+  thrown in C:\xampp\htdocs\phpmailer\student_report.php on line 495
+[29-May-2026 09:15:11 Asia/Manila] [OJT Submit] POST handler reached. ajax=1 user=87 day=5
+[29-May-2026 09:15:11 Asia/Manila] [OJT Submit] date(N)=5 is_ajax=true
+[29-May-2026 09:15:11 Asia/Manila] [OJT Submit] week_start=2026-05-25 company_id=88
+[29-May-2026 09:15:11 Asia/Manila] [OJT Submit EXCEPTION] [mysqli_sql_exception] Unknown column 'name' in 'field list' in student_report.php:833
+#0 C:\xampp\htdocs\phpmailer\student_report.php(833): mysqli->prepare('SELECT name, su...')
+#1 {main}
+[29-May-2026 16:27:21 Asia/Manila] [OJT Submit] POST handler reached. ajax=1 user=87 day=5
+[29-May-2026 16:27:21 Asia/Manila] [OJT Submit] date(N)=5 is_ajax=true
+[29-May-2026 16:27:21 Asia/Manila] [OJT Submit] week_start=2026-05-25 company_id=88
+[29-May-2026 16:27:21 Asia/Manila] [OJT Submit EXCEPTION] [mysqli_sql_exception] Unknown column 'name' in 'field list' in student_report.php:833
+#0 C:\xampp\htdocs\phpmailer\student_report.php(833): mysqli->prepare('SELECT name, su...')
+#1 {main}
+[29-May-2026 16:38:35 Asia/Manila] [OJT Submit] POST handler reached. ajax=1 user=87 day=5
+[29-May-2026 16:38:35 Asia/Manila] [OJT Submit] date(N)=5 is_ajax=true
+[29-May-2026 16:38:35 Asia/Manila] [OJT Submit] week_start=2026-05-25 company_id=88
+[29-May-2026 16:38:35 Asia/Manila] [OJT Submit EXCEPTION] [mysqli_sql_exception] Unknown column 'name' in 'field list' in student_report.php:833
+#0 C:\xampp\htdocs\phpmailer\student_report.php(833): mysqli->prepare('SELECT name, su...')
+#1 {main}
+[29-May-2026 16:51:09 Asia/Manila] [OJT Submit] POST handler reached. ajax=1 user=87 day=5
+[29-May-2026 16:51:09 Asia/Manila] [OJT Submit] date(N)=5 is_ajax=true
+[29-May-2026 16:51:09 Asia/Manila] [OJT Submit] week_start=2026-05-25 company_id=88
+[29-May-2026 16:51:09 Asia/Manila] [OJT Submit] Starting spreadsheet generation for user=87
+[29-May-2026 16:51:10 Asia/Manila] [OJT Submit] Excel blob size=7628 bytes
+[29-May-2026 16:51:10 Asia/Manila] [OJT Submit] Inserted new report, insert_id=13
+[29-May-2026 17:14:19 Asia/Manila] [OJT Submit] POST handler reached. ajax=1 user=87 day=5
+[29-May-2026 17:14:19 Asia/Manila] [OJT Submit] date(N)=5 is_ajax=true
+[29-May-2026 17:14:19 Asia/Manila] [OJT Submit] week_start=2026-05-25 company_id=88
+[29-May-2026 17:14:19 Asia/Manila] [OJT Submit] Generating HTML report for user=87 total_hours=0
+[29-May-2026 17:14:19 Asia/Manila] [OJT Submit] HTML blob size=19806 bytes
+[29-May-2026 17:14:19 Asia/Manila] [OJT Submit] Inserted new report, insert_id=14
+[29-May-2026 17:38:13 Asia/Manila] [OJT Submit] POST handler reached. ajax=1 user=87 day=5
+[29-May-2026 17:38:13 Asia/Manila] [OJT Submit] date(N)=5 is_ajax=true
+[29-May-2026 17:38:13 Asia/Manila] [OJT Submit] week_start=2026-05-25 company_id=88
+[29-May-2026 17:38:13 Asia/Manila] [OJT Submit] Generating HTML report for user=87 total_hours=0
+[29-May-2026 17:38:13 Asia/Manila] [OJT Submit] HTML blob size=21020 bytes
+[29-May-2026 17:38:13 Asia/Manila] [OJT Submit] Inserted new report, insert_id=15
+[29-May-2026 17:45:30 Asia/Manila] [OJT UNCAUGHT] [mysqli_sql_exception] Unknown column 'course' in 'field list' in student_report.php:186
+#0 C:\xampp\htdocs\phpmailer\student_report.php(186): mysqli->prepare('SELECT course,\r...')
+#1 C:\xampp\htdocs\phpmailer\student_report.php(1099): fetchStudentInfoFields(Object(mysqli), 87)
+#2 {main}
+[29-May-2026 17:45:40 Asia/Manila] [OJT UNCAUGHT] [mysqli_sql_exception] Unknown column 'course' in 'field list' in student_report.php:186
+#0 C:\xampp\htdocs\phpmailer\student_report.php(186): mysqli->prepare('SELECT course,\r...')
+#1 C:\xampp\htdocs\phpmailer\student_report.php(1099): fetchStudentInfoFields(Object(mysqli), 87)
+#2 {main}
+[29-May-2026 17:45:40 Asia/Manila] [OJT UNCAUGHT] [mysqli_sql_exception] Unknown column 'course' in 'field list' in student_report.php:186
+#0 C:\xampp\htdocs\phpmailer\student_report.php(186): mysqli->prepare('SELECT course,\r...')
+#1 C:\xampp\htdocs\phpmailer\student_report.php(1099): fetchStudentInfoFields(Object(mysqli), 87)
+#2 {main}
+[29-May-2026 17:45:40 Asia/Manila] [OJT UNCAUGHT] [mysqli_sql_exception] Unknown column 'course' in 'field list' in student_report.php:186
+#0 C:\xampp\htdocs\phpmailer\student_report.php(186): mysqli->prepare('SELECT course,\r...')
+#1 C:\xampp\htdocs\phpmailer\student_report.php(1099): fetchStudentInfoFields(Object(mysqli), 87)
+#2 {main}
+[29-May-2026 17:45:40 Asia/Manila] [OJT UNCAUGHT] [mysqli_sql_exception] Unknown column 'course' in 'field list' in student_report.php:186
+#0 C:\xampp\htdocs\phpmailer\student_report.php(186): mysqli->prepare('SELECT course,\r...')
+#1 C:\xampp\htdocs\phpmailer\student_report.php(1099): fetchStudentInfoFields(Object(mysqli), 87)
+#2 {main}
+[29-May-2026 17:45:41 Asia/Manila] [OJT UNCAUGHT] [mysqli_sql_exception] Unknown column 'course' in 'field list' in student_report.php:186
+#0 C:\xampp\htdocs\phpmailer\student_report.php(186): mysqli->prepare('SELECT course,\r...')
+#1 C:\xampp\htdocs\phpmailer\student_report.php(1099): fetchStudentInfoFields(Object(mysqli), 87)
+#2 {main}
+[29-May-2026 17:50:28 Asia/Manila] [OJT UNCAUGHT] [mysqli_sql_exception] Unknown column 'course' in 'field list' in student_report.php:186
+#0 C:\xampp\htdocs\phpmailer\student_report.php(186): mysqli->prepare('SELECT course,\r...')
+#1 C:\xampp\htdocs\phpmailer\student_report.php(1099): fetchStudentInfoFields(Object(mysqli), 87)
+#2 {main}
+[29-May-2026 17:59:50 Asia/Manila] [OJT UNCAUGHT] [mysqli_sql_exception] Unknown column 'course' in 'field list' in student_report.php:258
+#0 C:\xampp\htdocs\phpmailer\student_report.php(258): mysqli->prepare('SELECT course,\r...')
+#1 C:\xampp\htdocs\phpmailer\student_report.php(1216): fetchStudentInfoFields(Object(mysqli), 87)
+#2 {main}
+[30-May-2026 14:58:30 Asia/Manila] [OJT UNCAUGHT] [mysqli_sql_exception] Unknown column 'course' in 'field list' in student_report.php:258
+#0 C:\xampp\htdocs\phpmailer\student_report.php(258): mysqli->prepare('SELECT course,\r...')
+#1 C:\xampp\htdocs\phpmailer\student_report.php(1216): fetchStudentInfoFields(Object(mysqli), 87)
+#2 {main}
+[29-May-2026 15:03:20 Asia/Manila] [OJT UNCAUGHT] [mysqli_sql_exception] Unknown column 'course' in 'field list' in student_report.php:258
+#0 C:\xampp\htdocs\phpmailer\student_report.php(258): mysqli->prepare('SELECT course,\r...')
+#1 C:\xampp\htdocs\phpmailer\student_report.php(1216): fetchStudentInfoFields(Object(mysqli), 87)
+#2 {main}
+[29-May-2026 15:03:21 Asia/Manila] [OJT UNCAUGHT] [mysqli_sql_exception] Unknown column 'course' in 'field list' in student_report.php:258
+#0 C:\xampp\htdocs\phpmailer\student_report.php(258): mysqli->prepare('SELECT course,\r...')
+#1 C:\xampp\htdocs\phpmailer\student_report.php(1216): fetchStudentInfoFields(Object(mysqli), 87)
+#2 {main}
+[29-May-2026 15:17:40 Asia/Manila] [OJT Submit] POST handler reached. ajax=1 user=87 day=5
+[29-May-2026 15:17:40 Asia/Manila] [OJT Submit] date(N)=5 is_ajax=true
+[29-May-2026 15:17:40 Asia/Manila] [OJT Submit] week_start=2026-05-25 company_id=88
+[29-May-2026 15:17:40 Asia/Manila] [OJT Submit] Generating HTML report for user=87 total_hours=0
+[29-May-2026 15:17:40 Asia/Manila] [OJT Submit] HTML blob size=21003 bytes
+[29-May-2026 15:17:40 Asia/Manila] [OJT Submit] Inserted new report, insert_id=16
+[29-May-2026 17:12:50 Asia/Manila] [OJT Submit] POST handler reached. ajax=1 user=87 day=5
+[29-May-2026 17:12:50 Asia/Manila] [OJT Submit] date(N)=5 is_ajax=true
+[29-May-2026 17:12:50 Asia/Manila] [OJT Submit] week_start=2026-05-25 company_id=88
+[29-May-2026 17:12:50 Asia/Manila] [OJT Submit] Generating HTML report for user=87 total_hours=3.85
+[29-May-2026 17:12:50 Asia/Manila] [OJT Submit] HTML blob size=20979 bytes
+[29-May-2026 17:12:50 Asia/Manila] [OJT Submit] Inserted new report, insert_id=17
+[29-May-2026 15:02:41 Asia/Manila] [OJT Submit] POST handler reached. ajax=1 user=87 day=5
+[29-May-2026 15:02:41 Asia/Manila] [OJT Submit] date(N)=5 is_ajax=true
+[29-May-2026 15:02:41 Asia/Manila] [OJT Submit] week_start=2026-05-25 company_id=88
+[29-May-2026 15:02:41 Asia/Manila] [OJT Submit] Generating HTML report for user=87 total_hours=21.81
+[29-May-2026 15:02:41 Asia/Manila] [OJT Submit] HTML blob size=21538 bytes
+[29-May-2026 15:02:41 Asia/Manila] [OJT Submit] Inserted new report, insert_id=18
+[29-May-2026 11:38:13 Asia/Manila] [OJT Submit] POST handler reached. ajax=1 user=87 day=5
+[29-May-2026 11:38:13 Asia/Manila] [OJT Submit] date(N)=5 is_ajax=true
+[29-May-2026 11:38:13 Asia/Manila] [OJT Submit] week_start=2026-05-25 company_id=88
+[29-May-2026 11:38:13 Asia/Manila] [OJT Submit] Generating HTML report for user=87 total_hours=21.81
+[29-May-2026 11:38:13 Asia/Manila] [OJT Submit] HTML blob size=25899 bytes
+[29-May-2026 11:38:13 Asia/Manila] [OJT Submit] Inserted new report, insert_id=19
+[29-May-2026 11:43:06 Asia/Manila] [OJT Submit] POST handler reached. ajax=1 user=87 day=5
+[29-May-2026 11:43:06 Asia/Manila] [OJT Submit] date(N)=5 is_ajax=true
+[29-May-2026 11:43:06 Asia/Manila] [OJT Submit] week_start=2026-05-25 company_id=88
+[29-May-2026 11:43:06 Asia/Manila] [OJT Submit] Generating HTML report for user=87 total_hours=21.81
+[29-May-2026 11:43:06 Asia/Manila] [OJT Submit] HTML blob size=25899 bytes
+[29-May-2026 11:43:06 Asia/Manila] [OJT Submit] Inserted new report, insert_id=20
+[29-May-2026 11:45:10 Asia/Manila] [OJT Submit] POST handler reached. ajax=1 user=87 day=5
+[29-May-2026 11:45:10 Asia/Manila] [OJT Submit] date(N)=5 is_ajax=true
+[29-May-2026 11:45:10 Asia/Manila] [OJT Submit] week_start=2026-05-25 company_id=88
+[29-May-2026 11:45:10 Asia/Manila] [OJT Submit] Generating HTML report for user=87 total_hours=21.81
+[29-May-2026 11:45:10 Asia/Manila] [OJT Submit] HTML blob size=25771 bytes
+[29-May-2026 11:45:10 Asia/Manila] [OJT Submit] Inserted new report, insert_id=21
+[29-May-2026 11:50:56 Asia/Manila] [OJT Submit] POST handler reached. ajax=1 user=87 day=5
+[29-May-2026 11:50:56 Asia/Manila] [OJT Submit] date(N)=5 is_ajax=true
+[29-May-2026 11:50:56 Asia/Manila] [OJT Submit] week_start=2026-05-25 company_id=88
+[29-May-2026 11:50:56 Asia/Manila] [OJT Submit] Generating HTML report for user=87 total_hours=21.81
+[29-May-2026 11:50:56 Asia/Manila] [OJT Submit] HTML blob size=26671 bytes
+[29-May-2026 11:50:56 Asia/Manila] [OJT Submit] Inserted new report, insert_id=22
+[29-May-2026 11:57:46 Asia/Manila] [OJT Submit] POST handler reached. ajax=1 user=87 day=5
+[29-May-2026 11:57:46 Asia/Manila] [OJT Submit] date(N)=5 is_ajax=true
+[29-May-2026 11:57:46 Asia/Manila] [OJT Submit] week_start=2026-05-25 company_id=88
+[29-May-2026 11:57:46 Asia/Manila] [OJT Submit] Generating HTML report for user=87 total_hours=21.81
+[29-May-2026 11:57:46 Asia/Manila] [OJT Submit] HTML blob size=26671 bytes
+[29-May-2026 11:57:46 Asia/Manila] [OJT Submit] Inserted new report, insert_id=23
+[29-May-2026 12:08:22 Asia/Manila] [OJT Submit] POST handler reached. ajax=1 user=87 day=5
+[29-May-2026 12:08:22 Asia/Manila] [OJT Submit] date(N)=5 is_ajax=true
+[29-May-2026 12:08:22 Asia/Manila] [OJT Submit] week_start=2026-05-25 company_id=88
+[29-May-2026 12:08:22 Asia/Manila] [OJT Submit] Generating HTML report for user=87 total_hours=21.81
+[29-May-2026 12:08:22 Asia/Manila] [OJT Submit] HTML blob size=32605 bytes
+[29-May-2026 12:08:22 Asia/Manila] [OJT Submit] Inserted new report, insert_id=24
+[29-May-2026 12:14:29 Asia/Manila] [OJT Submit] POST handler reached. ajax=1 user=87 day=5
+[29-May-2026 12:14:29 Asia/Manila] [OJT Submit] date(N)=5 is_ajax=true
+[29-May-2026 12:14:29 Asia/Manila] [OJT Submit] week_start=2026-05-25 company_id=88
+[29-May-2026 12:14:29 Asia/Manila] [OJT Submit] Generating HTML report for user=87 total_hours=21.81
+[29-May-2026 12:14:29 Asia/Manila] [OJT Submit] HTML blob size=26983 bytes
+[29-May-2026 12:14:29 Asia/Manila] [OJT Submit] Inserted new report, insert_id=25
+[29-May-2026 12:19:47 Asia/Manila] [OJT Submit] POST handler reached. ajax=1 user=87 day=5
+[29-May-2026 12:19:47 Asia/Manila] [OJT Submit] date(N)=5 is_ajax=true
+[29-May-2026 12:19:47 Asia/Manila] [OJT Submit] week_start=2026-05-25 company_id=88
+[29-May-2026 12:19:47 Asia/Manila] [OJT Submit] Generating HTML report for user=87 total_hours=21.81
+[29-May-2026 12:19:47 Asia/Manila] [OJT Submit] HTML blob size=19728 bytes
+[29-May-2026 12:19:47 Asia/Manila] [OJT Submit] Inserted new report, insert_id=26
+[29-May-2026 12:21:06 Asia/Manila] [OJT Submit] POST handler reached. ajax=1 user=87 day=5
+[29-May-2026 12:21:06 Asia/Manila] [OJT Submit] date(N)=5 is_ajax=true
+[29-May-2026 12:21:06 Asia/Manila] [OJT Submit] week_start=2026-05-25 company_id=88
+[29-May-2026 12:21:06 Asia/Manila] [OJT Submit] Generating HTML report for user=87 total_hours=21.81
+[29-May-2026 12:21:06 Asia/Manila] [OJT Submit] HTML blob size=24107 bytes
+[29-May-2026 12:21:06 Asia/Manila] [OJT Submit] Inserted new report, insert_id=27
+[29-May-2026 12:21:49 Asia/Manila] [OJT Submit] POST handler reached. ajax=1 user=87 day=5
+[29-May-2026 12:21:49 Asia/Manila] [OJT Submit] date(N)=5 is_ajax=true
+[29-May-2026 12:21:49 Asia/Manila] [OJT Submit] week_start=2026-05-25 company_id=88
+[29-May-2026 12:21:49 Asia/Manila] [OJT Submit] Generating HTML report for user=87 total_hours=21.81
+[29-May-2026 12:21:49 Asia/Manila] [OJT Submit] HTML blob size=29729 bytes
+[29-May-2026 12:21:49 Asia/Manila] [OJT Submit] Inserted new report, insert_id=28
+[29-May-2026 12:23:00 Asia/Manila] [OJT Submit] POST handler reached. ajax=1 user=87 day=5
+[29-May-2026 12:23:00 Asia/Manila] [OJT Submit] date(N)=5 is_ajax=true
+[29-May-2026 12:23:00 Asia/Manila] [OJT Submit] week_start=2026-05-25 company_id=88
+[29-May-2026 12:23:00 Asia/Manila] [OJT Submit] Generating HTML report for user=87 total_hours=21.81
+[29-May-2026 12:23:00 Asia/Manila] [OJT Submit] HTML blob size=26671 bytes
+[29-May-2026 12:23:00 Asia/Manila] [OJT Submit] Inserted new report, insert_id=29
+[29-May-2026 12:32:13 Asia/Manila] [OJT Submit] POST handler reached. ajax=1 user=87 day=5
+[29-May-2026 12:32:13 Asia/Manila] [OJT Submit] date(N)=5 is_ajax=true
+[29-May-2026 12:32:13 Asia/Manila] [OJT Submit] week_start=2026-05-25 company_id=88
+[29-May-2026 12:32:13 Asia/Manila] [OJT Submit] Generating HTML report for user=87 total_hours=21.81
+[29-May-2026 12:32:13 Asia/Manila] [OJT Submit] HTML blob size=32426 bytes
+[29-May-2026 12:32:13 Asia/Manila] [OJT Submit] Inserted new report, insert_id=30
+[29-May-2026 12:39:02 Asia/Manila] [OJT Submit] POST handler reached. ajax=1 user=87 day=5
+[29-May-2026 12:39:02 Asia/Manila] [OJT Submit] date(N)=5 is_ajax=true
+[29-May-2026 12:39:02 Asia/Manila] [OJT Submit] week_start=2026-05-25 company_id=88
+[29-May-2026 12:39:02 Asia/Manila] [OJT Submit] Generating HTML report for user=87 total_hours=21.81
+[29-May-2026 12:39:02 Asia/Manila] [OJT Submit] HTML blob size=32488 bytes
+[29-May-2026 12:39:02 Asia/Manila] [OJT Submit] Inserted new report, insert_id=31
+[29-May-2026 12:41:18 Asia/Manila] [OJT Submit] POST handler reached. ajax=1 user=87 day=5
+[29-May-2026 12:41:18 Asia/Manila] [OJT Submit] date(N)=5 is_ajax=true
+[29-May-2026 12:41:18 Asia/Manila] [OJT Submit] week_start=2026-05-25 company_id=88
+[29-May-2026 12:41:18 Asia/Manila] [OJT Submit] Generating HTML report for user=87 total_hours=21.81
+[29-May-2026 12:41:18 Asia/Manila] [OJT Submit] HTML blob size=32426 bytes
+[29-May-2026 12:41:18 Asia/Manila] [OJT Submit] Inserted new report, insert_id=32
+[29-May-2026 12:49:37 Asia/Manila] [OJT Submit] POST handler reached. ajax=1 user=87 day=5
+[29-May-2026 12:49:37 Asia/Manila] [OJT Submit] date(N)=5 is_ajax=true
+[29-May-2026 12:49:37 Asia/Manila] [OJT Submit] week_start=2026-05-25 company_id=88
+[29-May-2026 12:49:37 Asia/Manila] [OJT Submit] Generating HTML report for user=87 total_hours=21.81
+[29-May-2026 12:49:37 Asia/Manila] [OJT Submit] HTML blob size=40369 bytes
+[29-May-2026 12:49:37 Asia/Manila] [OJT Submit] Inserted new report, insert_id=33
+[29-May-2026 12:58:31 Asia/Manila] [OJT Submit] POST handler reached. ajax=1 user=87 day=5
+[29-May-2026 12:58:31 Asia/Manila] [OJT Submit] date(N)=5 is_ajax=true
+[29-May-2026 12:58:31 Asia/Manila] [OJT Submit] week_start=2026-05-25 company_id=88
+[29-May-2026 12:58:31 Asia/Manila] [OJT Submit] Generating HTML report for user=87 total_hours=21.81
+[29-May-2026 12:58:31 Asia/Manila] [OJT Submit] HTML blob size=46312 bytes
+[29-May-2026 12:58:31 Asia/Manila] [OJT Submit] Inserted new report, insert_id=34
+[29-May-2026 13:13:54 Asia/Manila] [OJT Submit] POST handler reached. ajax=1 user=87 day=5
+[29-May-2026 13:13:54 Asia/Manila] [OJT Submit] date(N)=5 is_ajax=true
+[29-May-2026 13:13:54 Asia/Manila] [OJT Submit] week_start=2026-05-25 company_id=88
+[29-May-2026 13:13:54 Asia/Manila] [OJT Submit] Generating HTML report for user=87 total_hours=21.81
+[29-May-2026 13:13:54 Asia/Manila] [OJT Submit] HTML blob size=46940 bytes
+[29-May-2026 13:13:54 Asia/Manila] [OJT Submit] Inserted new report, insert_id=35
+[29-May-2026 06:49:02 Asia/Manila] [OJT Submit] POST handler reached. ajax=1 user=87 day=5
+[29-May-2026 06:49:02 Asia/Manila] [OJT Submit] date(N)=5 is_ajax=true
+[29-May-2026 06:49:02 Asia/Manila] [OJT Submit] week_start=2026-05-25 company_id=88
+[29-May-2026 06:49:02 Asia/Manila] [OJT Submit] Generating HTML report for user=87 total_hours=21.81
+[29-May-2026 06:49:02 Asia/Manila] [OJT Submit] HTML blob size=46940 bytes
+[29-May-2026 06:49:02 Asia/Manila] [OJT Submit] Inserted new report, insert_id=36
+[29-May-2026 06:51:13 Asia/Manila] [OJT Submit] POST handler reached. ajax=1 user=87 day=5
+[29-May-2026 06:51:13 Asia/Manila] [OJT Submit] date(N)=5 is_ajax=true
+[29-May-2026 06:51:13 Asia/Manila] [OJT Submit] week_start=2026-05-25 company_id=88
+[29-May-2026 06:51:13 Asia/Manila] [OJT Submit] Generating HTML report for user=87 total_hours=21.81
+[29-May-2026 06:51:13 Asia/Manila] [OJT Submit] HTML blob size=45552 bytes
+[29-May-2026 06:51:13 Asia/Manila] [OJT Submit] Inserted new report, insert_id=37
+[29-May-2026 06:57:43 Asia/Manila] [OJT Submit] POST handler reached. ajax=1 user=87 day=5
+[29-May-2026 06:57:43 Asia/Manila] [OJT Submit] date(N)=5 is_ajax=true
+[29-May-2026 06:57:43 Asia/Manila] [OJT Submit] week_start=2026-05-25 company_id=88
+[29-May-2026 06:57:43 Asia/Manila] [OJT Submit] Generating HTML report for user=87 total_hours=21.81
+[29-May-2026 06:57:43 Asia/Manila] [OJT Submit] HTML blob size=43987 bytes
+[29-May-2026 06:57:43 Asia/Manila] [OJT Submit] Inserted new report, insert_id=38
+[29-May-2026 07:04:46 Asia/Manila] [OJT Submit] POST handler reached. ajax=1 user=87 day=5
+[29-May-2026 07:04:46 Asia/Manila] [OJT Submit] date(N)=5 is_ajax=true
+[29-May-2026 07:04:46 Asia/Manila] [OJT Submit] week_start=2026-05-25 company_id=88
+[29-May-2026 07:04:46 Asia/Manila] [OJT Submit] Generating HTML report for user=87 total_hours=21.81
+[29-May-2026 07:04:46 Asia/Manila] [OJT Submit] HTML blob size=42337 bytes
+[29-May-2026 07:04:46 Asia/Manila] [OJT Submit] Inserted new report, insert_id=39
+[29-May-2026 07:10:59 Asia/Manila] [OJT Submit] POST handler reached. ajax=1 user=87 day=5
+[29-May-2026 07:10:59 Asia/Manila] [OJT Submit] date(N)=5 is_ajax=true
+[29-May-2026 07:10:59 Asia/Manila] [OJT Submit] week_start=2026-05-25 company_id=88
+[29-May-2026 07:10:59 Asia/Manila] [OJT Submit] Generating HTML report for user=87 total_hours=21.81
+[29-May-2026 07:10:59 Asia/Manila] [OJT Submit] HTML blob size=35066 bytes
+[29-May-2026 07:10:59 Asia/Manila] [OJT Submit] Inserted new report, insert_id=40
+[29-May-2026 07:17:49 Asia/Manila] [OJT Submit] POST handler reached. ajax=1 user=87 day=5
+[29-May-2026 07:17:49 Asia/Manila] [OJT Submit] date(N)=5 is_ajax=true
+[29-May-2026 07:17:49 Asia/Manila] [OJT Submit] week_start=2026-05-25 company_id=88
+[29-May-2026 07:17:49 Asia/Manila] [OJT Submit] Generating HTML report for user=87 total_hours=21.81
+[29-May-2026 07:17:49 Asia/Manila] [OJT Submit] HTML blob size=37976 bytes
+[29-May-2026 07:17:49 Asia/Manila] [OJT Submit] Inserted new report, insert_id=41
+[29-May-2026 07:21:46 Asia/Manila] [OJT Submit] POST handler reached. ajax=1 user=87 day=5
+[29-May-2026 07:21:46 Asia/Manila] [OJT Submit] date(N)=5 is_ajax=true
+[29-May-2026 07:21:46 Asia/Manila] [OJT Submit] week_start=2026-05-25 company_id=88
+[29-May-2026 07:21:46 Asia/Manila] [OJT Submit] Generating HTML report for user=87 total_hours=21.81
+[29-May-2026 07:21:46 Asia/Manila] [OJT Submit] HTML blob size=34496 bytes
+[29-May-2026 07:21:46 Asia/Manila] [OJT Submit] Inserted new report, insert_id=42
+[29-May-2026 07:23:12 Asia/Manila] [OJT Submit] POST handler reached. ajax=1 user=87 day=5
+[29-May-2026 07:23:12 Asia/Manila] [OJT Submit] date(N)=5 is_ajax=true
+[29-May-2026 07:23:12 Asia/Manila] [OJT Submit] week_start=2026-05-25 company_id=88
+[29-May-2026 07:23:12 Asia/Manila] [OJT Submit] Generating HTML report for user=87 total_hours=21.81
+[29-May-2026 07:23:12 Asia/Manila] [OJT Submit] HTML blob size=32537 bytes
+[29-May-2026 07:23:12 Asia/Manila] [OJT Submit] Inserted new report, insert_id=43
+[29-May-2026 07:27:06 Asia/Manila] [OJT Submit] POST handler reached. ajax=1 user=87 day=5
+[29-May-2026 07:27:06 Asia/Manila] [OJT Submit] date(N)=5 is_ajax=true
+[29-May-2026 07:27:06 Asia/Manila] [OJT Submit] week_start=2026-05-25 company_id=88
+[29-May-2026 07:27:06 Asia/Manila] [OJT Submit] Generating HTML report for user=87 total_hours=21.81
+[29-May-2026 07:27:06 Asia/Manila] [OJT Submit] HTML blob size=31277 bytes
+[29-May-2026 07:27:06 Asia/Manila] [OJT Submit] Inserted new report, insert_id=44
+[29-May-2026 07:41:22 Asia/Manila] [OJT Submit] POST handler reached. ajax=1 user=87 day=5
+[29-May-2026 07:41:22 Asia/Manila] [OJT Submit] date(N)=5 is_ajax=true
+[29-May-2026 07:41:22 Asia/Manila] [OJT Submit] week_start=2026-05-25 company_id=88
+[29-May-2026 07:41:23 Asia/Manila] [OJT Submit] Generating HTML report for user=87 total_hours=21.81
+[29-May-2026 07:41:23 Asia/Manila] [OJT Submit] HTML blob size=28187 bytes
+[29-May-2026 07:41:23 Asia/Manila] [OJT Submit] Inserted new report, insert_id=45
+[29-May-2026 15:44:06 Asia/Manila] PHP Parse error:  syntax error, unexpected string content "", expecting "-" or identifier or variable or number in C:\xampp\htdocs\phpmailer\cs_form48_builder.php on line 608
+[29-May-2026 15:44:08 Asia/Manila] PHP Parse error:  syntax error, unexpected string content "", expecting "-" or identifier or variable or number in C:\xampp\htdocs\phpmailer\cs_form48_builder.php on line 608
+[29-May-2026 15:44:09 Asia/Manila] PHP Parse error:  syntax error, unexpected string content "", expecting "-" or identifier or variable or number in C:\xampp\htdocs\phpmailer\cs_form48_builder.php on line 608
+[29-May-2026 15:44:10 Asia/Manila] PHP Parse error:  syntax error, unexpected string content "", expecting "-" or identifier or variable or number in C:\xampp\htdocs\phpmailer\cs_form48_builder.php on line 608
+[29-May-2026 15:44:18 Asia/Manila] PHP Parse error:  syntax error, unexpected string content "", expecting "-" or identifier or variable or number in C:\xampp\htdocs\phpmailer\cs_form48_builder.php on line 608
+[29-May-2026 15:44:18 Asia/Manila] PHP Parse error:  syntax error, unexpected string content "", expecting "-" or identifier or variable or number in C:\xampp\htdocs\phpmailer\cs_form48_builder.php on line 608
+[29-May-2026 15:44:19 Asia/Manila] PHP Parse error:  syntax error, unexpected string content "", expecting "-" or identifier or variable or number in C:\xampp\htdocs\phpmailer\cs_form48_builder.php on line 608
+[29-May-2026 15:44:19 Asia/Manila] PHP Parse error:  syntax error, unexpected string content "", expecting "-" or identifier or variable or number in C:\xampp\htdocs\phpmailer\cs_form48_builder.php on line 608
+[29-May-2026 15:44:19 Asia/Manila] PHP Parse error:  syntax error, unexpected string content "", expecting "-" or identifier or variable or number in C:\xampp\htdocs\phpmailer\cs_form48_builder.php on line 608
+[05-Jun-2026 15:46:37 Asia/Manila] [OJT UNCAUGHT] [Error] Class "PHPMailer\PHPMailer\PHPMailer" not found in student_report.php:394
+#0 {main}
+[05-Jun-2026 15:46:43 Asia/Manila] [OJT UNCAUGHT] [Error] Class "PHPMailer\PHPMailer\PHPMailer" not found in student_report.php:394
+#0 {main}
+[05-Jun-2026 15:46:45 Asia/Manila] [OJT UNCAUGHT] [Error] Class "PHPMailer\PHPMailer\PHPMailer" not found in student_report.php:394
+#0 {main}
+[05-Jun-2026 15:46:56 Asia/Manila] [OJT UNCAUGHT] [Error] Class "PHPMailer\PHPMailer\PHPMailer" not found in student_report.php:394
+#0 {main}
+[05-Jun-2026 15:48:31 Asia/Manila] [OJT UNCAUGHT] [Error] Class "PHPMailer\PHPMailer\PHPMailer" not found in student_report.php:394
+#0 {main}
+[05-Jun-2026 15:48:31 Asia/Manila] [OJT UNCAUGHT] [Error] Class "PHPMailer\PHPMailer\PHPMailer" not found in student_report.php:394
+#0 {main}
+[05-Jun-2026 15:48:31 Asia/Manila] [OJT UNCAUGHT] [Error] Class "PHPMailer\PHPMailer\PHPMailer" not found in student_report.php:394
+#0 {main}
+[05-Jun-2026 15:48:32 Asia/Manila] [OJT UNCAUGHT] [Error] Class "PHPMailer\PHPMailer\PHPMailer" not found in student_report.php:394
+#0 {main}
+[05-Jun-2026 15:52:27 Asia/Manila] [OJT UNCAUGHT] [Error] Class "PHPMailer\PHPMailer\PHPMailer" not found in student_report.php:394
+#0 {main}
+[05-Jun-2026 15:52:38 Asia/Manila] [OJT UNCAUGHT] [Error] Class "PHPMailer\PHPMailer\PHPMailer" not found in student_report.php:394
+#0 {main}
+[05-Jun-2026 15:53:52 Asia/Manila] [OJT UNCAUGHT] [Error] Class "PHPMailer\PHPMailer\PHPMailer" not found in student_report.php:394
+#0 {main}
+[05-Jun-2026 15:53:52 Asia/Manila] [OJT UNCAUGHT] [Error] Class "PHPMailer\PHPMailer\PHPMailer" not found in student_report.php:394
+#0 {main}
+[05-Jun-2026 15:53:53 Asia/Manila] [OJT UNCAUGHT] [Error] Class "PHPMailer\PHPMailer\PHPMailer" not found in student_report.php:394
+#0 {main}
+[05-Jun-2026 15:55:07 Asia/Manila] [OJT UNCAUGHT] [Error] Class "PHPMailer\PHPMailer\PHPMailer" not found in student_report.php:393
+#0 {main}
+[05-Jun-2026 15:55:08 Asia/Manila] [OJT UNCAUGHT] [Error] Class "PHPMailer\PHPMailer\PHPMailer" not found in student_report.php:393
+#0 {main}
+[05-Jun-2026 15:55:08 Asia/Manila] [OJT UNCAUGHT] [Error] Class "PHPMailer\PHPMailer\PHPMailer" not found in student_report.php:393
+#0 {main}
+[05-Jun-2026 15:55:08 Asia/Manila] [OJT UNCAUGHT] [Error] Class "PHPMailer\PHPMailer\PHPMailer" not found in student_report.php:393
+#0 {main}
+[05-Jun-2026 15:55:09 Asia/Manila] [OJT UNCAUGHT] [Error] Class "PHPMailer\PHPMailer\PHPMailer" not found in student_report.php:393
+#0 {main}
+[05-Jun-2026 15:55:09 Asia/Manila] [OJT UNCAUGHT] [Error] Class "PHPMailer\PHPMailer\PHPMailer" not found in student_report.php:393
+#0 {main}
+[05-Jun-2026 15:55:33 Asia/Manila] [OJT UNCAUGHT] [Error] Class "PHPMailer\PHPMailer\PHPMailer" not found in student_report.php:392
+#0 {main}
+[05-Jun-2026 15:55:33 Asia/Manila] [OJT UNCAUGHT] [Error] Class "PHPMailer\PHPMailer\PHPMailer" not found in student_report.php:392
+#0 {main}
+[05-Jun-2026 15:55:34 Asia/Manila] [OJT UNCAUGHT] [Error] Class "PHPMailer\PHPMailer\PHPMailer" not found in student_report.php:392
+#0 {main}
+[05-Jun-2026 15:55:34 Asia/Manila] [OJT UNCAUGHT] [Error] Class "PHPMailer\PHPMailer\PHPMailer" not found in student_report.php:392
+#0 {main}
+[05-Jun-2026 15:55:35 Asia/Manila] [OJT UNCAUGHT] [Error] Class "PHPMailer\PHPMailer\PHPMailer" not found in student_report.php:392
+#0 {main}

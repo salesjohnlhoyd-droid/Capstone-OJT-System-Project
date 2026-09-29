@@ -1,0 +1,105 @@
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700&display=swap');
+
+body {
+    margin: 0;
+    height: 100vh;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    font-family: 'Plus Jakarta Sans', sans-serif;
+    background: linear-gradient(rgba(0,0,0,0.1), rgba(0,0,0,0.1)),
+                url('https://images.unsplash.com/photo-1497366754035-f200968a6e72?q=80&w=2069&auto=format&fit=crop');
+    background-size: cover;
+    background-position: center;
+}
+
+.card {
+    background: rgba(255, 255, 255, 0.95);
+    backdrop-filter: blur(10px);
+    padding: 40px;
+    width: 380px;
+    border-radius: 24px;
+    box-shadow: 0 20px 50px rgba(0, 0, 0, 0.2);
+    border-top: 5px solid #0038a8;
+    text-align: center;
+}
+
+.logo-container img { max-width: 100px; margin-bottom: 10px; }
+
+h2 { color: #1e293b; margin-bottom: 25px; font-size: 26px; }
+
+.input-group { text-align: left; margin-bottom: 18px; }
+
+label {
+    display: block; font-size: 12px; font-weight: 700;
+    color: #64748b; margin-bottom: 6px; text-transform: uppercase;
+}
+
+input {
+    width: 100%; padding: 14px; border-radius: 12px;
+    border: 1.5px solid #e2e8f0; background: #f8fafc;
+    box-sizing: border-box; font-size: 14px;
+}
+
+.password-wrapper { position: relative; display: flex; align-items: center; }
+
+.toggle-btn {
+    position: absolute; right: 15px; background: none; border: none;
+    color: #0038a8; font-weight: 700; font-size: 11px;
+    cursor: pointer; text-transform: uppercase;
+}
+
+.login-submit {
+    width: 100%; padding: 16px; background-color: #0038a8;
+    color: white; border: none; border-radius: 12px;
+    font-weight: 600; font-size: 16px; cursor: pointer;
+    margin-top: 10px; transition: 0.3s;
+}
+.login-submit:hover { background-color: #002d86; transform: translateY(-2px); }
+
+.footer-text { margin-top: 20px; font-size: 14px; color: #64748b; }
+.footer-text a { color: #0038a8; text-decoration: none; font-weight: 700; }
+
+/* ── FORGOT PASSWORD LINK ── */
+.forgot-link {
+    display: block; margin-top: 12px; font-size: 13px;
+    color: #0038a8; text-decoration: none; font-weight: 600;
+    background: none; border: none; cursor: pointer;
+    width: 100%; text-align: center;
+}
+.forgot-link:hover { text-decoration: underline; color: #002d86; }
+
+/* ── SECONDARY BUTTON (cancel / resend) ── */
+.btn-secondary {
+    width: 100%; padding: 13px; background: #f1f5f9;
+    color: #475569; border: none; border-radius: 12px;
+    font-weight: 600; font-size: 14px; cursor: pointer;
+    margin-top: 10px; transition: 0.2s;
+}
+.btn-secondary:hover { background: #e2e8f0; }
+
+/* ── SUCCESS POPUP OVERLAY ── */
+#fpSuccessOverlay {
+    display: none; position: fixed; inset: 0;
+    background: rgba(0,0,0,0.55); z-index: 9999;
+    justify-content: center; align-items: center;
+    backdrop-filter: blur(4px);
+    animation: fadeIn 0.25s ease;
+}
+@keyframes fadeIn { from{opacity:0;} to{opacity:1;} }
+#fpSuccessBox {
+    background: white; border-radius: 20px; padding: 40px 36px;
+    width: 340px; max-width: 92%; text-align: center;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.25);
+    animation: popIn 0.3s cubic-bezier(0.34,1.56,0.64,1);
+}
+@keyframes popIn { from{transform:scale(0.85);opacity:0;} to{transform:scale(1);opacity:1;} }
+#fpSuccessBox .sp-icon  { font-size: 52px; display: block; margin-bottom: 14px; }
+#fpSuccessBox .sp-title { font-size: 18px; font-weight: 700; color: #0038a8; margin: 0 0 8px; }
+#fpSuccessBox .sp-msg   { font-size: 13px; color: #64748b; margin: 0 0 24px; line-height: 1.6; }
+#fpSuccessBox .sp-btn {
+    padding: 13px 36px; background: #0038a8; color: white;
+    border: none; border-radius: 12px; font-weight: 700;
+    font-size: 14px; cursor: pointer; transition: 0.2s;
+}
+#fpSuccessBox .sp-btn:hover { background: #002d86; }

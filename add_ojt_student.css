@@ -1,0 +1,239 @@
+/* style.css */
+
+/* ROOT VARIABLES - Matching your System Colors */
+:root {
+    --neust-maroon: #07145fe5;
+    --neust-gold: #FFD700;
+    --bg: #fcfaf7;
+    --text: #2d1b1b;
+    --white: #ffffff;
+    --sidebar-active: #1a237e;
+    --table-hover: #f8fafc;
+}
+
+/* General body styling */
+body {
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    background-color: var(--bg);
+    margin: 0;
+    display: flex; /* Required for Sidebar + Content layout */
+    color: var(--text);
+}
+
+/* --- SIDEBAR --- */
+.sidebar {
+    height: 100vh;
+    width: 260px; /* Matched to your Admin code */
+    background-color: var(--neust-maroon);
+    color: white;
+    display: flex;
+    flex-direction: column;
+    position: fixed;
+    left: 0;
+    top: 0;
+    transition: all 0.3s ease;
+    z-index: 1000;
+    box-shadow: 4px 0 10px rgba(0,0,0,0.1);
+}
+
+.sidebar.collapsed {
+    width: 80px;
+}
+
+.sidebar-header {
+    padding: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    border-bottom: 1px solid rgba(255,255,255,0.1);
+}
+
+.sidebar-header h2 {
+    color: var(--neust-gold);
+    margin: 0;
+    font-size: 20px;
+    font-weight: bold;
+    white-space: nowrap;
+    overflow: hidden;
+    transition: opacity 0.3s;
+}
+
+.sidebar.collapsed .sidebar-header h2 {
+    opacity: 0;
+    width: 0;
+}
+
+.sidebar .toggle-btn {
+    background: transparent;
+    border: none;
+    color: white;
+    cursor: pointer;
+    font-size: 20px;
+    outline: none;
+}
+
+/* Sidebar Links */
+.sidebar-links {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    padding: 10px 0;
+}
+
+.sidebar a {
+    padding: 15px 25px;
+    color: #cbd5e0;
+    text-decoration: none;
+    font-size: 14px;
+    display: flex;
+    align-items: center;
+    transition: 0.2s;
+    white-space: nowrap;
+}
+
+.sidebar a i {
+    width: 30px;
+    font-size: 18px;
+    margin-right: 15px;
+    text-align: center;
+}
+
+.sidebar.collapsed a i {
+    margin-right: 0;
+}
+
+.sidebar.collapsed .link-text {
+    display: none;
+}
+
+.sidebar a:hover {
+    color: white;
+    background: rgba(255,255,255,0.05);
+}
+
+.sidebar a.active {
+    background: var(--sidebar-active);
+    color: white;
+    border-left: 4px solid var(--neust-gold);
+}
+
+/* Logout at the Bottom */
+.logout-link {
+    margin-top: auto;
+    padding: 20px;
+    border-top: 1px solid rgba(255,255,255,0.1);
+}
+
+.logout-link a {
+    border: 1px solid var(--neust-gold);
+    color: var(--neust-gold);
+    border-radius: 6px;
+    justify-content: center;
+    padding: 10px;
+    text-decoration: none;
+    display: flex;
+    align-items: center;
+}
+
+/* --- MAIN CONTENT AREA --- */
+.main-content {
+    margin-left: 260px;
+    width: calc(100% - 260px);
+    transition: 0.3s;
+    padding: 20px;
+    box-sizing: border-box;
+}
+
+.sidebar.collapsed + .main-content {
+    margin-left: 80px;
+    width: calc(100% - 80px);
+}
+
+/* --- TABLE STYLING (FIXED) --- */
+.table-container {
+    background-color: var(--white);
+    padding: 20px;
+    border-radius: 10px;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.05);
+    margin-top: 20px;
+    overflow-x: auto;
+}
+
+table {
+    border-collapse: collapse;
+    width: 100%;
+    background-color: transparent;
+}
+
+th {
+    background-color: #f8fafc;
+    color: var(--neust-maroon);
+    font-weight: 600;
+    text-transform: uppercase;
+    font-size: 12px;
+    letter-spacing: 1px;
+    padding: 15px 12px;
+    border-bottom: 2px solid #edf2f7;
+    text-align: left;
+}
+
+td {
+    padding: 15px 12px;
+    border-bottom: 1px solid #edf2f7;
+    font-size: 14px;
+    color: #4a5568;
+    vertical-align: middle;
+}
+
+tr:hover {
+    background-color: var(--table-hover);
+}
+
+tr:last-child td {
+    border-bottom: none;
+}
+
+/* Photo Circle */
+.student-photo {
+    width: 45px;
+    height: 45px;
+    object-fit: cover;
+    border-radius: 50%;
+    border: 2px solid #edf2f7;
+}
+
+/* Form styling adjustments */
+form {
+    background-color: var(--white);
+    padding: 25px;
+    border-radius: 10px;
+    max-width: 600px;
+    margin-bottom: 30px;
+    box-shadow: 0 4px 15px rgba(0,0,0,0.05);
+}
+
+input[type="text"] {
+    width: 100%;
+    padding: 10px;
+    margin-top: 8px;
+    margin-bottom: 15px;
+    border: 1px solid #e2e8f0;
+    border-radius: 6px;
+    box-sizing: border-box;
+    background: #f8fafc;
+}
+
+button {
+    background-color: var(--neust-maroon);
+    color: #fff;
+    border: none;
+    padding: 10px 20px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-weight: 600;
+    transition: 0.3s;
+}
+
+button:hover {
+    background-color: var(--sidebar-active);
+}
