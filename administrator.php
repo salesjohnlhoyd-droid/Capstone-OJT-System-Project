@@ -1436,6 +1436,33 @@ if (!function_exists('svBlobIsPdf')) {
     }
 }
 
+/* ================= HELPER: EVERY STORED FILE OF ONE REQUIREMENT ===================
+   NEW (this adjustment) — MULTIPLE-FILE (stacked card) DISPLAY, ported from
+   company_validation.php's $cvFetchEntries(): returns one {id, isPdf} per stored file
+   (one `requirements` row each, oldest first) under a requirement_type. Only the first
+   2 KB of each file is read (enough to tell a PDF from an image), so the documents are
+   never loaded just to draw a card; they are streamed on demand by stream_student_file
+   (&file_id=…). Rows with no file are not entries. Fully guarded: any failure returns
+   an empty list, i.e. the card simply keeps its normal single-file display.
+================================================================= */
+if (!function_exists('svFetchFileEntries')) {
+    function svFetchFileEntries($conn, $uid, $type) {
+        $entries = [];
+        try {
+            $st = $conn->prepare("SELECT id, LEFT(file_name, 2048) AS head FROM requirements WHERE user_id = ? AND requirement_type = ? AND file_name IS NOT NULL AND file_name <> '' ORDER BY id ASC");
+            if (!$st) return $entries;
+            $st->bind_param("is", $uid, $type);
+            $st->execute();
+            $rs = $st->get_result();
+            while ($er = $rs->fetch_assoc()) {
+                $entries[] = ['id' => (int) $er['id'], 'isPdf' => svBlobIsPdf((string) $er['head'])];
+            }
+            $st->close();
+        } catch (\Throwable $e) { return []; }
+        return $entries;
+    }
+}
+
 /* ================= STREAM A STUDENT'S SUBMITTED FILE (inline) ====================
    NEW (this adjustment) — the same idea as company_validation.php's stream_req_blob:
    serves ONE stored file (a requirement, or the profile photo with type=photo) with
@@ -1450,13 +1477,22 @@ if (isset($_GET['stream_student_file'])) {
     $sf_type = trim((string) ($_GET['type'] ?? ''));
     if ($sf_uid <= 0 || $sf_type === '' || strlen($sf_type) > 100) { http_response_code(400); echo "Bad request."; exit; }
 
+    // optional file_id: streams ONE specific entry when a requirement holds several files (one `requirements`
+    // row each). It is always cross-checked against BOTH user_id and requirement_type, so it can only ever
+    // return a file that really belongs to that student's requirement. Without it the query is the original one.
+    $sf_fid  = ($sf_type !== 'photo') ? intval($_GET['file_id'] ?? 0) : 0;
     $sf_blob = null;
-    $sf_st = ($sf_type === 'photo')
-        ? $conn->prepare("SELECT student_photo AS blob_data FROM student_information WHERE user_id = ?")
-        : $conn->prepare("SELECT file_name AS blob_data FROM requirements WHERE user_id = ? AND requirement_type = ?");
+    if ($sf_type === 'photo') {
+        $sf_st = $conn->prepare("SELECT student_photo AS blob_data FROM student_information WHERE user_id = ?");
+    } elseif ($sf_fid > 0) {
+        $sf_st = $conn->prepare("SELECT file_name AS blob_data FROM requirements WHERE id = ? AND user_id = ? AND requirement_type = ?");
+    } else {
+        $sf_st = $conn->prepare("SELECT file_name AS blob_data FROM requirements WHERE user_id = ? AND requirement_type = ?");
+    }
     if (!$sf_st) { http_response_code(500); echo "Could not read the file."; exit; }
-    if ($sf_type === 'photo') { $sf_st->bind_param("i", $sf_uid); }
-    else                      { $sf_st->bind_param("is", $sf_uid, $sf_type); }
+    if ($sf_type === 'photo')  { $sf_st->bind_param("i", $sf_uid); }
+    elseif ($sf_fid > 0)       { $sf_st->bind_param("iis", $sf_fid, $sf_uid, $sf_type); }
+    else                       { $sf_st->bind_param("is", $sf_uid, $sf_type); }
     $sf_st->execute();
     $sf_row = $sf_st->get_result()->fetch_assoc();
     $sf_st->close();
@@ -1475,7 +1511,7 @@ if (isset($_GET['stream_student_file'])) {
     while (ob_get_level() > 0) { @ob_end_clean(); }
     header('Content-Type: ' . $sf_mime);
     header('X-Content-Type-Options: nosniff');
-    header('Content-Disposition: inline; filename="' . preg_replace('/[^a-zA-Z0-9_-]/', '_', $sf_type) . '_' . $sf_uid . '.' . $sf_ext . '"');
+    header('Content-Disposition: inline; filename="' . preg_replace('/[^a-zA-Z0-9_-]/', '_', $sf_type) . '_' . $sf_uid . ($sf_fid > 0 ? '_' . $sf_fid : '') . '.' . $sf_ext . '"');
     header('Content-Length: ' . strlen($sf_blob));
     header('Cache-Control: private, no-cache, must-revalidate');   // a re-upload under the same URL must never show the old file
     echo $sf_blob; exit;
@@ -1506,9 +1542,10 @@ if (isset($_POST['ajax_get_file'])) {
         $q->close();
         $b64 = (!empty($row['file_name'])) ? base64_encode($row['file_name']) : null;
         $isPdfFile = svBlobIsPdf($row['file_name'] ?? null);   // NEW (this adjustment)
+        $filesMeta = svFetchFileEntries($conn, $user_id, $type);   // NEW (this adjustment): every file of this requirement (stacked-card display)
     }
 
-    echo json_encode(['success' => true, 'file' => $b64, 'isPdf' => !empty($isPdfFile)]);
+    echo json_encode(['success' => true, 'file' => $b64, 'isPdf' => !empty($isPdfFile), 'files' => $filesMeta ?? []]);
     exit;
 }
 
@@ -3859,6 +3896,25 @@ if (!$courseOfferingsLoaded) {
         .cv-doc-nav-prev { left:16px; }
         .cv-doc-nav-next { right:16px; }
 
+        /* 2+ files — ONE overlaying "stacked card" (max 3 layers shown) with a count badge */
+        .cv-file-stack-wrap { flex-shrink:0; text-align:center; }
+        .cv-file-stack { position:relative; width:112px; height:104px; margin:0 auto 4px; }
+        .cv-file-stack .cv-stack-layer { position:absolute; top:8px; left:12px; width:88px; height:88px; box-sizing:border-box; border-radius:0; border:2px solid #A3AFC7; background-color:#ffffff; box-shadow:0 2px 5px rgba(0,0,0,0.12); overflow:hidden; transition:transform 0.15s; }
+        .cv-file-stack .cv-stack-layer img { width:100%; height:100%; object-fit:cover; object-position:top center; display:block; }
+        .cv-file-stack .cv-stack-layer.layer-1 { transform:rotate(0deg) translate(0, 0); z-index:3; }
+        .cv-file-stack .cv-stack-layer.layer-2 { transform:rotate(7deg) translate(5px, 3px); z-index:2; }
+        .cv-file-stack .cv-stack-layer.layer-3 { transform:rotate(-9deg) translate(-5px, 4px); z-index:1; }
+        .cv-file-stack-wrap:hover .cv-stack-layer.layer-1 { transform:rotate(0deg) translate(0, -2px); }
+        .cv-file-stack-wrap:hover .cv-stack-layer.layer-2 { transform:rotate(9deg) translate(6px, 0px); }
+        .cv-file-stack-wrap:hover .cv-stack-layer.layer-3 { transform:rotate(-11deg) translate(-6px, 1px); }
+        .cv-stack-layer.cv-stack-layer-pdf { display:flex; align-items:center; justify-content:center; background-color:#F2D5D1; border-color:#D49A94; }
+        .cv-stack-layer.cv-stack-layer-pdf i { font-size:36px; color:#A02A2A; }
+        /* a stacked file that can no longer be loaded reads as an explicit "unavailable" tile, not a blank one */
+        .cv-stack-layer.cv-stack-layer-missing { background-color:#E4EAF4; border-style:dashed; border-color:#A3AFC7; display:flex; align-items:center; justify-content:center; }
+        .cv-stack-layer.cv-stack-layer-missing i { font-size:28px; color:#66718D; }
+        .cv-file-stack .cv-stack-count-badge { position:absolute; bottom:2px; right:2px; z-index:4; background:var(--neust-maroon); color:var(--neust-gold); font-size:11px; font-weight:700; border-radius:0; min-width:22px; height:22px; display:flex; align-items:center; justify-content:center; padding:0 6px; border:2px solid #ffffff; box-sizing:border-box; }
+        .cv-file-stack-label { font-size:11px; color:#3E4963; font-weight:700; }
+
         .fv-doc-thumb.fv-doc-thumb-pdf { align-items:center; justify-content:center; background:#F2D5D1; border-color:#D49A94; }
         .fv-doc-thumb.fv-doc-thumb-pdf i { font-size:16px; color:#A02A2A; }
         .cv-card-ribbon { position: absolute; top: 10px; right: 10px; z-index: 6; display: flex; gap: 6px; pointer-events: none; }
@@ -4960,10 +5016,35 @@ if (!$courseOfferingsLoaded) {
                                     $isReqVerified = $svCard['verified'];
                                     $hasNoFile     = $svCard['noFile'];
                                     $showLock      = $isReqVerified;
+                                    // NEW (this adjustment): every file stored under this requirement (2+ => the stacked card below)
+                                    $svEnts        = svFetchFileEntries($conn, $user_id, $type);
+                                    $svEntCount    = count($svEnts);
+                                    $svStreamBase  = htmlspecialchars('?stream_student_file=' . (int) $user_id . '&type=' . urlencode($type), ENT_QUOTES);
+                                    $svReqLabel    = strip_tags($label ?? '');
                                 ?>
                                 <div class="req-item cv-req-card" id="req-item-<?= $user_id ?>-<?= $type ?>" data-state="<?= $svCard['state'] ?>" data-rejected="<?= $svCard['rejected'] ? '1' : '0' ?>">
                                     <div class="cv-card-preview">
-                                        <?php if($res && $res['file_name'] && svBlobIsPdf($res['file_name'])): ?>
+                                        <?php if($svEntCount > 1): ?>
+                                            <!-- NEW (this adjustment): MULTIPLE FILES — ONE overlaying "stacked card" (max 3 layers shown) with a count badge,
+                                                 ported from company_validation.php. Clicking it opens the preview modal, which pages through every file. -->
+                                            <div class="cv-file-stack-wrap cv-preview-trigger" data-uid="<?= (int) $user_id ?>" data-req-key="<?= htmlspecialchars($type ?? '', ENT_QUOTES) ?>" data-req-label="<?= htmlspecialchars($svReqLabel, ENT_QUOTES) ?>" data-req-files="<?= htmlspecialchars(json_encode($svEnts), ENT_QUOTES) ?>" title="Preview all <?= (int) $svEntCount ?> files for <?= htmlspecialchars($svReqLabel, ENT_QUOTES) ?>">
+                                                <div class="cv-file-stack">
+                                                    <?php
+                                                    $svLayerCount = min(3, $svEntCount);
+                                                    for ($svLi = $svLayerCount - 1; $svLi >= 0; $svLi--):
+                                                        $svLayerMeta = $svEnts[$svLi];
+                                                    ?>
+                                                    <?php if ($svLayerMeta['isPdf']): ?>
+                                                        <div class="cv-stack-layer cv-stack-layer-pdf layer-<?= $svLi + 1 ?>"><i class="fas fa-file-pdf"></i></div>
+                                                    <?php else: ?>
+                                                        <div class="cv-stack-layer layer-<?= $svLi + 1 ?>"><img src="<?= $svStreamBase ?>&amp;file_id=<?= (int) $svLayerMeta['id'] ?>" alt="" onerror="this.onerror=null;var p=this.parentNode;if(p){p.classList.add('cv-stack-layer-missing');var i=document.createElement('i');i.className='fas fa-file-circle-xmark';p.replaceChild(i,this);}"></div>
+                                                    <?php endif; ?>
+                                                    <?php endfor; ?>
+                                                    <span class="cv-stack-count-badge"><?= (int) $svEntCount ?></span>
+                                                </div>
+                                                <div class="cv-file-stack-label"><?= (int) $svEntCount ?> files</div>
+                                            </div>
+                                        <?php elseif($res && $res['file_name'] && svBlobIsPdf($res['file_name'])): ?>
                                             <!-- NEW (this adjustment): a PDF is shown as a PDF tile that opens the document preview modal (#cvReqDocPreviewModal), like company_validation.php -->
                                             <div class="cv-pdf-tile cv-preview-trigger" data-uid="<?= (int) $user_id ?>" data-req-key="<?= htmlspecialchars($type ?? '', ENT_QUOTES) ?>" data-req-label="<?= htmlspecialchars(strip_tags($label ?? ''), ENT_QUOTES) ?>" title="Preview <?= htmlspecialchars(strip_tags($label ?? ''), ENT_QUOTES) ?>"><i class="fas fa-file-pdf"></i><span>PDF document</span></div>
                                         <?php elseif($res && $res['file_name']): ?>
@@ -5499,6 +5580,15 @@ if (!$courseOfferingsLoaded) {
         if (trig) {
             var uid = trig.getAttribute('data-uid'), key = trig.getAttribute('data-req-key');
             if (!uid || !key) return;
+            // NEW (this adjustment): a stacked card lists its files in data-req-files ({id, isPdf} each) — page through all of them
+            var filesMeta = [];
+            try { filesMeta = JSON.parse(trig.getAttribute('data-req-files') || '[]'); } catch (err) { filesMeta = []; }
+            if (filesMeta && filesMeta.length) {
+                var base = window.location.pathname + '?stream_student_file=' + encodeURIComponent(uid) + '&type=' + encodeURIComponent(key) + '&file_id=';
+                var lblMulti = trig.getAttribute('data-req-label') || 'Document';
+                cvOpenDocPreview(filesMeta.map(function (m) { return { src: base + encodeURIComponent(m.id) + '&_=' + Date.now(), isPdf: !!m.isPdf, label: lblMulti }; }), 0);
+                return;
+            }
             cvOpenDocPreview([{
                 src: window.location.pathname + '?stream_student_file=' + encodeURIComponent(uid) + '&type=' + encodeURIComponent(key) + '&_=' + Date.now(),
                 isPdf: true,
@@ -6155,7 +6245,7 @@ if (!$courseOfferingsLoaded) {
     function svSyncReqCard(userId, reqType, status, remark) {
         var item = document.getElementById('req-item-' + userId + '-' + reqType);
         if (!item) return;
-        var hasFile = !!item.querySelector('.cv-card-preview img, .cv-card-preview .cv-pdf-tile');
+        var hasFile = !!item.querySelector('.cv-card-preview img, .cv-card-preview .cv-pdf-tile, .cv-card-preview .cv-file-stack-wrap');
         var state = (status === 'Verified') ? 'verified' : ((status === 'Denied') ? 'awaiting' : (hasFile ? 'pending' : 'awaiting'));
         svSetCardState(item, state, status === 'Denied', remark);
     }
@@ -6163,7 +6253,7 @@ if (!$courseOfferingsLoaded) {
     function svSyncPhotoCard(userId, status, remark) {
         var item = document.getElementById('photo-card-' + userId);
         if (!item) return;
-        var hasFile = !!item.querySelector('.cv-card-preview img, .cv-card-preview .cv-pdf-tile');
+        var hasFile = !!item.querySelector('.cv-card-preview img, .cv-card-preview .cv-pdf-tile, .cv-card-preview .cv-file-stack-wrap');
         var state = (status === 'Verified') ? 'verified' : ((status === 'Denied') ? 'awaiting' : (hasFile ? 'pending' : 'awaiting'));
         svSetCardState(item, state, status === 'Denied', remark);
     }
@@ -6468,6 +6558,39 @@ if (!$courseOfferingsLoaded) {
             .then(function (data) {
                 if (!data.success || !data.file) return;
                 var src = 'data:image/jpeg;base64,' + data.file;
+
+                // NEW (this adjustment): the requirement now holds 2+ files — show (or refresh) the stacked card
+                var stackHost = (type !== 'photo') ? document.getElementById('req-item-' + userId + '-' + type) : null;
+                var stackPv   = stackHost ? stackHost.querySelector('.cv-card-preview') : null;
+                var curStack  = stackPv ? stackPv.querySelector('.cv-file-stack-wrap') : null;
+                if (stackPv && data.files && data.files.length > 1) {
+                    var wrap = document.createElement('div');
+                    wrap.className = 'cv-file-stack-wrap cv-preview-trigger';
+                    wrap.setAttribute('data-uid', userId);
+                    wrap.setAttribute('data-req-key', type);
+                    var sLbl = String((stackHost.querySelector('.cv-card-content > div') || {}).textContent || '').replace(/✓\s*VERIFIED/g, '').replace(/\bNEW\s+SUBMISSION\b/gi, '').replace(/\s+/g, ' ').trim() || 'Document';
+                    wrap.setAttribute('data-req-label', sLbl);
+                    wrap.setAttribute('data-req-files', JSON.stringify(data.files));
+                    wrap.title = 'Preview all ' + data.files.length + ' files for ' + sLbl;
+                    var stackBase = window.location.pathname + '?stream_student_file=' + encodeURIComponent(userId) + '&type=' + encodeURIComponent(type) + '&file_id=';
+                    var layers = '';
+                    for (var li = Math.min(3, data.files.length) - 1; li >= 0; li--) {
+                        var fm = data.files[li];
+                        layers += fm.isPdf
+                            ? '<div class="cv-stack-layer cv-stack-layer-pdf layer-' + (li + 1) + '"><i class="fas fa-file-pdf"></i></div>'
+                            : '<div class="cv-stack-layer layer-' + (li + 1) + '"><img src="' + stackBase + encodeURIComponent(fm.id) + '&_=' + Date.now() + '" alt=""></div>';
+                    }
+                    wrap.innerHTML = '<div class="cv-file-stack">' + layers + '<span class="cv-stack-count-badge">' + data.files.length + '</span></div><div class="cv-file-stack-label">' + data.files.length + ' files</div>';
+                    var curMain = stackPv.querySelector('img.cv-thumb-img, .cv-pdf-tile, .cv-no-file, .cv-file-stack-wrap');
+                    if (curMain) curMain.replaceWith(wrap); else stackPv.insertBefore(wrap, stackPv.firstChild);
+                    return;
+                }
+                // back to a single file: drop the stacked card so the normal single-file refresh below can take over
+                if (curStack) {
+                    var blank = document.createElement('div');
+                    blank.className = 'cv-no-file';
+                    curStack.replaceWith(blank);
+                }
 
                 // NEW (this adjustment): a PDF was submitted — show the PDF tile that opens the document preview modal
                 if (data.isPdf) {
