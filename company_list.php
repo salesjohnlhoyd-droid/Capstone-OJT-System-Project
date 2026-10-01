@@ -1,6 +1,7 @@
 <?php
 session_start();
 include "db.php";
+require_once __DIR__ . "/placement_hold.php"; // ADJUSTMENT: preferred-placement match / hold helpers
 
 /* ================= SESSION CHECK ================= */
 if (!isset($_SESSION['user_id']) || $_SESSION['role'] != "student") {
@@ -79,6 +80,18 @@ if (isset($_GET['poll_status'])) {
    ============================================================ */
 function clAppLiveState($conn, $user_id) {
     $pending = [];
+    /* ADJUSTMENT: a held application (placement replaced, waiting for the new
+       Application SIT to be verified) is sent automatically the moment every
+       requirement is Verified again — checked here on every poll. */
+    try { ph_release_if_ready($conn, (int)$user_id); } catch (\Throwable $e) {}
+    try {
+        $q = $conn->prepare("SELECT company_id FROM placement_hold_applications WHERE student_id = ?");
+        $q->bind_param("i", $user_id);
+        $q->execute();
+        $r = $q->get_result();
+        while ($row = $r->fetch_assoc()) $pending[(string)(int)$row['company_id']] = 'hold';
+        $q->close();
+    } catch (\Throwable $e) {}
     try {
         $q = $conn->prepare("SELECT company_id FROM admin_application_approvals WHERE student_id = ?");
         $q->bind_param("i", $user_id);
@@ -802,6 +815,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['apply'])) {
            $legacy_exp1 derived above — instead of the old
            $student['skill1'] / ['skill2'] / ['exp1'] columns. */
         $incomplete_profile = true;
+    } elseif (($placement_mismatch = ph_check_apply_mismatch($conn, (int)$user_id, intval($_POST['company_id'] ?? 0))) !== null) {
+        /* ADJUSTMENT: the selected company's data does not match the student's
+           Preference for Placement. Nothing is submitted yet — the page opens
+           #placementMismatchModal asking whether to replace the preference
+           with this company's data (Yes → replace_placement handler below;
+           No → the application is cancelled and the student is notified). */
     } else {
 
         $company_id = intval($_POST['company_id']);
@@ -878,6 +897,48 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['apply'])) {
     }
 }
 
+/* ================= HANDLE REPLACE PLACEMENT =================
+   ADJUSTMENT: the student answered "Yes" to the placement-mismatch popup.
+   The Preference for Placement is overwritten with the selected company's
+   data, the Application SIT requirement is deleted (it has to be uploaded
+   and verified again), and the application is put on hold — it is sent
+   automatically once all requirements are Verified again (see
+   ph_release_if_ready() in placement_hold.php). */
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['replace_placement'])) {
+    $rp_company_id = intval($_POST['company_id'] ?? 0);
+    if ($already_registered) {
+        $apply_blocked = true;
+    } else {
+        $rp_busy = false;
+        foreach (["SELECT 1 FROM admin_application_approvals WHERE student_id = ?",
+                  "SELECT 1 FROM ojt_applications WHERE student_id = ? AND phase = 'pending'",
+                  "SELECT 1 FROM placement_hold_applications WHERE student_id = ?"] as $rp_sql) {
+            try {
+                $rp_q = $conn->prepare($rp_sql);
+                $rp_q->bind_param("i", $user_id);
+                $rp_q->execute();
+                if ($rp_q->get_result()->fetch_row()) $rp_busy = true;
+                $rp_q->close();
+            } catch (\Throwable $e) {}
+        }
+        ph_ensure_table($conn);
+        if ($rp_busy) {
+            $error = "You already have an application in progress. Please cancel it first before replacing your preferred placement.";
+        } else {
+            $rp_company = ph_replace_preference($conn, (int)$user_id, $rp_company_id);
+            if ($rp_company) {
+                $placement_replaced = ['company_name' => $rp_company['name']];
+                // keep the sidebar / apply gate accurate for this same page render
+                unset($studentReqs['application_sit']);
+                $all_verified = false;
+                $req_gate_statuses['application_sit'] = 'Not Submitted';
+            } else {
+                $error = "The selected company could not be found, or your student information is incomplete.";
+            }
+        }
+    }
+}
+
 /* ================= HANDLE CANCEL REQUEST =================
    ADJUSTMENT: lets a student withdraw an application at EITHER stage
    of the two-step review process:
@@ -938,6 +999,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['cancel_request'])) {
     }
     $cancelStmt2->close();
 
+    // ADJUSTMENT: an application on hold (waiting for the new Application SIT) is cancelled too.
+    if (ph_delete_hold($conn, (int)$user_id, $cancel_company_id) > 0) {
+        $cancelled = true;
+    }
+
     if ($cancelled) {
         $cleanupStmt = $conn->prepare("DELETE FROM application_requirements WHERE student_id = ? AND company_id = ?");
         $cleanupStmt->bind_param("ii", $user_id, $cancel_company_id);
@@ -987,9 +1053,19 @@ $pendingStageLabels = [
     'endorsement_upload'   => 'Endorsement letter received — upload the signed letter from your Inbox',
     'endorsement_review'   => 'Endorsement letter uploaded — waiting for company validation',
     'endorsement_rejected' => 'Endorsement letter rejected — see remarks in your Inbox and re-upload',
+    // ADJUSTMENT (placement replaced)
+    'placement_hold'       => 'On hold — waiting for your new Application SIT to be verified',
 ];
 
 $pending_applications = [];
+
+/* ADJUSTMENT: release a held application first if every requirement is Verified again,
+   then list any application that is still on hold as a pending one. */
+try { ph_release_if_ready($conn, (int)$user_id); } catch (\Throwable $e) {}
+$_ph_hold = ph_get_hold($conn, (int)$user_id);
+if ($_ph_hold) {
+    $pending_applications[$_ph_hold['company_id']] = ['stage' => 'placement_hold'];
+}
 
 $pendingAppStmt = $conn->prepare("SELECT company_id FROM admin_application_approvals WHERE student_id = ?");
 $pendingAppStmt->bind_param("i", $user_id);
@@ -1090,45 +1166,58 @@ $companies = $conn->query("
     <style>
         /* ── Design tokens ── */
         :root {
-            --maroon:       #07145f;
+            /* Field Ops Grid palette (same values as AccomForm.php) */
+            --grid-bg: #EEF1F6;
+            --grid-navy: #1B2A4A;
+            --grid-border: #C3CADA;
+            --grid-border-soft: #DCE1EC;
+            --grid-green: #2C5A2C;
+            --grid-green-bg: #EAF3EA;
+            --grid-red: #A02A2A;
+            --grid-red-bg: #F7E9E9;
+            --grid-amber: #A0850A;
+            --grid-amber-bg: #FAF3DC;
+            --grid-muted: #5A6272;
+
+            --maroon:       #1B2A4A;
             --gold:         #FFD700;
-            --active-nav:   #1a237e;
-            --ink:          #1a1a2e;
-            --ink-muted:    #4a4a6a;
-            --ink-faint:    #8888aa;
+            --active-nav:   #1B2A4A;
+            --ink:          #2d3748;
+            --ink-muted:    #5A6272;
+            --ink-faint:    #8A93A6;
             --surface:      #ffffff;
-            --surface-soft: #f7f6f3;
-            --surface-warm: #f0efe9;
-            --border:       #e4e2da;
-            --border-light: #eeede8;
-            --teal:         #0d8c6a;
-            --teal-light:   #e1f5ee;
-            --teal-dark:    #085041;
-            --blue:         #185fa5;
-            --blue-light:   #e6f1fb;
-            --amber:        #b45309;
-            --amber-light:  #fef3c7;
-            --red:          #991b1b;
-            --red-light:    #fee2e2;
-            --radius-sm:    6px;
-            --radius-md:    10px;
-            --radius-lg:    16px;
-            --shadow-card:  0 1px 3px rgba(0,0,0,.06), 0 4px 16px rgba(0,0,0,.04);
-            --shadow-lift:  0 4px 20px rgba(0,0,0,.10);
+            --surface-soft: #F3F5F9;
+            --surface-warm: #EEF1F6;
+            --border:       #C3CADA;
+            --border-light: #DCE1EC;
+            --teal:         #2C5A2C;
+            --teal-light:   #EAF3EA;
+            --teal-dark:    #2C5A2C;
+            --blue:         #1B2A4A;
+            --blue-light:   #E7ECF7;
+            --amber:        #A0850A;
+            --amber-light:  #FAF3DC;
+            --red:          #A02A2A;
+            --red-light:    #F7E9E9;
+            --radius-sm:    0;
+            --radius-md:    0;
+            --radius-lg:    0;
+            --shadow-card:  none;
+            --shadow-lift:  none;
 
             /* Legacy aliases */
             --neust-maroon: #07145fe5;
             --neust-gold:   #FFD700;
-            --neust-active: #1a237e;
-            --bg:           #f0efe9;
+            --neust-active: #1B2A4A;
+            --bg:           #EEF1F6;
             --white:        #ffffff;
-            --text:         #1a1a2e;
+            --text:         #2d3748;
         }
 
         * { box-sizing: border-box; margin: 0; padding: 0; }
 
         body {
-            font-family: 'DM Sans', 'Segoe UI', sans-serif;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             background: var(--surface-warm);
             color: var(--ink);
             display: flex;
@@ -1144,18 +1233,18 @@ $companies = $conn->query("
             background: var(--neust-maroon);
             height: 100vh;
             position: fixed;
-            top: 0; left: 0;
             display: flex;
             flex-direction: column;
             transition: width 0.3s ease;
             z-index: 1000;
             box-shadow: 4px 0 10px rgba(0,0,0,0.1);
+            top: 0; left: 0;
         }
         .sidebar.collapsed { width: 80px; }
 
         /* Header — name + role label (matches student_attendance.php) */
         .sidebar-header {
-            padding: 16px 20px;
+            padding: 20px;
             display: flex;
             align-items: center;
             justify-content: space-between;
@@ -1170,34 +1259,36 @@ $companies = $conn->query("
             overflow: hidden;
             transition: opacity 0.2s, width 0.3s;
             max-width: 180px;
+            min-width: 0;
         }
         .sidebar-user-name {
             color: var(--neust-gold);
-            font-size: 14px;
-            font-weight: 700;
+            font-size: 18px;
+            font-weight: bold;
             white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
             line-height: 1.3;
-            font-family: 'DM Sans', sans-serif;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
         }
         .sidebar-user-role {
             color: rgba(255,255,255,0.55);
-            font-size: 10px;
-            font-weight: 500;
+            font-size: 11px;
+            font-weight: 700;
             text-transform: uppercase;
-            letter-spacing: 0.08em;
+            letter-spacing: 0.8px;
+            margin-top: 3px;
             white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
         }
-        .sidebar.collapsed .sidebar-user-info { opacity: 0; width: 0; overflow: hidden; }
-
-        .sidebar-links {
-            flex: 1;
-            display: flex;
-            flex-direction: column;
-            padding: 10px 0;
+        .sidebar.collapsed .sidebar-user-info {
+            opacity: 0;
+            width: 0;
             overflow: hidden;
         }
+
+        .sidebar-links { flex: 1; display: flex; flex-direction: column; padding: 10px 0; overflow: hidden; }
 
         .sidebar a {
             padding: 15px 25px;
@@ -1228,22 +1319,11 @@ $companies = $conn->query("
         }
 
         /* ── Locked sidebar links (not deployed) ── */
-        .sidebar a.nav-locked {
-            cursor: not-allowed;
-            opacity: 0.55;
-        }
-        .sidebar a.nav-locked:hover {
-            background: rgba(255,255,255,0.04);
-            color: #cbd5e0;
-        }
+        .sidebar a.nav-locked { cursor: not-allowed; opacity: 0.55; }
+        .sidebar a.nav-locked:hover { background: rgba(255,255,255,0.04); color: #cbd5e0; }
         .nav-lock-icon {
-            font-size: 11px;
-            color: #fbbf24;
-            position: absolute;
-            right: 22px;
-            top: 50%;
-            transform: translateY(-50%);
-            opacity: 0.85;
+            font-size: 11px; color: var(--neust-gold); position: absolute;
+            right: 22px; top: 50%; transform: translateY(-50%); opacity: 0.85;
         }
         .sidebar.collapsed .nav-lock-icon { display: none; }
 
@@ -1254,25 +1334,19 @@ $companies = $conn->query("
         }
         .sidebar-lock-notice-inner {
             display: flex; align-items: flex-start; gap: 10px;
-            background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1);
-            border-radius: 8px; padding: 10px 12px;
+            background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.14);
+            border-radius: 0; padding: 10px 12px;
         }
-        .sidebar-lock-notice i { font-size: 15px; color: var(--neust-gold); margin-top: 1px; flex-shrink: 0; }
+        .sidebar-lock-notice i { font-size: 14px; color: var(--neust-gold); margin-top: 1px; flex-shrink: 0; }
         .sidebar-lock-notice p { font-size: 11px; color: rgba(255,255,255,0.65); line-height: 1.5; margin: 0; }
         .sidebar.collapsed .sidebar-lock-notice { display: none; }
 
         /* ── Attendance sidebar badge (amber/pulsing) — matches student_attendance.php ── */
         .sidebar-badge-att {
-            background: #d97706;
-            color: white;
-            border-radius: 50%;
-            width: 18px; height: 18px;
-            font-size: 10px; font-weight: 700;
-            display: inline-flex;
-            align-items: center; justify-content: center;
-            position: absolute;
-            right: 18px; top: 50%;
-            transform: translateY(-50%);
+            background: #d97706; color: white; border-radius: 50%;
+            width: 18px; height: 18px; font-size: 10px; font-weight: 700;
+            display: inline-flex; align-items: center; justify-content: center;
+            position: absolute; right: 18px; top: 50%; transform: translateY(-50%);
             animation: badge-pulse-att 2s ease-in-out infinite;
         }
         @keyframes badge-pulse-att {
@@ -1282,18 +1356,11 @@ $companies = $conn->query("
 
         /* ── Journal badge — matches student_attendance.php ── */
         .sidebar-badge-journal {
-            background: #f59e0b;
-            color: #1c1917;
-            border-radius: 50%;
-            min-width: 18px; height: 18px;
-            font-size: 10px; font-weight: 800;
-            display: inline-flex;
-            align-items: center; justify-content: center;
-            position: absolute;
-            right: 18px; top: 50%;
-            transform: translateY(-50%);
-            padding: 0 3px;
-            animation: badge-pulse-journal 2.4s ease-in-out infinite;
+            background: #f59e0b; color: #1c1917; border-radius: 50%;
+            min-width: 18px; height: 18px; font-size: 10px; font-weight: 800;
+            display: inline-flex; align-items: center; justify-content: center;
+            position: absolute; right: 18px; top: 50%; transform: translateY(-50%);
+            padding: 0 3px; animation: badge-pulse-journal 2.4s ease-in-out infinite;
         }
         @keyframes badge-pulse-journal {
             0%, 100% { box-shadow: 0 0 0 0 rgba(245,158,11,0.5); }
@@ -1302,27 +1369,16 @@ $companies = $conn->query("
 
         .logout-link { margin-top: auto; padding: 20px; border-top: 1px solid rgba(255,255,255,0.1); }
         .logout-link a {
-            border: 1px solid var(--neust-gold);
-            color: var(--neust-gold);
-            border-radius: 6px;
-            justify-content: center;
-            padding: 10px;
-            display: flex;
-            align-items: center;
-            text-decoration: none;
-            font-size: 14px;
-            transition: background 0.2s;
+            border: 1px solid var(--neust-gold); color: var(--neust-gold);
+            border-radius: 6px; justify-content: center; padding: 10px;
+            display: flex; align-items: center; text-decoration: none;
+            font-size: 14px; transition: background 0.2s;
         }
         .logout-link a:hover { background: rgba(255,215,0,0.08); }
 
         .toggle-btn {
-            background: transparent;
-            border: none;
-            color: white;
-            cursor: pointer;
-            font-size: 20px;
-            outline: none;
-            flex-shrink: 0;
+            background: transparent; border: none; color: white;
+            cursor: pointer; font-size: 20px; outline: none; flex-shrink: 0;
         }
 
         /* ══════════════════════════════════════════
@@ -1349,10 +1405,11 @@ $companies = $conn->query("
             opacity: 0;
             width: calc(100% - 300px);
             max-width: 820px;
-            background: #07145f;
-            border-radius: 0 0 12px 12px;
-            border: 1px solid rgba(255,255,255,.12);
+            background: var(--grid-navy);
+            border-radius: 0;
+            border: 1px solid #55668C;
             border-top: none;
+            box-shadow: 0 8px 24px rgba(27,42,74,0.30);
             padding: 10px 16px;
             display: flex;
             align-items: center;
@@ -1362,7 +1419,7 @@ $companies = $conn->query("
                         visibility 0s linear .4s;
             z-index: 2000;
             pointer-events: none;
-            overflow: hidden;  /* keeps progress bar inside rounded corners */
+            overflow: hidden;
         }
         #att-notif-bar.anb-visible {
             transform: translateX(-50%) translateY(0);
@@ -1377,19 +1434,16 @@ $companies = $conn->query("
 
         /* ── ANB inner pieces ── */
         .anb-icon {
-            width: 34px; height: 34px;
-            border-radius: 8px;
-            background: #FAEEDA;
+            width: 34px; height: 34px; border-radius: 0;
+            background: var(--grid-amber-bg);
             display: flex; align-items: center; justify-content: center;
             flex-shrink: 0;
         }
-        .anb-icon i { font-size: 16px; color: #854F0B; }
+        .anb-icon i { font-size: 16px; color: var(--grid-amber); }
 
         .anb-pulse {
-            width: 8px; height: 8px;
-            border-radius: 50%;
-            background: #EF9F27;
-            flex-shrink: 0;
+            width: 8px; height: 8px; border-radius: 50%;
+            background: #F7C600; flex-shrink: 0;
             animation: anb-blink 1.4s ease-in-out infinite;
         }
         @keyframes anb-blink { 0%,100%{opacity:1} 50%{opacity:.2} }
@@ -1407,81 +1461,66 @@ $companies = $conn->query("
         .anb-text-group {
             display: flex;
             flex-direction: column;
-            min-width: 0;        /* allows text to shrink & ellipsis */
-            flex-shrink: 1;
+            min-width: 0;
         }
         .anb-label {
             font-size: 12px;
             font-weight: 700;
-            color: #FAEEDA;
+            color: #ffffff;
+            text-transform: uppercase;
+            letter-spacing: 0.4px;
             white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
         }
         .anb-window {
             font-size: 11px;
-            color: rgba(250,238,218,.65);
+            color: #E3E8F1;
+            opacity: .75;
             margin-top: 1px;
             white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
         }
-        .anb-divider {
-            width: 1px; height: 26px;
-            background: rgba(255,255,255,.18);
-            flex-shrink: 0;
-        }
+        .anb-divider { width: 1px; height: 26px; background: rgba(255,255,255,.18); flex-shrink: 0; }
         /* Countdown pill — fixed width prevents layout shift as digits change */
         .anb-countdown {
             font-size: 11px;
-            color: #FAC775;
+            font-weight: 700;
+            color: #F7C600;
             white-space: nowrap;
-            background: rgba(250,199,117,.14);
-            border-radius: 99px;
+            background: rgba(247,198,0,.10);
+            border-radius: 0;
             padding: 3px 11px;
-            border: 1px solid rgba(250,199,117,.28);
-            font-family: 'DM Mono', monospace;
+            border: 1px solid rgba(247,198,0,.35);
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             font-variant-numeric: tabular-nums;
             flex-shrink: 0;
-            min-width: 100px;      /* prevents width jitter as digit count changes */
+            min-width: 100px;
             text-align: center;
         }
         .anb-btn {
-            background: #EF9F27;
-            color: #412402;
-            border: none;
-            border-radius: 7px;
-            padding: 7px 15px;
-            font-size: 11px; font-weight: 700;
-            font-family: inherit;
-            white-space: nowrap;
-            flex-shrink: 0;
-            transition: background .15s;
-            cursor: pointer;
+            background: #F7C600; color: var(--grid-navy); border: 1px solid #F7C600;
+            border-radius: 0; padding: 7px 15px; font-size: 11px; font-weight: 700;
+            text-transform: uppercase; letter-spacing: 0.4px;
+            font-family: inherit; white-space: nowrap; flex-shrink: 0;
+            transition: opacity .15s; cursor: pointer;
         }
-        .anb-btn:hover { background: #FAC775; }
+        .anb-btn:hover { opacity: .88; }
         .anb-close {
-            background: rgba(255,255,255,.12);
-            border: none;
-            color: rgba(250,238,218,.75);
-            width: 26px; height: 26px;
-            border-radius: 50%;
-            font-size: 13px;
+            background: rgba(255,255,255,.10); border: 1px solid rgba(255,255,255,.18);
+            color: #E3E8F1; width: 26px; height: 26px;
+            border-radius: 0; font-size: 13px;
             display: flex; align-items: center; justify-content: center;
-            flex-shrink: 0;
-            transition: background .15s;
-            cursor: pointer;
+            flex-shrink: 0; transition: background .15s; cursor: pointer;
         }
-        .anb-close:hover { background: rgba(255,255,255,.24); color: #FAEEDA; }
+        .anb-close:hover { background: rgba(255,255,255,.22); color: #ffffff; }
 
         /* Progress bar — absolutely positioned at bottom of bar */
         .anb-progress {
-            position: absolute;
-            bottom: 0; left: 0;
-            height: 2px;
-            background: #EF9F27;
-            border-radius: 0 0 0 12px;
-            pointer-events: none;  /* never intercepts clicks */
+            position: absolute; bottom: 0; left: 0;
+            height: 2px; background: #F7C600; border-radius: 0;
+            pointer-events: none;
         }
 
         /* ══ MAIN CONTENT ══ */
@@ -1496,14 +1535,14 @@ $companies = $conn->query("
 
         /* ══ NAVBAR ══ */
         .navbar {
-            background: var(--maroon);
+            background: var(--neust-maroon);
             padding: 10px 30px;
             display: flex;
             align-items: center;
             color: white;
             height: 60px;
             flex-shrink: 0;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+            box-shadow: none;
             position: relative;
             z-index: 99;
         }
@@ -1518,22 +1557,22 @@ $companies = $conn->query("
             margin-bottom: 20px;
             padding-bottom: 10px;
             border-bottom: 2px solid var(--gold);
-            font-family: 'Lora', serif;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
         }
 
         .msg {
             padding: 12px 16px;
             margin-bottom: 16px;
-            border-radius: 8px;
+            border-radius: 0;
             font-size: 14px;
             font-weight: 600;
         }
-        .success { background: #d1fae5; color: #065f46; }
-        .error   { background: #fee2e2; color: #991b1b; }
+        .success { background: #EAF3EA; color: #2C5A2C; }
+        .error   { background: #F7E9E9; color: #A02A2A; }
 
         .company-row {
             background: var(--white);
-            border-radius: 12px;
+            border-radius: 0;
             margin-bottom: 14px;
             box-shadow: var(--shadow-card);
             overflow: hidden;
@@ -1564,17 +1603,17 @@ $companies = $conn->query("
             align-items: center;
             gap: 10px;
             font-size: 13px;
-            color: #6b7280;
+            color: #5A6272;
         }
         .company-summary .summary-right .badge-current {
-            background: #dcfce7;
-            color: #166534;
-            border-radius: 20px;
+            background: #EAF3EA;
+            color: #2C5A2C;
+            border-radius: 0;
             padding: 3px 12px;
             font-size: 12px;
             font-weight: 700;
         }
-        .chevron { font-size: 11px; color: #9ca3af; transition: transform 0.25s; }
+        .chevron { font-size: 11px; color: #8A93A6; transition: transform 0.25s; }
 
         /* ══════════════════════════════════════════════════════════
            ADJUSTMENT: PAGE LOAD / PROCESSING overlay — same as
@@ -1639,12 +1678,12 @@ $companies = $conn->query("
         /* ADJUSTMENT: application status in the company panel — same pill as the inbox used */
         .company-summary .summary-right .app-stage-chip {
             display: inline-flex; align-items: center; gap: 5px;
-            border-radius: 20px; padding: 3px 12px; font-size: 12px; font-weight: 700; white-space: nowrap;
+            border-radius: 0; padding: 3px 12px; font-size: 12px; font-weight: 700; white-space: nowrap;
         }
-        .app-stage-chip.awaiting { background: #fef9c3; color: #854d0e; }
-        .app-stage-chip.pending  { background: #dbeafe; color: #1e40af; }
-        .pending-request-badge.app-stage-awaiting { background: #fef9c3; color: #854d0e; }
-        .pending-request-badge.app-stage-pending  { background: #dbeafe; color: #1e40af; }
+        .app-stage-chip.awaiting { background: #FAF3DC; color: #A0850A; }
+        .app-stage-chip.pending  { background: #E7ECF7; color: #1B2A4A; }
+        .pending-request-badge.app-stage-awaiting { background: #FAF3DC; color: #A0850A; }
+        .pending-request-badge.app-stage-pending  { background: #E7ECF7; color: #1B2A4A; }
 
         .toggle-input { display: none; }
         .toggle-input:checked ~ .details-pane { display: block; }
@@ -1653,11 +1692,11 @@ $companies = $conn->query("
         .details-pane {
             display: none;
             padding: 20px 22px;
-            border-top: 1px solid #f0f0f0;
-            background: #fafafa;
+            border-top: 1px solid #DCE1EC;
+            background: #F3F5F9;
         }
         .details-pane p { font-size: 14px; margin-bottom: 8px; }
-        .details-pane p b { color: #4a5568; }
+        .details-pane p b { color: #5A6272; }
 
         /* ══ ADJUSTMENT: COMPANY PROFILE / BRIEF DESCRIPTION ══
            Shown at the top of each company's details pane. Content comes
@@ -1668,7 +1707,7 @@ $companies = $conn->query("
         .company-profile-box {
             background: #ffffff;
             border: 1px solid var(--border);
-            border-radius: var(--radius-md);
+            border-radius: 0;
             padding: 14px 16px;
             margin: 0 0 14px 0;
         }
@@ -1711,7 +1750,7 @@ $companies = $conn->query("
 
         .map iframe {
             width: 100%; height: 240px;
-            border: 0; border-radius: 10px;
+            border: 0; border-radius: 0;
             margin: 12px 0;
         }
 
@@ -1785,15 +1824,15 @@ $companies = $conn->query("
             margin: 14px 0 10px;
             padding: 20px 14px;
             background: #d8dde8;
-            border-radius: 12px;
+            border-radius: 0;
         }
         .dr-paper {
             background: #fff;
             width: 794px;
             max-width: 100%;
             height: 1123px;
-            border: 1px solid #b0b8cc;
-            box-shadow: 0 4px 24px rgba(0,0,0,.14);
+            border: 1px solid #C3CADA;
+            box-shadow: none;
             font-family: "Times New Roman","Crimson Pro",Times,serif;
             color: #1a1a1a;
             display: flex;
@@ -1850,7 +1889,7 @@ $companies = $conn->query("
             flex-shrink: 0;
         }
         .dr-title-band h1 {
-            font-family: 'DM Sans', sans-serif;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             font-size: 16px; font-weight: 700; color: var(--maroon);
             letter-spacing: .035em; text-transform: uppercase;
         }
@@ -1898,7 +1937,7 @@ $companies = $conn->query("
 
         .dr-section-title {
             font-size: 13px; font-weight: 700; color: #1a1a1a;
-            margin: 16px 0 8px; border-bottom: 1px solid #e5e7eb; padding-bottom: 4px;
+            margin: 16px 0 8px; border-bottom: 1px solid #DCE1EC; padding-bottom: 4px;
         }
         .dr-section-title:first-child { margin-top: 0; }
         .dr-footer-band {
@@ -1921,18 +1960,18 @@ $companies = $conn->query("
         .dr-avatar img { width: 100%; height: 100%; object-fit: cover; display: block; }
         .dr-resume-mirror-info { margin-bottom: 2px; }
         .dr-resume-mirror-info p {
-            font-family: 'DM Sans', sans-serif;
-            font-size: 12.5px; color: #4b5563;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            font-size: 12.5px; color: #5A6272;
             margin: 0 0 3px; line-height: 1.5;
         }
-        .dr-resume-mirror-info p b { color: #1a1a2e; font-weight: 700; margin-right: 4px; }
+        .dr-resume-mirror-info p b { color: #2d3748; font-weight: 700; margin-right: 4px; }
         .dr-applicant-badges { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 7px; }
         .dr-badge-pill {
             display: inline-flex; align-items: center; gap: 5px;
-            font-family: 'DM Sans', sans-serif; font-size: 11px; font-weight: 700;
-            padding: 3px 10px; border-radius: 20px;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; font-size: 11px; font-weight: 700;
+            padding: 3px 10px; border-radius: 0;
         }
-        .dr-badge-company { background: #d1fae5; color: #166534; }
+        .dr-badge-company { background: #EAF3EA; color: #2C5A2C; }
 
         /* Skill / Experience entry boxes — mirrors admin's fv-entry-box
            (numbered "Skill N" / "Experience N" locked-field look) ── */
@@ -1940,46 +1979,46 @@ $companies = $conn->query("
         .dr-entry-item { margin-bottom: 0; }
         .dr-entry-item + .dr-entry-item { margin-top: 10px; }
         .dr-field-label {
-            font-family: 'DM Sans', sans-serif; font-size: 10.5px; font-weight: 700;
-            color: #6b7280; text-transform: uppercase; letter-spacing: 0.04em;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; font-size: 10.5px; font-weight: 700;
+            color: #5A6272; text-transform: uppercase; letter-spacing: 0.04em;
             margin-bottom: 4px;
         }
         .dr-entry-box {
-            font-family: 'DM Sans', sans-serif;
-            font-size: 12.5px; color: #374151; line-height: 1.6;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            font-size: 12.5px; color: #2d3748; line-height: 1.6;
             background: #f4f5fb; border: 1.5px solid var(--dr-rule);
-            border-radius: 10px; padding: 10px 14px;
+            border-radius: 0; padding: 10px 14px;
             white-space: pre-wrap; word-break: break-word;
         }
-        .dr-empty-note { font-family: 'DM Sans', sans-serif; font-size: 12px; color: #a0aec0; font-style: italic; }
+        .dr-empty-note { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; font-size: 12px; color: #8A93A6; font-style: italic; }
 
         /* Submitted Documents table, mirrors admin's fv-doc-table ── */
         .dr-doc-table { width: 100%; border-collapse: collapse; border: 1px solid #000; font-size: 12px; margin-top: 4px; }
-        .dr-doc-table td { border: 1px solid #000; padding: 7px 10px; vertical-align: middle; font-family: 'DM Sans', sans-serif; }
+        .dr-doc-table td { border: 1px solid #000; padding: 7px 10px; vertical-align: middle; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
         .dr-doc-table .dr-doc-th td { font-weight: 700; background: #f4f5fb; text-align: center; }
         .dr-doc-thumb {
-            width: 38px; height: 38px; border-radius: 6px; overflow: hidden;
+            width: 38px; height: 38px; border-radius: 0; overflow: hidden;
             flex-shrink: 0; border: 1px solid #ddd; display: inline-flex;
         }
         .dr-doc-thumb.clickable { cursor: pointer; }
         .dr-doc-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
         .dr-doc-nothumb {
-            width: 38px; height: 38px; border-radius: 6px; background: #f3f4f6;
+            width: 38px; height: 38px; border-radius: 0; background: #F3F5F9;
             display: inline-flex; align-items: center; justify-content: center;
         }
         .dr-doc-row-name { display: flex; align-items: center; gap: 10px; }
         .dr-doc-label-text { font-size: 12.5px; }
-        .dr-status-chip { font-size: 10px; font-weight: 700; padding: 3px 9px; border-radius: 8px; white-space: nowrap; display: inline-block; }
-        .dr-status-chip.verified { background: #dcfce7; color: #166534; }
-        .dr-status-chip.denied   { background: #fee2e2; color: #991b1b; }
-        .dr-status-chip.pending  { background: #fef9c3; color: #854d0e; }
-        .dr-status-chip.none     { background: #f3f4f6; color: #6b7280; }
-        .dr-doc-remark-row td { background: #fff7f7; }
-        .dr-doc-remark { font-size: 10.5px; color: #991b1b; font-family: 'DM Sans', sans-serif; }
+        .dr-status-chip { font-size: 10px; font-weight: 700; padding: 3px 9px; border-radius: 0; white-space: nowrap; display: inline-block; }
+        .dr-status-chip.verified { background: #EAF3EA; color: #2C5A2C; }
+        .dr-status-chip.denied   { background: #F7E9E9; color: #A02A2A; }
+        .dr-status-chip.pending  { background: #FAF3DC; color: #A0850A; }
+        .dr-status-chip.none     { background: #F3F5F9; color: #5A6272; }
+        .dr-doc-remark-row td { background: #F7E9E9; }
+        .dr-doc-remark { font-size: 10.5px; color: #A02A2A; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
         .dr-req-note {
-            margin-top: 14px; font-size: 12px; color: #92400e; background: #fef3c7;
-            border-radius: 6px; padding: 8px 12px; line-height: 1.5;
-            font-family: 'DM Sans', sans-serif;
+            margin-top: 14px; font-size: 12px; color: #A0850A; background: #FAF3DC;
+            border-radius: 0; padding: 8px 12px; line-height: 1.5;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
         }
         .dr-req-note i { margin-right: 4px; }
 
@@ -1992,7 +2031,7 @@ $companies = $conn->query("
             color: white;
             border: none;
             padding: 10px 22px;
-            border-radius: 8px;
+            border-radius: 0;
             cursor: pointer;
             font-size: 14px;
             font-weight: 600;
@@ -2006,9 +2045,9 @@ $companies = $conn->query("
             display: inline-flex;
             align-items: center;
             gap: 6px;
-            background: #d1fae5;
-            color: #065f46;
-            border-radius: 8px;
+            background: #EAF3EA;
+            color: #2C5A2C;
+            border-radius: 0;
             padding: 8px 14px;
             font-size: 14px;
             font-weight: 700;
@@ -2027,9 +2066,9 @@ $companies = $conn->query("
             display: inline-flex;
             align-items: center;
             gap: 6px;
-            background: #fef3c7;
-            color: #92400e;
-            border-radius: 8px;
+            background: #FAF3DC;
+            color: #A0850A;
+            border-radius: 0;
             padding: 8px 14px;
             font-size: 13px;
             font-weight: 700;
@@ -2037,11 +2076,11 @@ $companies = $conn->query("
             margin-bottom: 8px;
         }
         .btn-cancel-request {
-            background: #fff1f1;
-            color: #dc2626;
-            border: 1.5px solid #fecaca;
+            background: #F7E9E9;
+            color: #A02A2A;
+            border: 1.5px solid #E3BCBC;
             padding: 10px 22px;
-            border-radius: 8px;
+            border-radius: 0;
             cursor: pointer;
             font-size: 14px;
             font-weight: 600;
@@ -2052,7 +2091,7 @@ $companies = $conn->query("
             align-items: center;
             gap: 6px;
         }
-        .btn-cancel-request:hover { background: #dc2626; color: #fff; }
+        .btn-cancel-request:hover { background: #A02A2A; color: #fff; }
 
         /* ══════════════════════════════════════════════════════════════
            ADJUSTMENT (this revision): "mini" Cancel Request button shown
@@ -2069,11 +2108,11 @@ $companies = $conn->query("
            and submit the SAME per-company hidden form, so there is only
            ever one code path that actually cancels a request. ══════ */
         .btn-cancel-request-mini {
-            background: #fff1f1;
-            color: #dc2626;
-            border: 1.5px solid #fecaca;
+            background: #F7E9E9;
+            color: #A02A2A;
+            border: 1.5px solid #E3BCBC;
             padding: 5px 12px;
-            border-radius: 20px;
+            border-radius: 0;
             cursor: pointer;
             font-size: 11.5px;
             font-weight: 700;
@@ -2084,7 +2123,7 @@ $companies = $conn->query("
             gap: 5px;
             white-space: nowrap;
         }
-        .btn-cancel-request-mini:hover { background: #dc2626; color: #fff; }
+        .btn-cancel-request-mini:hover { background: #A02A2A; color: #fff; }
         .btn-cancel-request-mini i { font-size: 11px; }
 
         /* ══════════════════════════════════════════════════════════════
@@ -2107,7 +2146,7 @@ $companies = $conn->query("
             color: #fff;
             border: 1.5px solid var(--maroon);
             padding: 5px 12px;
-            border-radius: 20px;
+            border-radius: 0;
             cursor: pointer;
             font-size: 11.5px;
             font-weight: 700;
@@ -2131,11 +2170,11 @@ $companies = $conn->query("
            the shared #digitalResumeModal instead. It stays visible
            whether the row is collapsed or expanded. ══ */
         .btn-view-resume-mini {
-            background: #eef2ff;
-            color: #1a237e;
-            border: 1.5px solid #c7d2fe;
+            background: #E7ECF7;
+            color: #1B2A4A;
+            border: 1.5px solid #C3CADA;
             padding: 5px 12px;
-            border-radius: 20px;
+            border-radius: 0;
             cursor: pointer;
             font-size: 11.5px;
             font-weight: 700;
@@ -2146,7 +2185,7 @@ $companies = $conn->query("
             gap: 5px;
             white-space: nowrap;
         }
-        .btn-view-resume-mini:hover { background: #1a237e; color: #fff; border-color: #1a237e; }
+        .btn-view-resume-mini:hover { background: #1B2A4A; color: #fff; border-color: #1B2A4A; }
         .btn-view-resume-mini i { font-size: 11px; }
 
         /* Hide the mini cancel / apply buttons once the row is expanded —
@@ -2181,25 +2220,25 @@ $companies = $conn->query("
         .popup-content {
             background: white;
             padding: 32px 28px;
-            border-radius: 14px;
+            border-radius: 0;
             text-align: center;
             width: 360px;
             max-width: 92%;
-            box-shadow: 0 20px 60px rgba(0,0,0,0.2);
+            box-shadow: none;
             animation: popIn 0.3s cubic-bezier(0.34,1.56,0.64,1);
         }
         @keyframes popIn {
             from { opacity: 0; transform: scale(0.88); }
             to   { opacity: 1; transform: scale(1); }
         }
-        .popup-content h3 { margin-top: 0; margin-bottom: 10px; color: var(--maroon); font-size: 18px; font-family: 'Lora', serif; }
-        .popup-content p  { font-size: 14px; color: #6b7280; margin-bottom: 20px; }
+        .popup-content h3 { margin-top: 0; margin-bottom: 10px; color: var(--maroon); font-size: 18px; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        .popup-content p  { font-size: 14px; color: #5A6272; margin-bottom: 20px; }
         .popup-content button {
             background: var(--maroon);
             color: white;
             padding: 11px 24px;
             border: none;
-            border-radius: 8px;
+            border-radius: 0;
             cursor: pointer;
             font-size: 14px;
             font-weight: 600;
@@ -2209,20 +2248,20 @@ $companies = $conn->query("
         .popup-content button:hover { opacity: 0.88; }
 
         /* ══ ALREADY-REGISTERED POPUP ══ */
-        #registeredModal .popup-content { border-top: 5px solid #d97706; }
-        #registeredModal .popup-content h3 { color: #92400e; }
+        #registeredModal .popup-content { border: 1px solid var(--grid-border); }
+        #registeredModal .popup-content h3 { color: #A0850A; }
         #registeredModal .popup-icon { font-size: 42px; margin-bottom: 12px; display: block; }
-        #registeredModal .popup-content button { background: #d97706; }
+        #registeredModal .popup-content button { background: #A0850A; }
 
         /* ══ PENDING-APPLICATION-BLOCKS-APPLY POPUP ══
            ADJUSTMENT: shown when the student clicks Apply on a company
            OTHER than the one they already have a pending request with —
            mirrors #registeredModal's styling exactly, just a distinct
            id/message so the copy is accurate to the actual guard. */
-        #pendingBlockedModal .popup-content { border-top: 5px solid #d97706; }
-        #pendingBlockedModal .popup-content h3 { color: #92400e; }
+        #pendingBlockedModal .popup-content { border: 1px solid var(--grid-border); }
+        #pendingBlockedModal .popup-content h3 { color: #A0850A; }
         #pendingBlockedModal .popup-icon { font-size: 42px; margin-bottom: 12px; display: block; }
-        #pendingBlockedModal .popup-content button { background: #d97706; }
+        #pendingBlockedModal .popup-content button { background: #A0850A; }
 
         /* ══ CANCEL-REQUEST CONFIRMATION POPUP ══
            ADJUSTMENT (this revision): replaces the old browser-native
@@ -2233,21 +2272,21 @@ $companies = $conn->query("
            the original details-pane Cancel Request button — see
            openCancelConfirm() / submitCancelConfirm() in the <script>
            block further down. */
-        #cancelConfirmModal .popup-content { border-top: 5px solid #dc2626; }
-        #cancelConfirmModal .popup-content h3 { color: #991b1b; }
+        #cancelConfirmModal .popup-content { border: 1px solid var(--grid-border); }
+        #cancelConfirmModal .popup-content h3 { color: #A02A2A; }
         #cancelConfirmModal .popup-icon { font-size: 42px; margin-bottom: 12px; display: block; }
         #cancelConfirmModal .ccm-actions { display: flex; gap: 10px; justify-content: center; }
         #cancelConfirmModal .ccm-actions button { flex: 1; }
-        #cancelConfirmModal .ccm-btn-keep { background: #e5e7eb !important; color: #374151 !important; }
-        #cancelConfirmModal .ccm-btn-confirm { background: #dc2626 !important; }
+        #cancelConfirmModal .ccm-btn-keep { background: #DCE1EC !important; color: #2d3748 !important; }
+        #cancelConfirmModal .ccm-btn-confirm { background: #A02A2A !important; }
 
         /* ══ ADJUSTMENT: REQUIREMENTS-NOT-VERIFIED POPUP ══
            Shown when the student clicks Apply (mini or full-size) while
            any of the 8 requirements is not yet Verified. Built on the
            same shared .popup-modal / .popup-content base as every other
            modal on this page; only this id's own rules are added. */
-        #reqUnverifiedModal .popup-content { border-top: 5px solid #dc2626; width: 440px; }
-        #reqUnverifiedModal .popup-content h3 { color: #991b1b; }
+        #reqUnverifiedModal .popup-content { border: 1px solid var(--grid-border); width: 440px; }
+        #reqUnverifiedModal .popup-content h3 { color: #A02A2A; }
         #reqUnverifiedModal .popup-icon { font-size: 42px; margin-bottom: 12px; display: block; }
         #reqUnverifiedModal .popup-content p { margin-bottom: 14px; }
         #reqUnverifiedModal .rum-list {
@@ -2258,7 +2297,7 @@ $companies = $conn->query("
             max-height: 240px;
             overflow-y: auto;
             border: 1px solid var(--border);
-            border-radius: var(--radius-md);
+            border-radius: 0;
         }
         #reqUnverifiedModal .rum-list li {
             display: flex;
@@ -2275,17 +2314,83 @@ $companies = $conn->query("
             flex-shrink: 0;
             font-size: 11px;
             font-weight: 700;
-            border-radius: 20px;
+            border-radius: 0;
             padding: 2px 10px;
             white-space: nowrap;
         }
-        #reqUnverifiedModal .rum-chip.st-pending   { background: #fef3c7; color: #92400e; }
-        #reqUnverifiedModal .rum-chip.st-denied    { background: #fee2e2; color: #991b1b; }
-        #reqUnverifiedModal .rum-chip.st-missing   { background: #e5e7eb; color: #374151; }
+        #reqUnverifiedModal .rum-chip.st-pending   { background: #FAF3DC; color: #A0850A; }
+        #reqUnverifiedModal .rum-chip.st-denied    { background: #F7E9E9; color: #A02A2A; }
+        #reqUnverifiedModal .rum-chip.st-missing   { background: #DCE1EC; color: #2d3748; }
         #reqUnverifiedModal .rum-actions { display: flex; gap: 10px; justify-content: center; }
         #reqUnverifiedModal .rum-actions button { flex: 1; }
-        #reqUnverifiedModal .rum-btn-close { background: #e5e7eb !important; color: #374151 !important; }
-        #reqUnverifiedModal .rum-btn-go { background: #dc2626 !important; }
+        #reqUnverifiedModal .rum-btn-close { background: #DCE1EC !important; color: #2d3748 !important; }
+        #reqUnverifiedModal .rum-btn-go { background: #A02A2A !important; }
+
+        /* ══ ADJUSTMENT: PREFERRED-PLACEMENT MISMATCH / REPLACED POPUPS ══
+           Same shared .popup-modal / .popup-content base and the same button
+           styling as #cancelConfirmModal / #reqUnverifiedModal. */
+        /* UPDATED: #placementMismatchModal now uses the same layout as the manual
+           Add Student form in admin_student_list.php (#addStudentModal): square
+           bordered box, header with title + close button, compact body, and a
+           sticky right-aligned action bar. The box is capped to the viewport and
+           its body scrolls, so the popup no longer stretches top-to-bottom. */
+        #placementMismatchModal { align-items: center; padding: 20px 0; box-sizing: border-box; }
+        #placementMismatchModal .pm-box {
+            background: #fff; border: 1px solid var(--grid-border); border-radius: 0;
+            width: 720px; max-width: 94%; max-height: calc(100vh - 40px); max-height: calc(100dvh - 40px);
+            display: flex; flex-direction: column; padding: 16px 24px 0 24px; box-sizing: border-box;
+            text-align: left; animation: popIn 0.3s ease;
+        }
+        #placementMismatchModal .pm-header {
+            display: flex; justify-content: space-between; align-items: center; flex-shrink: 0;
+            margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px solid var(--grid-border);
+        }
+        #placementMismatchModal .pm-header h3 {
+            margin: 0; color: var(--grid-navy); font-size: 15px; font-family: inherit;
+            text-transform: uppercase; letter-spacing: 0.4px;
+        }
+        #placementMismatchModal .pm-header h3 i { color: #A0850A; margin-right: 6px; }
+        #placementMismatchModal .pm-close {
+            background: none !important; border: none; font-size: 24px; line-height: 1; padding: 0 4px;
+            cursor: pointer; color: var(--grid-muted); transition: color 0.2s;
+        }
+        #placementMismatchModal .pm-close:hover { color: var(--grid-navy); opacity: 1; }
+        #placementMismatchModal .pm-body { overflow-y: auto; flex: 1 1 auto; min-height: 0; }
+        #placementMismatchModal .pm-body p { font-size: 13px; color: #475569; line-height: 1.5; margin: 0 0 10px 0; }
+        #placementMismatchModal .pm-body p strong { color: #1e293b; }
+        #placementMismatchModal .pm-diff { width: 100%; border-collapse: collapse; margin: 0 0 10px 0; font-size: 12.5px; text-align: left; border: 1px solid var(--grid-border); }
+        #placementMismatchModal .pm-diff th { background: #F0F2F8; color: var(--grid-navy); padding: 5px 8px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.3px; font-size: 11px; }
+        #placementMismatchModal .pm-diff td { padding: 5px 8px; border-top: 1px solid var(--border-light); color: var(--ink); word-break: break-word; vertical-align: top; }
+        #placementMismatchModal .pm-diff td:first-child { font-weight: 600; color: #1e293b; white-space: nowrap; }
+        #placementMismatchModal .pm-diff td.pm-empty { color: #9aa2b1; font-style: italic; }
+        #placementMismatchModal .pm-note { font-size: 11px !important; color: var(--grid-muted) !important; }
+        #placementMismatchModal .pm-actions {
+            display: flex; gap: 12px; justify-content: flex-end; flex-shrink: 0;
+            background: #fff; margin-top: 4px; padding: 10px 0 12px 0; border-top: 1px solid var(--grid-border);
+        }
+        #placementMismatchModal .pm-actions button {
+            padding: 10px 24px; border-radius: 0; font-weight: 600; cursor: pointer; font-size: 12px;
+            text-transform: uppercase; letter-spacing: 0.3px; transition: opacity 0.2s;
+        }
+        #placementMismatchModal .pm-btn-no { background: #fff !important; color: var(--grid-navy) !important; border: 1px solid var(--grid-border) !important; }
+        #placementMismatchModal .pm-btn-no:hover { background: #f3f4f7 !important; opacity: 1; }
+        #placementMismatchModal .pm-btn-yes { background: var(--grid-navy) !important; color: #fff !important; border: 1px solid var(--grid-navy) !important; }
+        @media (max-width: 600px) {
+            #placementMismatchModal .pm-box { padding: 14px 14px 0 14px; }
+            #placementMismatchModal .pm-actions { flex-direction: column-reverse; }
+            #placementMismatchModal .pm-actions button { width: 100%; }
+            #placementMismatchModal .pm-diff td:first-child { white-space: normal; }
+        }
+
+        /* Preferred-placement "Updated" popup (unchanged look). */
+        #placementReplacedModal .popup-content { border: 1px solid var(--grid-border); width: 460px; }
+        #placementReplacedModal .popup-content h3 { color: #2b6a3f; }
+        #placementReplacedModal .popup-icon { font-size: 42px; margin-bottom: 12px; display: block; }
+        #placementReplacedModal .popup-content p { margin-bottom: 14px; }
+        #placementReplacedModal .pm-actions { display: flex; gap: 10px; justify-content: center; }
+        #placementReplacedModal .pm-actions button { flex: 1; }
+        #placementReplacedModal .pm-btn-close { background: #DCE1EC !important; color: #2d3748 !important; }
+        #placementReplacedModal .pm-btn-go { background: #A02A2A !important; }
 
         /* ══ REQUIREMENT PREVIEW MODAL ══ */
         #reqPreviewModal {
@@ -2300,8 +2405,8 @@ $companies = $conn->query("
         }
         #reqPreviewModal img {
             max-width: 88vw; max-height: 88vh;
-            border-radius: 6px;
-            box-shadow: 0 8px 40px rgba(0,0,0,0.5);
+            border-radius: 0;
+            box-shadow: none;
         }
         #reqPreviewClose {
             position: absolute; top: 20px; right: 36px;
@@ -2312,62 +2417,55 @@ $companies = $conn->query("
 
         /* ══ NOT-DEPLOYED MODAL ══ */
         #not-deployed-modal {
-            display: none;
-            position: fixed;
-            inset: 0;
-            z-index: 99999;
-            background: rgba(7, 20, 95, 0.55);
-            backdrop-filter: blur(3px);
-            align-items: center;
-            justify-content: center;
+            display: none; position: fixed; inset: 0; z-index: 99999;
+            background: rgba(0,0,0,0.5);
+            align-items: center; justify-content: center;
         }
         #not-deployed-modal.show { display: flex; }
         .ndm-box {
-            background: #fff;
-            border-radius: 18px;
-            padding: 36px 32px 28px;
-            max-width: 400px;
-            width: calc(100% - 40px);
-            box-shadow: 0 20px 60px rgba(7,20,95,0.22), 0 4px 16px rgba(0,0,0,0.10);
+            background: #fff; border-radius: 0; border: 1px solid var(--grid-border);
+            padding: 32px; max-width: 420px; width: calc(100% - 40px);
             text-align: center;
-            animation: ndm-pop 0.32s cubic-bezier(.34,1.56,.64,1) both;
+            animation: ndm-pop 0.3s ease both;
         }
         @keyframes ndm-pop {
             from { opacity: 0; transform: scale(0.88) translateY(18px); }
             to   { opacity: 1; transform: scale(1)    translateY(0); }
         }
         .ndm-icon {
-            width: 68px; height: 68px;
-            border-radius: 50%;
-            background: linear-gradient(135deg, #fef3c7, #fde68a);
-            border: 3px solid #f59e0b;
+            width: auto; height: auto; border-radius: 0;
+            background: none; border: none;
             display: flex; align-items: center; justify-content: center;
-            font-size: 30px;
-            margin: 0 auto 18px;
+            font-size: 48px; color: var(--grid-amber); margin: 0 auto 16px;
         }
-        .ndm-title { font-size: 18px; font-weight: 800; color: var(--maroon); margin-bottom: 10px; font-family: 'Lora', serif; }
-        .ndm-message { font-size: 13.5px; color: #4b5563; line-height: 1.65; margin-bottom: 22px; }
+        .ndm-title {
+            font-size: 18px; font-weight: 700; color: #1e293b; margin-bottom: 12px;
+            text-transform: uppercase; letter-spacing: 0.3px;
+        }
+        .ndm-message { font-size: 14px; color: var(--grid-muted); line-height: 1.6; margin-bottom: 24px; }
         .ndm-page-name {
-            display: inline-block;
-            background: #f0f4f8; border: 1.5px solid #e2e8f0;
-            border-radius: 8px; padding: 3px 12px;
-            font-weight: 700; color: var(--maroon); font-size: 13px; margin-bottom: 18px;
+            display: inline-block; background: var(--grid-bg); border: 1px solid var(--grid-border);
+            border-radius: 0; padding: 4px 12px; font-weight: 700;
+            color: var(--grid-navy); font-size: 12px; margin-bottom: 14px;
+            text-transform: uppercase; letter-spacing: 0.4px;
         }
         .ndm-status-badge {
-            display: inline-flex; align-items: center; gap: 6px;
-            background: #fff7ed; border: 1.5px solid #fed7aa;
-            border-radius: 20px; padding: 5px 14px;
-            font-size: 12px; font-weight: 700; color: #c2410c; margin-bottom: 22px;
+            display: flex; align-items: center; justify-content: center; gap: 6px;
+            width: fit-content; margin-left: auto; margin-right: auto;
+            background: var(--grid-amber-bg); border: 1px solid #E6D9A8;
+            border-radius: 0; padding: 5px 14px;
+            font-size: 11px; font-weight: 700; color: var(--grid-amber); margin-bottom: 20px;
+            text-transform: uppercase; letter-spacing: 0.4px;
         }
-        .ndm-status-dot { width: 8px; height: 8px; border-radius: 50%; background: #f97316; flex-shrink: 0; }
+        .ndm-status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--grid-amber); flex-shrink: 0; }
         .ndm-close-btn {
-            background: var(--maroon); color: white; border: none;
-            border-radius: 10px; padding: 11px 32px;
-            font-size: 14px; font-weight: 700; font-family: 'DM Sans', sans-serif;
-            cursor: pointer; transition: opacity 0.2s; width: 100%;
+            background: var(--grid-navy); color: white; border: 1px solid var(--grid-navy);
+            border-radius: 0; padding: 10px 24px; font-size: 12px; font-weight: 600;
+            text-transform: uppercase; letter-spacing: 0.4px;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; cursor: pointer; transition: opacity 0.2s; width: 100%;
         }
         .ndm-close-btn:hover { opacity: 0.88; }
-        .ndm-hint { font-size: 11.5px; color: #9ca3af; margin-top: 12px; }
+        .ndm-hint { font-size: 11.5px; color: var(--grid-muted); margin-top: 12px; }
 
         /* ══════════════════════════════════════════════════════════════
            ADJUSTMENT: DIGITAL RESUME MODAL — restyled to match the
@@ -2410,12 +2508,12 @@ $companies = $conn->query("
             position: sticky;
             top: 0;
             z-index: 200;
-            box-shadow: 0 2px 10px rgba(0,0,0,.35);
+            box-shadow: none;
         }
         .drm-toolbar-left { display: flex; align-items: center; gap: 10px; min-width: 0; }
         .drm-toolbar-left i { color: var(--gold); flex-shrink: 0; }
         .drm-toolbar-title {
-            font-family: 'Lora', serif;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             font-size: 0.85rem;
             font-weight: 700;
             color: #fff;
@@ -2429,7 +2527,7 @@ $companies = $conn->query("
             color: rgba(255,255,255,0.9);
             border: 1px solid rgba(255,255,255,0.28);
             padding: 7px 16px;
-            border-radius: 6px;
+            border-radius: 0;
             font-size: 12.5px;
             font-weight: 600;
             cursor: pointer;
@@ -2473,7 +2571,7 @@ $companies = $conn->query("
         }
         #endoInboxBadge {
             position: absolute; top: -5px; right: -5px;
-            background: #dc2626; color: #fff; border-radius: 50%;
+            background: #A02A2A; color: #fff; border-radius: 50%;
             min-width: 18px; height: 18px; font-size: 10px; font-weight: 700;
             display: none; align-items: center; justify-content: center;
             border: 2px solid var(--maroon); padding: 0 3px;
@@ -2486,41 +2584,41 @@ $companies = $conn->query("
         #endoInboxDrawer {
             background: #fff; width: 480px; max-width: 97vw; display: flex; flex-direction: column;
             box-shadow: -8px 0 32px rgba(0,0,0,0.18); animation: endoSlideIn 0.3s ease;
-            font-family: 'DM Sans', sans-serif;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
         }
         @keyframes endoSlideIn { from { transform: translateX(100%); } to { transform: translateX(0); } }
         .endo-inbox-head {
             padding: 18px 22px; background: var(--maroon); display: flex; align-items: center;
             justify-content: space-between; flex-shrink: 0;
         }
-        .endo-inbox-head h3 { margin: 0; color: var(--gold); font-size: 15px; display: flex; align-items: center; gap: 10px; font-family: 'Lora', serif; }
+        .endo-inbox-head h3 { margin: 0; color: var(--gold); font-size: 15px; display: flex; align-items: center; gap: 10px; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
         .endo-inbox-close { background: none; border: none; color: rgba(255,255,255,0.75); font-size: 22px; cursor: pointer; line-height: 1; }
         .endo-inbox-close:hover { color: #fff; }
-        #endoInboxBody { overflow-y: auto; flex: 1; padding: 18px 20px; background: #fafaf8; }
-        .endo-empty { text-align: center; color: #a0aec0; padding: 50px 20px; font-size: 13px; }
+        #endoInboxBody { overflow-y: auto; flex: 1; padding: 18px 20px; background: #F3F5F9; }
+        .endo-empty { text-align: center; color: #8A93A6; padding: 50px 20px; font-size: 13px; }
         .endo-empty i { font-size: 40px; display: block; margin-bottom: 14px; color: #cbd5e0; }
 
         .endo-card {
-            background: #fff; border: 1px solid var(--border); border-radius: 12px;
+            background: #fff; border: 1px solid var(--border); border-radius: 0;
             padding: 15px 16px; margin-bottom: 13px; position: relative;
         }
-        .endo-card.unread { border-color: #c7d2fe; box-shadow: 0 0 0 3px rgba(99,102,241,0.08); }
+        .endo-card.unread { border-color: #C3CADA; box-shadow: 0 0 0 3px rgba(27,42,74,0.08); }
         .endo-card-top { display: flex; gap: 12px; align-items: flex-start; }
         .endo-card-icon {
-            width: 40px; height: 40px; border-radius: 10px; background: #eef2ff; color: var(--maroon);
+            width: 40px; height: 40px; border-radius: 0; background: #E7ECF7; color: var(--maroon);
             display: flex; align-items: center; justify-content: center; font-size: 17px; flex-shrink: 0;
         }
         .endo-card-title { font-weight: 700; font-size: 14px; color: var(--ink); line-height: 1.3; }
         .endo-card-sub { font-size: 11.5px; color: var(--ink-faint); margin-top: 2px; }
-        .endo-new-pill { position: absolute; top: 12px; right: 12px; background: #dc2626; color: #fff; font-size: 9.5px; font-weight: 800; letter-spacing: .06em; padding: 2px 7px; border-radius: 10px; }
+        .endo-new-pill { position: absolute; top: 12px; right: 12px; background: #A02A2A; color: #fff; font-size: 9.5px; font-weight: 800; letter-spacing: .06em; padding: 2px 7px; border-radius: 0; }
         .endo-status {
             display: inline-flex; align-items: center; gap: 5px; margin-top: 10px;
-            font-size: 11px; font-weight: 700; padding: 4px 10px; border-radius: 20px;
+            font-size: 11px; font-weight: 700; padding: 4px 10px; border-radius: 0;
         }
-        .endo-status.awaiting { background: #fef9c3; color: #854d0e; }
-        .endo-status.pending  { background: #dbeafe; color: #1e40af; }
-        .endo-status.verified { background: #dcfce7; color: #166534; }
-        .endo-status.rejected { background: #fee2e2; color: #991b1b; }
+        .endo-status.awaiting { background: #FAF3DC; color: #A0850A; }
+        .endo-status.pending  { background: #E7ECF7; color: #1B2A4A; }
+        .endo-status.verified { background: #EAF3EA; color: #2C5A2C; }
+        .endo-status.rejected { background: #F7E9E9; color: #A02A2A; }
         .endo-help { font-size: 12px; color: var(--ink-muted); margin-top: 8px; line-height: 1.5; }
 
         /* ══════════════════════════════════════════════════════════════
@@ -2530,7 +2628,7 @@ $companies = $conn->query("
            placeholder + red Remark box, square full-width controls.
            ══════════════════════════════════════════════════════════════ */
         .cv-gallery { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 14px; }
-        .cv-gallery .req-item { display: flex; flex-direction: column; align-items: stretch; gap: 0; padding: 0; margin-bottom: 0; border: 1px solid #A3AFC7; border-radius: 0; overflow: hidden; background: #ffffff; box-shadow: 0 1px 3px rgba(27,42,74,0.16); text-align: left; position: relative; }
+        .cv-gallery .req-item { display: flex; flex-direction: column; align-items: stretch; gap: 0; padding: 0; margin-bottom: 0; border: 1px solid #A3AFC7; border-radius: 0; overflow: hidden; background: #ffffff; box-shadow: none; text-align: left; position: relative; }
         .cv-gallery .req-item.unread { border-color: #1B2A4A; box-shadow: 0 0 0 2px rgba(27,42,74,0.12); }
         .cv-card-preview { position: relative; flex: 1 0 132px; min-height: 132px; background: #E4EAF4; display: flex; align-items: center; justify-content: center; }
         .cv-gallery .cv-card-preview img.cv-thumb-img { position: absolute; top: 0; left: 0; width: 100%; height: 100%; margin: 0; border: none; border-radius: 0; object-fit: cover; object-position: top center; display: block; cursor: pointer; }
@@ -2545,7 +2643,7 @@ $companies = $conn->query("
         .cv-card-label { font-size: 13.5px; font-weight: 700; color: #1B2A4A; line-height: 1.3; }
         .cv-card-body .endo-card-sub { margin-top: -4px; }
         .cv-card-body .endo-help { margin-top: 0; }
-        .endo-batch-note { font-size: 11.5px; color: #1e40af; background: #eff6ff; border: 1px solid #bfdbfe; padding: 6px 9px; line-height: 1.4; } /* ADJUSTMENT: shared batch letter */
+        .endo-batch-note { font-size: 11.5px; color: #1B2A4A; background: #E7ECF7; border: 1px solid #C3CADA; padding: 6px 9px; line-height: 1.4; } /* ADJUSTMENT: shared batch letter */
         .endo-batch-note i { margin-right: 4px; }
         .cv-card-remark { display: none; align-items: flex-start; gap: 7px; padding: 7px 10px; background: #F2D5D1; border: 1px solid #D49A94; border-radius: 0; color: #A02A2A; font-size: 12px; line-height: 1.4; overflow-wrap: anywhere; }
         .cv-card-remark i { margin-top: 2px; flex-shrink: 0; }
@@ -2566,7 +2664,7 @@ $companies = $conn->query("
             width: 32px; height: 32px; padding: 0; border-radius: 0;
             display: inline-flex; align-items: center; justify-content: center;
             background: #ffffff; color: #1B2A4A; border: 1px solid #A3AFC7;
-            box-shadow: 0 1px 3px rgba(27,42,74,0.25); cursor: pointer; font-size: 13px;
+            box-shadow: none; cursor: pointer; font-size: 13px;
         }
         .cv-view-btn:hover { background: #1B2A4A; color: #ffffff; border-color: #1B2A4A; }
         .cv-gallery .cv-req-card[data-rejected="1"] .cv-card-preview > .cv-view-btn.cv-view-btn { display: inline-flex !important; } /* still view the rejected upload (beats the hide rule's specificity) */
@@ -2577,23 +2675,23 @@ $companies = $conn->query("
         /* ADJUSTMENT: in-page full-screen viewer body */
         #endoFileModal { z-index: 10000; }
         .endo-file-canvas { justify-content: flex-start; }
-        .endo-file-canvas img { display: block; max-width: 100%; height: auto; margin: 0 auto; background: #ffffff; box-shadow: 0 4px 24px rgba(0,0,0,0.25); }
-        .endo-file-canvas iframe { display: block; width: 100%; max-width: 960px; height: calc(100vh - 118px); border: none; background: #ffffff; box-shadow: 0 4px 24px rgba(0,0,0,0.25); }
-        .endo-remark-box { margin-top: 9px; background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; padding: 9px 11px; font-size: 12.5px; color: #7f1d1d; line-height: 1.5; }
-        .endo-remark-box b { color: #991b1b; display: block; margin-bottom: 2px; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+        .endo-file-canvas img { display: block; max-width: 100%; height: auto; margin: 0 auto; background: #ffffff; box-shadow: none; }
+        .endo-file-canvas iframe { display: block; width: 100%; max-width: 960px; height: calc(100vh - 118px); border: none; background: #ffffff; box-shadow: none; }
+        .endo-remark-box { margin-top: 9px; background: #F7E9E9; border: 1px solid #E3BCBC; border-radius: 0; padding: 9px 11px; font-size: 12.5px; color: #A02A2A; line-height: 1.5; }
+        .endo-remark-box b { color: #A02A2A; display: block; margin-bottom: 2px; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
         .endo-upload-line { margin-top: 8px; font-size: 11.5px; color: var(--ink-muted); display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-        .endo-upload-line a { color: #1d4ed8; font-weight: 600; text-decoration: none; }
+        .endo-upload-line a { color: #1B2A4A; font-weight: 600; text-decoration: none; }
         .endo-upload-line a:hover { text-decoration: underline; }
         .endo-card-actions { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
         .endo-act {
-            border-radius: 8px; font-size: 12px; font-weight: 700; padding: 8px 14px; cursor: pointer;
+            border-radius: 0; font-size: 12px; font-weight: 700; padding: 8px 14px; cursor: pointer;
             display: inline-flex; align-items: center; gap: 6px; border: 1px solid transparent;
-            font-family: 'DM Sans', sans-serif; transition: all 0.2s;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; transition: all 0.2s;
         }
         .endo-act:disabled { opacity: 0.5; cursor: not-allowed; }
         .endo-act.primary { background: var(--maroon); color: #fff; }
         .endo-act.primary:hover { background: var(--active-nav); }
-        .endo-act.upload { background: #16a34a; color: #fff; }
+        .endo-act.upload { background: #2C5A2C; color: #fff; }
         .endo-act.upload:hover:not(:disabled) { opacity: 0.88; }
         .endo-act.ghost { background: #fff; color: var(--ink-muted); border-color: var(--border); }
         .endo-act.ghost:hover { background: var(--surface-soft); }
@@ -2603,21 +2701,87 @@ $companies = $conn->query("
         #endoLetterModal { z-index: 10000; }
         #endoLetterModal .drm-canvas-inner { overflow-x: auto; }
         #endoLetterFrame { width: 794px; min-width: 794px; height: 1200px; border: none; display: block; background: #d8dde8; }
-        .drm-tbtn-close.endo-pdf { background: #b8860b; border-color: #b8860b; color: #fff; }
-        .drm-tbtn-close.endo-pdf:hover { background: #9a7009; }
+        .drm-tbtn-close.endo-pdf { background: #A0850A; border-color: #A0850A; color: #fff; }
+        .drm-tbtn-close.endo-pdf:hover { background: #A0850A; }
         .drm-tbtn-close:disabled { opacity: .6; cursor: wait; }
 
         #endoToast {
             position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%) translateY(90px);
-            background: #1e293b; color: #fff; padding: 13px 20px; border-radius: 12px;
-            font-family: 'DM Sans', sans-serif; font-size: 13.5px; font-weight: 600;
+            background: #2d3748; color: #fff; padding: 13px 20px; border-radius: 0;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; font-size: 13.5px; font-weight: 600;
             display: flex; align-items: center; gap: 10px; z-index: 10050; opacity: 0; max-width: 92vw;
             transition: transform .35s cubic-bezier(0.34,1.56,0.64,1), opacity .3s;
-            box-shadow: 0 8px 30px rgba(0,0,0,0.25); border-left: 4px solid #16a34a;
+            box-shadow: 0 8px 24px rgba(27,42,74,0.30); border: 1px solid #55668C;
         }
         #endoToast.show { transform: translateX(-50%) translateY(0); opacity: 1; }
-        #endoToast.error { border-left-color: #dc2626; }
-        #endoToast button { background: rgba(255,255,255,0.15); border: 1px solid rgba(255,255,255,0.3); color: #fff; border-radius: 6px; padding: 4px 10px; font-size: 12px; font-weight: 700; cursor: pointer; margin-left: 4px; }
+        #endoToast.error { border-color: #A02A2A; }
+        #endoToast button { background: rgba(255,255,255,0.15); border: 1px solid rgba(255,255,255,0.3); color: #fff; border-radius: 0; padding: 4px 10px; font-size: 12px; font-weight: 700; cursor: pointer; margin-left: 4px; }
+        /* ══ Field Ops Grid (AccomForm.php) — shared additions ══
+           Responsive attendance bar + visible keyboard focus + reduced
+           motion, exactly as AccomForm.php defines them. */
+        @media (max-width: 768px) {
+            #att-notif-bar,
+            #att-notif-bar.sidebar-collapsed {
+                left: 50% !important;
+                width: calc(100% - 20px) !important;
+                max-width: none !important;
+            }
+        }
+        .sidebar.collapsed .logout-link a { border-color: transparent; }
+        .anb-btn:focus-visible, .anb-close:focus-visible, .ndm-close-btn:focus-visible,
+        .toggle-btn:focus-visible { outline: 2px solid #F7C600; outline-offset: 2px; }
+        @media (prefers-reduced-motion: reduce) {
+            .ndm-box, .anb-pulse, .sidebar-badge-att, .sidebar-badge-journal { animation: none; }
+        }
+        /* ══ Field Ops Grid (AccomForm.php) — page typography ══
+           Square, flat, navy; small uppercase labels and buttons. Only
+           the look changes — every class the scripts rely on is kept. */
+        .page-inner h2 {
+            color: var(--grid-navy); font-size: 20px;
+            border-bottom: 1px solid var(--grid-border);
+            text-transform: uppercase; letter-spacing: 0.6px;
+        }
+        .company-row { border: 1px solid var(--grid-border); }
+        .company-row:hover { border-color: var(--grid-navy); }
+        .company-summary .company-name {
+            color: var(--grid-navy); font-size: 14px;
+            text-transform: uppercase; letter-spacing: 0.3px;
+        }
+        .company-summary .company-name i { color: var(--grid-navy); }
+        .details-pane { border-top: 1px solid var(--grid-border-soft); }
+        .details-pane p b { color: var(--grid-navy); }
+        .company-profile-box { border: 1px solid var(--grid-border); }
+        .company-profile-box .cpb-title { color: var(--grid-navy); }
+        .btn-apply, .btn-cancel-request, .popup-content button, .endo-act, .drm-tbtn-close {
+            font-size: 12px; text-transform: uppercase; letter-spacing: 0.4px;
+        }
+        .btn-apply { border: 1px solid var(--grid-navy); background: var(--grid-navy); }
+        .btn-cancel-request, .btn-cancel-request-mini, .btn-view-resume-mini, .btn-apply-mini { border-width: 1px; }
+        .btn-apply-mini, .btn-cancel-request-mini, .btn-view-resume-mini,
+        .company-summary .summary-right .badge-current,
+        .company-summary .summary-right .app-stage-chip,
+        .registered-badge, .pending-request-badge {
+            font-size: 11px; text-transform: uppercase; letter-spacing: 0.3px;
+        }
+        .company-summary .summary-right .badge-current { border: 1px solid #BFE0BF; }
+        .app-stage-chip.awaiting, .pending-request-badge.app-stage-awaiting { border: 1px solid #E6D9A8; }
+        .app-stage-chip.pending,  .pending-request-badge.app-stage-pending  { border: 1px solid var(--grid-border); }
+        .registered-badge { border: 1px solid #BFE0BF; }
+        .pending-request-badge { border: 1px solid #E6D9A8; }
+        .popup-content { border: 1px solid var(--grid-border); }
+        .popup-content h3 { color: #1e293b; text-transform: uppercase; letter-spacing: 0.3px; }
+        .popup-content button:focus-visible { outline: 2px solid var(--grid-navy); outline-offset: 2px; }
+        .endo-inbox-head h3 { color: #fff; font-size: 13px; text-transform: uppercase; letter-spacing: 0.4px; }
+        .endo-inbox-head h3 i { color: #F7C600; }
+        .endo-card-title, .cv-card-label { text-transform: uppercase; letter-spacing: 0.3px; font-size: 12.5px; }
+        .endo-status, .endo-new-pill { text-transform: uppercase; letter-spacing: 0.3px; border: 1px solid transparent; }
+        .endo-status.awaiting { border-color: #E6D9A8; }
+        .endo-status.pending  { border-color: var(--grid-border); }
+        .endo-status.verified { border-color: #BFE0BF; }
+        .endo-status.rejected { border-color: #E3BCBC; }
+        .drm-toolbar-title { text-transform: uppercase; letter-spacing: 0.5px; }
+        .drm-toolbar-left i { color: #F7C600; }
+        #endoInboxBtn { border-radius: 0; border: 1px solid rgba(255,255,255,0.35); }
     </style>
 </head>
 <body>
@@ -2718,7 +2882,7 @@ $companies = $conn->query("
     document.addEventListener('submit', function (e) {
         var f = e.target;
         if (e.defaultPrevented || !f || !f.id) return;
-        if (f.id.indexOf('applyForm_') === 0)  startNavigationGlobalLoading('Submitting application');
+        if (f.id.indexOf('applyForm_') === 0)  startNavigationGlobalLoading('Matching preferred placement');
         if (f.id.indexOf('cancelForm_') === 0) startNavigationGlobalLoading('Cancelling request');
     });
     // Back/Forward cache restore: the page did not reload, so re-sync the overlay.
@@ -2768,7 +2932,7 @@ $companies = $conn->query("
 <!-- POPUP MODAL — incomplete profile -->
 <div id="profileModal" class="popup-modal" style="display:none;">
     <div class="popup-content">
-        <h3><i class="fas fa-triangle-exclamation" style="color:#d97706;"></i> Incomplete Profile</h3>
+        <h3><i class="fas fa-triangle-exclamation" style="color:#A0850A;"></i> Incomplete Profile</h3>
         <p>Please complete your student profile (skills, experience, and photo) before applying.</p>
         <button onclick="redirectProfile()">Go to Profile</button>
     </div>
@@ -2777,7 +2941,7 @@ $companies = $conn->query("
 <!-- POPUP MODAL — already registered to a company -->
 <div id="registeredModal" class="popup-modal" style="display:none;">
     <div class="popup-content">
-        <span class="popup-icon"></span>
+        <span class="popup-icon"><i class="fas fa-circle-info" style="color:#A0850A;"></i></span>
         <h3>Already Registered</h3>
         <p>You are already registered to a company. You cannot apply to another company while you have an active OJT placement.</p>
         <button onclick="document.getElementById('registeredModal').style.display='none'">Got it</button>
@@ -2792,7 +2956,7 @@ $companies = $conn->query("
      details pane) clears this guard. -->
 <div id="pendingBlockedModal" class="popup-modal" style="display:none;">
     <div class="popup-content">
-        <span class="popup-icon"></span>
+        <span class="popup-icon"><i class="fas fa-hourglass-half" style="color:#A0850A;"></i></span>
         <h3>Application Pending</h3>
         <p>You already have an application request awaiting admin approval. Please cancel it first (in that company's details) if you'd like to apply elsewhere.</p>
         <button onclick="document.getElementById('pendingBlockedModal').style.display='none'">Got it</button>
@@ -2807,7 +2971,7 @@ $companies = $conn->query("
      / submitCancelConfirm() in the <script> block further down). -->
 <div id="cancelConfirmModal" class="popup-modal" style="display:none;">
     <div class="popup-content">
-        <span class="popup-icon"><i class="fas fa-triangle-exclamation" style="color:#d97706;"></i></span>
+        <span class="popup-icon"><i class="fas fa-triangle-exclamation" style="color:#A0850A;"></i></span>
         <h3>Cancel Application Request?</h3>
         <p>This will withdraw your pending application request from this company. This action cannot be undone.</p>
         <div class="ccm-actions">
@@ -2836,6 +3000,60 @@ $companies = $conn->query("
         </div>
     </div>
 </div>
+
+<?php if (!empty($placement_mismatch)): ?>
+<!-- POPUP MODAL — preferred placement does not match the selected company
+     ADJUSTMENT: shown after Apply when the company's data differs from the
+     student's Preference for Placement. "Yes" replaces the preference with
+     the company's data (replace_placement handler), "No" cancels the
+     application and notifies the student. -->
+<div id="placementMismatchModal" class="popup-modal" style="display:none;" role="dialog" aria-modal="true" aria-labelledby="pmTitle">
+    <div class="pm-box">
+        <div class="pm-header">
+            <h3 id="pmTitle"><i class="fas fa-right-left"></i> Preferred Placement Doesn't Match</h3>
+            <button type="button" class="pm-close" aria-label="Close" onclick="declinePlacementReplace()">&times;</button>
+        </div>
+        <div class="pm-body">
+            <p>The data of <strong><?= htmlspecialchars($placement_mismatch['company_name']) ?></strong> does not match your saved Preference for Placement<?= $placement_mismatch['pref_name'] !== '' ? ' (<strong>' . htmlspecialchars($placement_mismatch['pref_name']) . '</strong>)' : '' ?>. Do you want to replace your preferred placement with this company?</p>
+            <table class="pm-diff">
+                <tr><th>Field</th><th>Your Preference</th><th>Selected Company</th></tr>
+                <?php foreach ($placement_mismatch['diff'] as $_d): ?>
+                <tr>
+                    <td><?= htmlspecialchars($_d['label']) ?></td>
+                    <td<?= $_d['pref'] === '' ? ' class="pm-empty"' : '' ?>><?= $_d['pref'] === '' ? '&mdash;' : htmlspecialchars($_d['pref']) ?></td>
+                    <td<?= $_d['company'] === '' ? ' class="pm-empty"' : '' ?>><?= $_d['company'] === '' ? '&mdash;' : htmlspecialchars($_d['company']) ?></td>
+                </tr>
+                <?php endforeach; ?>
+            </table>
+            <p class="pm-note">Replacing it will also remove your current <strong>Application SIT</strong> requirement &mdash; you will need to upload a new one, and your application will be sent automatically once it is verified.</p>
+            <form method="POST" id="replacePlacementForm">
+                <input type="hidden" name="company_id" value="<?= (int)$placement_mismatch['company_id'] ?>">
+                <input type="hidden" name="replace_placement" value="1">
+            </form>
+        </div>
+        <div class="pm-actions">
+            <button type="button" class="pm-btn-no" onclick="declinePlacementReplace()">No, Cancel Application</button>
+            <button type="button" class="pm-btn-yes" onclick="confirmPlacementReplace()">Yes, Replace It</button>
+        </div>
+    </div>
+</div>
+<?php endif; ?>
+
+<?php if (!empty($placement_replaced)): ?>
+<!-- POPUP MODAL — preferred placement replaced; new Application SIT required -->
+<div id="placementReplacedModal" class="popup-modal" style="display:none;">
+    <div class="popup-content">
+        <span class="popup-icon"><i class="fas fa-circle-check" style="color:#2b6a3f;"></i></span>
+        <h3>Preferred Placement Updated</h3>
+        <p>Your preferred placement has been updated with the data of <strong><?= htmlspecialchars($placement_replaced['company_name']) ?></strong>, and your previous Application SIT requirement was removed.</p>
+        <p>Please upload your <strong>new Application SIT</strong>. Your application to this company is on hold and will be sent automatically once all of your requirements are verified.</p>
+        <div class="pm-actions">
+            <button type="button" class="pm-btn-close" onclick="document.getElementById('placementReplacedModal').style.display='none'">Close</button>
+            <button type="button" class="pm-btn-go" onclick="window.location.href='AccomForm.php'">Go to Requirements</button>
+        </div>
+    </div>
+</div>
+<?php endif; ?>
 
 <!-- REQUIREMENT PREVIEW MODAL -->
 <div id="reqPreviewModal" style="display:none;">
@@ -2908,7 +3126,7 @@ $companies = $conn->query("
 <!-- NOT-DEPLOYED MODAL -->
 <div id="not-deployed-modal" style="display:none;">
     <div class="ndm-box">
-        <div class="ndm-icon"><i class="fas fa-lock" style="color:#b45309;"></i></div>
+        <div class="ndm-icon"><i class="fas fa-lock" style="color:#A0850A;"></i></div>
         <div class="ndm-title">Page Not Accessible</div>
         <div class="ndm-page-name" id="ndm-page-label">—</div>
         <div class="ndm-status-badge">
@@ -3087,9 +3305,10 @@ $companies = $conn->query("
                endorsement-letter inbox showed it (same pill style): at the admin →
                "Waiting for the Approval"; at the company → "Under Company Validation". */
             $appAtAdmin    = ($pendingStage === 'admin_review');
-            $appStageLabel = $appAtAdmin ? 'Waiting for the Approval' : 'Under Company Validation';
-            $appStageClass = $appAtAdmin ? 'awaiting' : 'pending';
-            $appStageIcon  = $appAtAdmin ? 'fa-hourglass-half' : 'fa-magnifying-glass';
+            $appOnHold     = ($pendingStage === 'placement_hold'); // ADJUSTMENT: placement replaced — awaiting new Application SIT
+            $appStageLabel = $appOnHold ? 'On Hold — Awaiting Application SIT' : ($appAtAdmin ? 'Waiting for the Approval' : 'Under Company Validation');
+            $appStageClass = ($appAtAdmin || $appOnHold) ? 'awaiting' : 'pending';
+            $appStageIcon  = $appOnHold ? 'fa-pause-circle' : ($appAtAdmin ? 'fa-hourglass-half' : 'fa-magnifying-glass');
 
             /* FIX: prefer the company's registered name (ci.company) — same
                fallback logic used in student_profile.php's Company Details
@@ -3180,7 +3399,7 @@ $companies = $conn->query("
                                  #reqUnverifiedModal and stops here if any
                                  requirement is not yet Verified. -->
                             <button type="button" class="btn-apply-mini"
-                                    onclick="event.preventDefault(); event.stopPropagation(); if (!guardApplyRequirements(event)) return; var f=document.getElementById('applyForm_<?= (int)$row['id'] ?>'); if(f) { startNavigationGlobalLoading('Submitting application'); f.submit(); }">
+                                    onclick="event.preventDefault(); event.stopPropagation(); if (!guardApplyRequirements(event)) return; var f=document.getElementById('applyForm_<?= (int)$row['id'] ?>'); if(f) { startNavigationGlobalLoading('Matching preferred placement'); f.submit(); }">
                                 <i class="fas fa-paper-plane"></i> Apply
                             </button>
                         <?php endif; ?>
@@ -3373,6 +3592,28 @@ document.addEventListener("DOMContentLoaded", function() {
 /* ADJUSTMENT: server-side apply gate fired — re-show the popup. */
 document.addEventListener("DOMContentLoaded", function() {
     openReqUnverifiedModal();
+});
+<?php endif; ?>
+
+<?php if (!empty($placement_mismatch)): ?>
+/* ADJUSTMENT: preferred-placement mismatch popup (after Apply). */
+document.addEventListener("DOMContentLoaded", function() {
+    document.getElementById("placementMismatchModal").style.display = "flex";
+});
+function declinePlacementReplace() {
+    document.getElementById('placementMismatchModal').style.display = 'none';
+    clShowTopToast(<?= json_encode($placement_mismatch['company_name']) ?>,
+        'application was cancelled \u2014 your preferred placement was not changed.', 'fa-circle-xmark', true);
+}
+function confirmPlacementReplace() {
+    startNavigationGlobalLoading('Updating preferred placement');
+    document.getElementById('replacePlacementForm').submit();
+}
+<?php endif; ?>
+
+<?php if (!empty($placement_replaced)): ?>
+document.addEventListener("DOMContentLoaded", function() {
+    document.getElementById("placementReplacedModal").style.display = "flex";
 });
 <?php endif; ?>
 
@@ -4681,15 +4922,20 @@ function clShowTopToast(name, messageText, iconClass, isError) {
             if (np[id] === pp[id]) return;
             if (!np[id]) {
                 if (id === nextReg) return; // accepted — already announced above
+                if (pp[id] === 'hold') { out.push({ name: nameOf(id), text: '\u2014 your on-hold application was cancelled.', icon: 'fa-circle-xmark' }); return; }
                 out.push(pp[id] === 'admin'
                     ? { name: nameOf(id), text: '\u2014 your application was not approved by the administrator.', icon: 'fa-circle-xmark' }
                     : { name: nameOf(id), text: 'did not accept your application.', icon: 'fa-circle-xmark' });
+            } else if (pp[id] === 'hold' && np[id] === 'admin') {
+                out.push({ name: nameOf(id), text: '\u2014 your requirements are verified again, so your application was sent automatically and is Waiting for the Approval.', icon: 'fa-paper-plane' });
             } else if (pp[id] === 'admin' && np[id] === 'company') {
                 out.push({ name: nameOf(id), text: '\u2014 the administrator approved your application. It is now Under Company Validation; your endorsement letter is in your Inbox.', icon: 'fa-envelope-circle-check' });
             }
         });
         Object.keys(np).forEach(function (id) {
-            if (!pp[id]) out.push(np[id] === 'company'
+            if (!pp[id]) out.push(np[id] === 'hold'
+                ? { name: nameOf(id), text: '\u2014 your application is On Hold until your new Application SIT is verified.', icon: 'fa-pause-circle' }
+                : np[id] === 'company'
                 // ADJUSTMENT: applied by the administrator (monitoring dashboard) — straight to the company.
                 ? { name: nameOf(id), text: '\u2014 the administrator applied you to this company. It is now Under Company Validation; your endorsement letter is in your Inbox.', icon: 'fa-envelope-circle-check' }
                 : { name: nameOf(id), text: '\u2014 your application was sent and is Waiting for the Approval.', icon: 'fa-paper-plane' });
