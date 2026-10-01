@@ -776,6 +776,171 @@ if ($rowCompany = $resCompany->fetch_assoc()) {
 
 $already_registered = ($current_company_id !== null);
 
+/* ============================================================
+   ADJUSTMENT: PREFERRED-PLACEMENT MISMATCH → REPLACE + REMOVE SIT
+   ------------------------------------------------------------
+   The Application SIT (requirement type 'application_sit') is built
+   from the student's "Preference for Placement" (student_information
+   .pref_* — saved on AccomForm.php), so a signed SIT that names a
+   different company than the one being applied to is no longer valid.
+
+   When the student clicks Apply, the company's own data
+   (company_information) is compared with that saved preference. If
+   they do not match, the student is asked to confirm; on confirmation:
+     1) the preferred placement is replaced with the company's data;
+     2) the Application SIT row is deleted from `requirements`
+        (users.validation_status falls back to 'Pending');
+     3) the verified SIT file(s) administrator.php saved into the
+        student's uploads/<First_Middle_Last>/ folder are deleted
+        (same folder / file-name rule as administrator.php).
+   The student then re-submits an Application SIT for the new
+   company from AccomForm.php. Nothing here runs unless a mismatch
+   is detected, so the normal apply flow is untouched.
+   ============================================================ */
+function clPlacementNorm($s) {
+    return preg_replace('/[^a-z0-9]/', '', strtolower(trim((string)$s)));
+}
+
+/* The target company's data, same name rule as the company rows
+   (company_information.company, else the account's own name). */
+function clCompanyPlacementData(mysqli $conn, int $company_id): ?array {
+    if ($company_id <= 0) return null;
+    try {
+        $q = $conn->prepare("SELECT u.first_name, u.last_name, ci.company, ci.company_address, ci.telephone,
+                                    ci.contact_first_name, ci.contact_middle_initial, ci.contact_last_name, ci.position
+                             FROM users u LEFT JOIN company_information ci ON ci.user_id = u.id
+                             WHERE u.id = ? LIMIT 1");
+        if (!$q) return null;
+        $q->bind_param("i", $company_id);
+        $q->execute();
+        $r = $q->get_result()->fetch_assoc();
+        $q->close();
+    } catch (\Throwable $e) { return null; }
+    if (!$r) return null;
+    $name = trim((string)($r['company'] ?? ''));
+    if ($name === '') $name = trim(($r['first_name'] ?? '') . ' ' . ($r['last_name'] ?? ''));
+    if ($name === '') return null;
+    return [
+        'name'    => $name,
+        'address' => trim((string)($r['company_address'] ?? '')),
+        'phone'   => trim((string)($r['telephone'] ?? '')),
+        'c_first' => trim((string)($r['contact_first_name'] ?? '')),
+        'c_mid'   => trim((string)($r['contact_middle_initial'] ?? '')),
+        'c_last'  => trim((string)($r['contact_last_name'] ?? '')),
+        'position'=> trim((string)($r['position'] ?? '')),
+    ];
+}
+
+/* Returns ['pref' => [...], 'company' => [...]] when the saved preferred
+   placement differs from the company being applied to, otherwise null
+   (no preference saved, company data unavailable, or they match). */
+function clPlacementMismatch(mysqli $conn, int $user_id, int $company_id): ?array {
+    $company = clCompanyPlacementData($conn, $company_id);
+    if (!$company) return null;
+    try {
+        $q = $conn->prepare("SELECT pref_company_name, pref_company_address FROM student_information WHERE user_id = ? LIMIT 1");
+        if (!$q) return null;
+        $q->bind_param("i", $user_id);
+        $q->execute();
+        $p = $q->get_result()->fetch_assoc();
+        $q->close();
+    } catch (\Throwable $e) { return null; }
+    if (!$p) return null;
+    $prefName = trim((string)($p['pref_company_name'] ?? ''));
+    $prefAddr = trim((string)($p['pref_company_address'] ?? ''));
+    if ($prefName === '') return null; // nothing saved → nothing to conflict with
+
+    $nameDiffers = clPlacementNorm($prefName) !== clPlacementNorm($company['name']);
+    $addrDiffers = ($prefAddr !== '' && $company['address'] !== ''
+                    && clPlacementNorm($prefAddr) !== clPlacementNorm($company['address']));
+    if (!$nameDiffers && !$addrDiffers) return null;
+
+    return ['pref' => ['name' => $prefName, 'address' => $prefAddr], 'company' => $company];
+}
+
+/* Deletes the verified Application SIT copies from the student's upload
+   folder. Returns [deleted_count, failed_count]. */
+function clRemoveSitUploadFiles(mysqli $conn, int $user_id, string $label): array {
+    $deleted = 0; $failed = 0;
+    try {
+        $uq = $conn->prepare("SELECT first_name, middle_name, last_name FROM users WHERE id = ?");
+        $uq->bind_param("i", $user_id);
+        $uq->execute();
+        $ud = $uq->get_result()->fetch_assoc();
+        $uq->close();
+    } catch (\Throwable $e) { return [0, 1]; }
+    if (!$ud) return [0, 0];
+
+    // Same folder rule as administrator.php (ajax_update_requirement).
+    $safeFirst  = preg_replace("/[^a-zA-Z0-9]/", "_", (string)$ud['first_name']);
+    $safeMiddle = preg_replace("/[^a-zA-Z0-9]/", "_", (string)$ud['middle_name']);
+    $safeLast   = preg_replace("/[^a-zA-Z0-9]/", "_", (string)$ud['last_name']);
+    $folder = !empty($safeMiddle) ? $safeFirst . "_" . $safeMiddle . "_" . $safeLast : $safeFirst . "_" . $safeLast;
+
+    $base = realpath(__DIR__ . '/uploads');
+    $dir  = realpath(__DIR__ . '/uploads/' . $folder);
+    if ($base === false || $dir === false || !is_dir($dir)) return [0, 0];
+    if (strpos($dir, $base . DIRECTORY_SEPARATOR) !== 0) return [0, 0]; // never leave uploads/
+
+    // administrator.php names the copy "<safe label>_verified_<time>.jpg"
+    // (its label's capitalisation differs between places → case-insensitive).
+    $prefix = preg_replace("/[^a-zA-Z0-9]/", "_", $label) . "_verified_";
+    $items = @scandir($dir);
+    if ($items === false) return [0, 1];
+    foreach ($items as $f) {
+        if ($f === '.' || $f === '..') continue;
+        if (stripos($f, $prefix) !== 0) continue;
+        $full = $dir . DIRECTORY_SEPARATOR . $f;
+        if (!is_file($full)) continue;
+        if (@unlink($full)) $deleted++; else $failed++;
+    }
+    return [$deleted, $failed];
+}
+
+/* Replaces the preferred placement with the company's data and removes
+   the Application SIT (DB row + upload-folder copies). Returns
+   ['ok' => bool, 'message' => string]. */
+function clReplacePlacementAndRemoveSit(mysqli $conn, int $user_id, array $company, string $sitLabel): array {
+    $contact = trim($company['c_first'] . ' ' . $company['c_mid'] . ' ' . $company['c_last']);
+    try {
+        $conn->begin_transaction();
+
+        $up = $conn->prepare("UPDATE student_information
+                              SET pref_company_name = ?, pref_company_address = ?, pref_telephone = ?,
+                                  pref_contact_person_first = ?, pref_contact_person_middle = ?, pref_contact_person_last = ?,
+                                  pref_position = ?
+                              WHERE user_id = ?");
+        $up->bind_param("sssssssi", $company['name'], $company['address'], $company['phone'],
+                        $company['c_first'], $company['c_mid'], $company['c_last'], $company['position'], $user_id);
+        $up->execute();
+        $up->close();
+
+        $del = $conn->prepare("DELETE FROM requirements WHERE user_id = ? AND requirement_type = 'application_sit'");
+        $del->bind_param("i", $user_id);
+        $del->execute();
+        $del->close();
+
+        // The student is no longer fully verified (same value administrator.php's recompute writes).
+        try {
+            $vs = $conn->prepare("UPDATE users SET validation_status = 'Pending' WHERE id = ?");
+            if ($vs) { $vs->bind_param("i", $user_id); $vs->execute(); $vs->close(); }
+        } catch (\Throwable $e) { /* column may not exist yet — not fatal */ }
+
+        $conn->commit();
+    } catch (\Throwable $e) {
+        try { $conn->rollback(); } catch (\Throwable $e2) {}
+        return ['ok' => false, 'message' => 'We could not update your preferred placement. Please try again.'];
+    }
+
+    // Files are removed only after the DB change is safely committed.
+    [$deleted, $failed] = clRemoveSitUploadFiles($conn, $user_id, $sitLabel);
+
+    $msg = 'Your preferred placement was updated to ' . $company['name'] . ' and your Application SIT was removed. '
+         . 'Please submit a new Application SIT for this company from your Requirements page, then apply again.';
+    if ($failed > 0) $msg .= ' (Some old SIT files could not be deleted from the server; please inform the administrator.)';
+    return ['ok' => true, 'message' => $msg];
+}
+
 /* ================= HANDLE APPLY ================= */
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['apply'])) {
 
@@ -811,7 +976,28 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['apply'])) {
         $check->execute();
         $exists = $check->get_result();
 
-        if ($exists->num_rows == 0) {
+        /* ADJUSTMENT: preferred placement vs. this company's data. Only
+           looked at for a brand-new application (an existing one still
+           just reports "already applied"). */
+        $placement_mismatch_data = ($exists->num_rows == 0) ? clPlacementMismatch($conn, (int)$user_id, $company_id) : null;
+
+        if ($placement_mismatch_data !== null && empty($_POST['confirm_replace_placement'])) {
+            // Mismatch found → ask first (popup #placementMismatchModal); nothing is changed yet.
+            $placement_mismatch = $placement_mismatch_data;
+            $placement_mismatch['company_id'] = $company_id;
+        } elseif ($placement_mismatch_data !== null) {
+            // Student confirmed → replace the preference and remove the Application SIT.
+            $replaceRes = clReplacePlacementAndRemoveSit($conn, (int)$user_id, $placement_mismatch_data['company'], $reqLabels['application_sit']);
+            if ($replaceRes['ok']) {
+                $success = $replaceRes['message'];
+                // Keep this request's already-computed gate state in sync (SIT is gone).
+                unset($studentReqs['application_sit']);
+                $all_verified = false;
+                $req_gate_statuses['application_sit'] = 'Not Submitted';
+            } else {
+                $error = $replaceRes['message'];
+            }
+        } elseif ($exists->num_rows == 0) {
 
             $student_email = $student['email'];
 
@@ -2241,6 +2427,19 @@ $companies = $conn->query("
         #cancelConfirmModal .ccm-btn-keep { background: #e5e7eb !important; color: #374151 !important; }
         #cancelConfirmModal .ccm-btn-confirm { background: #dc2626 !important; }
 
+        /* ══ ADJUSTMENT: PREFERRED-PLACEMENT MISMATCH POPUP ══ */
+        #placementMismatchModal .popup-content { border-top: 5px solid #d97706; width: 460px; }
+        #placementMismatchModal .popup-content h3 { color: #92400e; }
+        #placementMismatchModal .popup-icon { font-size: 42px; margin-bottom: 12px; display: block; }
+        #placementMismatchModal .popup-content p { margin-bottom: 14px; }
+        #placementMismatchModal .rum-list { list-style: none; padding: 0; margin: 0 0 14px; text-align: left; }
+        #placementMismatchModal .rum-list li { padding: 8px 10px; border-bottom: 1px solid #eee; font-size: 14px; }
+        #placementMismatchModal .rum-list li:last-child { border-bottom: none; }
+        #placementMismatchModal .rum-actions { display: flex; gap: 10px; justify-content: center; }
+        #placementMismatchModal .rum-actions button { flex: 1; }
+        #placementMismatchModal .rum-btn-close { background: #e5e7eb !important; color: #374151 !important; }
+        #placementMismatchModal .rum-btn-go { background: #dc2626 !important; }
+
         /* ══ ADJUSTMENT: REQUIREMENTS-NOT-VERIFIED POPUP ══
            Shown when the student clicks Apply (mini or full-size) while
            any of the 8 requirements is not yet Verified. Built on the
@@ -2837,6 +3036,33 @@ $companies = $conn->query("
     </div>
 </div>
 
+<!-- POPUP MODAL — preferred placement does not match the company
+     ADJUSTMENT: shown after Apply when the student's saved Preference for
+     Placement differs from the company's data. Confirming re-posts the
+     same apply request with confirm_replace_placement=1 (see the apply
+     handler): the preference is replaced and the Application SIT removed. -->
+<?php if (!empty($placement_mismatch)): ?>
+<div id="placementMismatchModal" class="popup-modal" style="display:none;">
+    <div class="popup-content">
+        <span class="popup-icon"><i class="fas fa-triangle-exclamation" style="color:#d97706;"></i></span>
+        <h3>Preferred Placement Doesn't Match</h3>
+        <p>Your saved preferred placement is different from the company you are applying to. Your <strong>Application SIT</strong> was made for the old preference, so it must be replaced.</p>
+        <ul class="rum-list">
+            <li><span><strong>Your preference:</strong><br><?= htmlspecialchars($placement_mismatch['pref']['name']) ?><?= $placement_mismatch['pref']['address'] !== '' ? '<br><small>' . htmlspecialchars($placement_mismatch['pref']['address']) . '</small>' : '' ?></span></li>
+            <li><span><strong>This company:</strong><br><?= htmlspecialchars($placement_mismatch['company']['name']) ?><?= $placement_mismatch['company']['address'] !== '' ? '<br><small>' . htmlspecialchars($placement_mismatch['company']['address']) . '</small>' : '' ?></span></li>
+        </ul>
+        <p><strong>If you continue</strong>, your preferred placement will be replaced with this company's details and your uploaded Application SIT will be <strong>deleted</strong>. You will need to submit a new one before applying.</p>
+        <form method="POST" class="rum-actions" onsubmit="startNavigationGlobalLoading('Updating placement');">
+            <input type="hidden" name="apply" value="1">
+            <input type="hidden" name="company_id" value="<?= (int)$placement_mismatch['company_id'] ?>">
+            <input type="hidden" name="confirm_replace_placement" value="1">
+            <button type="button" class="rum-btn-close" onclick="closePlacementMismatchModal()">Cancel</button>
+            <button type="submit" class="rum-btn-go">Replace &amp; Remove SIT</button>
+        </form>
+    </div>
+</div>
+<?php endif; ?>
+
 <!-- REQUIREMENT PREVIEW MODAL -->
 <div id="reqPreviewModal" style="display:none;">
     <span id="reqPreviewClose" onclick="document.getElementById('reqPreviewModal').style.display='none'">×</span>
@@ -3367,6 +3593,22 @@ document.addEventListener("DOMContentLoaded", function() {
 document.addEventListener("DOMContentLoaded", function() {
     document.getElementById("registeredModal").style.display = "flex";
 });
+<?php endif; ?>
+
+<?php if (!empty($placement_mismatch)): ?>
+/* ADJUSTMENT: preferred placement ≠ company → ask before replacing it / removing the SIT. */
+function closePlacementMismatchModal() {
+    var m = document.getElementById('placementMismatchModal');
+    if (m) m.style.display = 'none';
+}
+document.addEventListener("DOMContentLoaded", function() {
+    var m = document.getElementById('placementMismatchModal');
+    if (m) {
+        m.style.display = 'flex';
+        m.addEventListener('click', function(e) { if (e.target === m) closePlacementMismatchModal(); });
+    }
+});
+document.addEventListener('keydown', function(e) { if (e.key === 'Escape') closePlacementMismatchModal(); });
 <?php endif; ?>
 
 <?php if (!empty($requirements_unverified)): ?>
