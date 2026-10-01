@@ -3169,12 +3169,20 @@ if (isset($_GET['msg']) && ($_GET['msg'] === 'profile_saved' || $_GET['msg'] ===
         }
         #globalLoadingOverlay.hidden { opacity: 0; visibility: hidden; pointer-events: none; }
         .global-loading-box { display: flex; flex-direction: column; align-items: center; gap: 16px; animation: globalLoadingPop 0.35s ease; }
+        /* UPDATED (loading ring): the 12-segment ticking ring of admin_student_list.php (same size, colour, mask and timing) */
         .global-loading-spinner {
-            width: 54px; height: 54px; border-radius: 50%;
-            border: 5px solid var(--grid-border, #C3CADA);
-            border-top-color: var(--grid-navy, #1B2A4A);
-            animation: globalLoadingSpin 0.85s linear infinite;
+            width: 64px; height: 64px; border: 0; border-radius: 50%; box-sizing: border-box;
+            background: conic-gradient(from 0deg, rgba(27,42,74,0.12) 0deg, rgba(27,42,74,0.35) 120deg, rgba(27,42,74,0.7) 240deg, #1B2A4A 330deg, #1B2A4A 360deg);
+            -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 9px), #000 calc(100% - 8px)),
+                          repeating-conic-gradient(from 5deg, #000 0deg 20deg, transparent 20deg 30deg);
+            -webkit-mask-composite: source-in;
+                    mask: radial-gradient(farthest-side, transparent calc(100% - 9px), #000 calc(100% - 8px)),
+                          repeating-conic-gradient(from 5deg, #000 0deg 20deg, transparent 20deg 30deg);
+                    mask-composite: intersect;
+            will-change: transform;
+            animation: cvRingSpin 1s steps(12, end) infinite;
         }
+        @keyframes cvRingSpin { to { transform: rotate(360deg); } }
         .global-loading-text {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             font-size: 13px; font-weight: 700; color: var(--grid-navy, #1B2A4A);
