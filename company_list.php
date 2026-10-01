@@ -691,6 +691,243 @@ $legacy_exp2 = (count($exp_entries) > 1)
     ? implode($EXP_ENTRY_DELIM, array_slice($exp_entries, 1))
     : '';
 
+/* ============================================================
+   NEW: PLACEMENT MISMATCH — "Yes, Replace It"
+   ------------------------------------------------------------
+   The student's "Preference for Placement" (student_information.
+   pref_company_name / pref_company_address / pref_telephone /
+   pref_contact_person_first|middle|last / pref_position — saved from
+   AccomForm.php and printed on the Application SIT form) is compared
+   with the registered profile of the company the student clicks
+   Apply on (company_information — the same columns AccomForm.php's
+   fetchCompanyInformation() reads for a registered student).
+
+   When they differ, the Apply button opens #placementMismatchModal.
+   Choosing "Yes, Replace It" POSTs replace_placement=1 here, which:
+     1) overwrites the student's pref_* columns with the company's data,
+     2) deletes the student's Application SIT (requirements row with
+        requirement_type = 'application_sit'), because the signed form
+        on file lists the OLD placement and is no longer valid, and
+     3) deletes the verified copy administrator.php saved for it in
+        uploads/<First_Middle_Last>/ when it was marked Verified.
+   The student then re-prints / re-uploads the SIT form (now pre-filled
+   with the company's data) from AccomForm.php. This block runs BEFORE
+   the requirement fetch below, so the rest of the page (apply gate,
+   sidebar lock, live status map) already reflects the deleted SIT.
+   Nothing here changes the Apply / Cancel handlers.
+   ============================================================ */
+function clPlacementNorm($s) {
+    return preg_replace('/[^a-z0-9]+/', '', function_exists('mb_strtolower') ? mb_strtolower((string)$s) : strtolower((string)$s));
+}
+
+/* The company's registered placement-related data (company_information). */
+function clFetchCompanyPlacement(mysqli $conn, int $company_id): ?array {
+    $stmt = $conn->prepare("
+        SELECT ci.company, ci.company_address, ci.telephone,
+               ci.contact_first_name, ci.contact_middle_initial, ci.contact_last_name, ci.position
+        FROM users u
+        INNER JOIN company_information ci ON ci.user_id = u.id
+        WHERE u.id = ? AND u.role = 'company' AND u.company_validation_status = 'verified'
+        LIMIT 1
+    ");
+    $stmt->bind_param("i", $company_id);
+    $stmt->execute();
+    $row = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+    return $row ?: null;
+}
+
+/* The student's saved placement preference (student_information.pref_*). */
+function clFetchStudentPlacement(mysqli $conn, int $student_id): array {
+    $stmt = $conn->prepare("
+        SELECT pref_company_name, pref_company_address, pref_telephone,
+               pref_contact_person_first, pref_contact_person_middle, pref_contact_person_last, pref_position
+        FROM student_information WHERE user_id = ? LIMIT 1
+    ");
+    $stmt->bind_param("i", $student_id);
+    $stmt->execute();
+    $row = $stmt->get_result()->fetch_assoc();
+    $stmt->close();
+    return $row ?: [];
+}
+
+/* Returns the fields that differ: [['label'=>, 'student'=>, 'company'=>], ...].
+   A field the company has not filled in is skipped (nothing to compare
+   against). Telephone compares digits only; the contact person compares
+   first + last name only (the company stores a middle INITIAL, the student
+   may have typed the full middle name). Empty array = no mismatch. */
+function clPlacementDiff(array $pref, array $co): array {
+    $contactStudent = trim(($pref['pref_contact_person_first'] ?? '') . ' ' . ($pref['pref_contact_person_last'] ?? ''));
+    $contactCompany = trim(($co['contact_first_name'] ?? '') . ' ' . ($co['contact_last_name'] ?? ''));
+    $fullStudent = trim(preg_replace('/\s+/', ' ',
+        ($pref['pref_contact_person_first'] ?? '') . ' ' . ($pref['pref_contact_person_middle'] ?? '') . ' ' . ($pref['pref_contact_person_last'] ?? '')));
+    $fullCompany = trim(preg_replace('/\s+/', ' ',
+        ($co['contact_first_name'] ?? '') . ' ' . ($co['contact_middle_initial'] ?? '') . ' ' . ($co['contact_last_name'] ?? '')));
+
+    $fields = [
+        ['Company Name',   $pref['pref_company_name']    ?? '', $co['company']         ?? '', 'text'],
+        ['Address',        $pref['pref_company_address'] ?? '', $co['company_address'] ?? '', 'text'],
+        ['Telephone',      $pref['pref_telephone']       ?? '', $co['telephone']       ?? '', 'digits'],
+        ['Contact Person', $fullStudent, $fullCompany, 'contact', $contactStudent, $contactCompany],
+        ['Position',       $pref['pref_position']        ?? '', $co['position']        ?? '', 'text'],
+    ];
+
+    $diff = [];
+    foreach ($fields as $f) {
+        [$label, $sVal, $cVal, $mode] = $f;
+        if ($mode === 'digits') {
+            $sN = preg_replace('/\D+/', '', (string)$sVal);
+            $cN = preg_replace('/\D+/', '', (string)$cVal);
+        } elseif ($mode === 'contact') {
+            $sN = clPlacementNorm($f[4]);
+            $cN = clPlacementNorm($f[5]);
+        } else {
+            $sN = clPlacementNorm($sVal);
+            $cN = clPlacementNorm($cVal);
+        }
+        if ($cN === '') continue;
+        if ($sN !== $cN) {
+            $diff[] = ['label' => $label, 'student' => trim((string)$sVal), 'company' => trim((string)$cVal)];
+        }
+    }
+    return $diff;
+}
+
+$placement_replaced = false;
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['replace_placement'])) {
+    $rp_company_id = intval($_POST['company_id'] ?? 0);
+
+    $rp_reg = $conn->prepare("SELECT 1 FROM ojt_assignments WHERE student_id = ? LIMIT 1");
+    $rp_reg->bind_param("i", $user_id);
+    $rp_reg->execute();
+    $rp_registered = $rp_reg->get_result()->num_rows > 0;
+    $rp_reg->close();
+
+    $rp_pend = $conn->prepare("
+        SELECT (SELECT COUNT(*) FROM admin_application_approvals WHERE student_id = ?)
+             + (SELECT COUNT(*) FROM ojt_applications WHERE student_id = ? AND phase = 'pending') AS n
+    ");
+    $rp_pend->bind_param("ii", $user_id, $user_id);
+    $rp_pend->execute();
+    $rp_pending = (int)($rp_pend->get_result()->fetch_assoc()['n'] ?? 0) > 0;
+    $rp_pend->close();
+
+    $rp_company = $rp_company_id > 0 ? clFetchCompanyPlacement($conn, $rp_company_id) : null;
+
+    if ($rp_registered) {
+        $apply_blocked = true; // reuses the existing "Already Registered" popup
+    } elseif ($rp_pending) {
+        $error = "You already have an application request in progress. Please cancel it first before replacing your placement preference.";
+    } elseif (!$rp_company) {
+        $error = "That company could not be found or is no longer available.";
+    } elseif (!clPlacementDiff(clFetchStudentPlacement($conn, $user_id), $rp_company)) {
+        $error = "Your preferred placement already matches this company. Nothing was replaced.";
+    } else {
+        $rp_ok = false;
+        try {
+            $conn->begin_transaction();
+
+            $rp_vals = [
+                (string)($rp_company['company'] ?? ''),
+                (string)($rp_company['company_address'] ?? ''),
+                (string)($rp_company['telephone'] ?? ''),
+                (string)($rp_company['contact_first_name'] ?? ''),
+                (string)($rp_company['contact_middle_initial'] ?? ''),
+                (string)($rp_company['contact_last_name'] ?? ''),
+                (string)($rp_company['position'] ?? ''),
+            ];
+
+            $rp_upd = $conn->prepare("
+                UPDATE student_information SET
+                    pref_company_name = ?, pref_company_address = ?, pref_telephone = ?,
+                    pref_contact_person_first = ?, pref_contact_person_middle = ?, pref_contact_person_last = ?,
+                    pref_position = ?
+                WHERE user_id = ?
+            ");
+            $rp_upd->bind_param("sssssssi", ...[...$rp_vals, $user_id]);
+            $rp_upd->execute();
+            $rp_exists = $conn->prepare("SELECT 1 FROM student_information WHERE user_id = ? LIMIT 1");
+            $rp_exists->bind_param("i", $user_id);
+            $rp_exists->execute();
+            $rp_has_row = $rp_exists->get_result()->num_rows > 0;
+            $rp_exists->close();
+            $rp_upd->close();
+
+            if (!$rp_has_row) {
+                $rp_ins = $conn->prepare("
+                    INSERT INTO student_information
+                        (user_id, guardian_no, pref_company_name, pref_company_address, pref_telephone,
+                         pref_contact_person_first, pref_contact_person_middle, pref_contact_person_last, pref_position)
+                    VALUES (?, '', ?, ?, ?, ?, ?, ?, ?)
+                ");
+                $rp_ins->bind_param("isssssss", ...[$user_id, ...$rp_vals]);
+                $rp_ins->execute();
+                $rp_ins->close();
+            }
+
+            // The old signed Application SIT lists the previous placement — remove it.
+            $rp_del = $conn->prepare("DELETE FROM requirements WHERE user_id = ? AND requirement_type = 'application_sit'");
+            $rp_del->bind_param("i", $user_id);
+            $rp_del->execute();
+            $rp_del->close();
+
+            // Same effect as administrator.php's recomputeValidationStatus() when a requirement stops being Verified.
+            $rp_val = $conn->prepare("UPDATE users SET validation_status = 'Pending' WHERE id = ?");
+            $rp_val->bind_param("i", $user_id);
+            $rp_val->execute();
+            $rp_val->close();
+
+            $conn->commit();
+            $rp_ok = true;
+        } catch (Throwable $e) {
+            try { $conn->rollback(); } catch (Throwable $e2) {}
+            error_log('company_list.php replace_placement failed: ' . $e->getMessage());
+            $error = "Something went wrong while replacing your preferred placement. Nothing was changed — please try again.";
+        }
+
+        if ($rp_ok) {
+            $placement_replaced = true;
+            $rp_file_warning = false;
+
+            // Delete the verified copy of the Application SIT from uploads/<First_Middle_Last>/
+            // (same folder naming administrator.php uses when it saves a verified file).
+            try {
+                $rp_u = $conn->prepare("SELECT first_name, middle_name, last_name FROM users WHERE id = ?");
+                $rp_u->bind_param("i", $user_id);
+                $rp_u->execute();
+                $rp_ud = $rp_u->get_result()->fetch_assoc();
+                $rp_u->close();
+
+                if ($rp_ud) {
+                    $rp_first  = preg_replace("/[^a-zA-Z0-9]/", "_", (string)$rp_ud['first_name']);
+                    $rp_middle = preg_replace("/[^a-zA-Z0-9]/", "_", (string)$rp_ud['middle_name']);
+                    $rp_last   = preg_replace("/[^a-zA-Z0-9]/", "_", (string)$rp_ud['last_name']);
+                    $rp_folder = $rp_middle !== '' ? $rp_first . "_" . $rp_middle . "_" . $rp_last : $rp_first . "_" . $rp_last;
+                    $rp_dir    = __DIR__ . "/uploads/" . $rp_folder;
+
+                    if ($rp_folder !== '_' && is_dir($rp_dir)) {
+                        foreach (scandir($rp_dir) ?: [] as $rp_f) {
+                            if (preg_match('/^Application_for_supervised_Industrial_Training_verified_/i', $rp_f)) {
+                                $rp_path = $rp_dir . "/" . $rp_f;
+                                if (is_file($rp_path) && !@unlink($rp_path)) {
+                                    $rp_file_warning = true;
+                                    error_log('company_list.php replace_placement: could not delete ' . $rp_path);
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (Throwable $e) {
+                $rp_file_warning = true;
+                error_log('company_list.php replace_placement file cleanup failed: ' . $e->getMessage());
+            }
+
+            $placement_notice = "Your preferred placement was replaced with the company's details and your Application SIT was removed. Please print, sign and upload a new Application SIT from your Requirements page."
+                . ($rp_file_warning ? " (Some old uploaded files could not be removed; the administrator can clear them.)" : "");
+        }
+    }
+}
+
 /* ================= FETCH STUDENT REQUIREMENTS ================= */
 $reqLabels = [
     "cert_registration"  => "Certification of Registration",
@@ -775,6 +1012,11 @@ if ($rowCompany = $resCompany->fetch_assoc()) {
 }
 
 $already_registered = ($current_company_id !== null);
+
+/* NEW: placement-mismatch map (company_id => differing fields) feeding
+   #placementMismatchModal. Filled per company row in the loop below. */
+$placement_mismatches = [];
+$student_placement_pref = clFetchStudentPlacement($conn, $user_id);
 
 /* ================= HANDLE APPLY ================= */
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['apply'])) {
@@ -2241,6 +2483,23 @@ $companies = $conn->query("
         #cancelConfirmModal .ccm-btn-keep { background: #e5e7eb !important; color: #374151 !important; }
         #cancelConfirmModal .ccm-btn-confirm { background: #dc2626 !important; }
 
+        /* ══ NEW: PLACEMENT-MISMATCH POPUP ══ */
+        #placementMismatchModal .popup-content { border-top: 5px solid #d97706; width: 480px; }
+        #placementMismatchModal .popup-content h3 { color: #92400e; }
+        #placementMismatchModal .popup-icon { font-size: 42px; margin-bottom: 12px; display: block; }
+        #placementMismatchModal .pmm-list { list-style: none; text-align: left; margin: 0 0 18px 0; padding: 0;
+            max-height: 240px; overflow-y: auto; border: 1px solid var(--border); border-radius: var(--radius-md); }
+        #placementMismatchModal .pmm-list li { padding: 9px 12px; font-size: 13px; border-bottom: 1px solid var(--border); }
+        #placementMismatchModal .pmm-list li:last-child { border-bottom: 0; }
+        #placementMismatchModal .pmm-list b { display: block; color: #374151; margin-bottom: 2px; }
+        #placementMismatchModal .pmm-old { color: #991b1b; text-decoration: line-through; word-break: break-word; }
+        #placementMismatchModal .pmm-new { color: #166534; word-break: break-word; }
+        #placementMismatchModal .ccm-actions { display: flex; gap: 10px; justify-content: center; }
+        #placementMismatchModal .ccm-actions button { flex: 1; }
+        #placementMismatchModal .ccm-btn-keep { background: #e5e7eb !important; color: #374151 !important; }
+        #placementMismatchModal .pmm-btn-replace { background: #d97706 !important; }
+        #placementMismatchModal .pmm-close { background: transparent !important; color: #6b7280 !important; margin-top: 8px; padding: 6px 12px !important; }
+
         /* ══ ADJUSTMENT: REQUIREMENTS-NOT-VERIFIED POPUP ══
            Shown when the student clicks Apply (mini or full-size) while
            any of the 8 requirements is not yet Verified. Built on the
@@ -2817,6 +3076,30 @@ $companies = $conn->query("
     </div>
 </div>
 
+<!-- POPUP MODAL — preferred placement does not match the company
+     NEW: opened by guardApplyPlacement() when the student clicks Apply on a
+     company whose registered data differs from the student's saved
+     "Preference for Placement". #pmmList is built from PLACEMENT_MISMATCHES.
+     "Yes, Replace It" submits #placementReplaceForm (replace_placement
+     handler near the top of this file). "No, Keep Mine" applies as before. -->
+<div id="placementMismatchModal" class="popup-modal" style="display:none;">
+    <div class="popup-content">
+        <span class="popup-icon"><i class="fas fa-right-left" style="color:#d97706;"></i></span>
+        <h3>Preferred Placement Doesn't Match</h3>
+        <p>Your preferred placement differs from this company's details. Replace it with the company's data? Your current <strong>Application SIT will be deleted</strong> and you will need to upload a new one.</p>
+        <ul class="pmm-list" id="pmmList"></ul>
+        <form method="POST" id="placementReplaceForm" style="display:none;">
+            <input type="hidden" name="company_id" id="pmmCompanyId" value="">
+            <input type="hidden" name="replace_placement" value="1">
+        </form>
+        <div class="ccm-actions">
+            <button type="button" class="ccm-btn-keep" onclick="keepPlacementAndApply()">No, Keep Mine</button>
+            <button type="button" class="pmm-btn-replace" onclick="submitPlacementReplace()">Yes, Replace It</button>
+        </div>
+        <button type="button" class="pmm-close" onclick="closePlacementMismatchModal()">Cancel</button>
+    </div>
+</div>
+
 <!-- POPUP MODAL — requirements not yet verified
      ADJUSTMENT: shown when the student tries to Apply (mini summary-row
      button OR full-size details-pane button) while any of the 8
@@ -3063,12 +3346,25 @@ $companies = $conn->query("
             <div id="clServerError" data-msg="<?= htmlspecialchars($error, ENT_QUOTES) ?>" hidden></div>
         <?php endif; ?>
 
+        <?php if (!empty($placement_notice)): ?>
+            <div id="clPlacementNotice" data-msg="<?= htmlspecialchars($placement_notice, ENT_QUOTES) ?>" hidden></div>
+        <?php endif; ?>
+
         <?php while ($row = $companies->fetch_assoc()):
             $supervisor_name =
                 (!empty($row['contact_first_name']) ? $row['contact_first_name'] : '') .
                 (!empty($row['contact_middle_initial']) ? ' ' . $row['contact_middle_initial'] . '.' : '') .
                 (!empty($row['contact_last_name']) ? ' ' . $row['contact_last_name'] : '');
             $isCurrent = ($current_company_id == $row['id']);
+
+            /* NEW: does the student's preferred placement differ from this company's data? */
+            if (!$isCurrent) {
+                try {
+                    $_co_placement = clFetchCompanyPlacement($conn, (int)$row['id']);
+                    $_pm_diff = $_co_placement ? clPlacementDiff($student_placement_pref, $_co_placement) : [];
+                    if ($_pm_diff) $placement_mismatches[(int)$row['id']] = $_pm_diff;
+                } catch (Throwable $e) { /* never block the listing */ }
+            }
 
             /* ADJUSTMENT: does this row correspond to the company the
                student already has a pending application to (in either
@@ -3180,7 +3476,7 @@ $companies = $conn->query("
                                  #reqUnverifiedModal and stops here if any
                                  requirement is not yet Verified. -->
                             <button type="button" class="btn-apply-mini"
-                                    onclick="event.preventDefault(); event.stopPropagation(); if (!guardApplyRequirements(event)) return; var f=document.getElementById('applyForm_<?= (int)$row['id'] ?>'); if(f) { startNavigationGlobalLoading('Submitting application'); f.submit(); }">
+                                    onclick="event.preventDefault(); event.stopPropagation(); if (!guardApplyRequirements(event)) return; if (!guardApplyPlacement(<?= (int)$row['id'] ?>)) return; var f=document.getElementById('applyForm_<?= (int)$row['id'] ?>'); if(f) { startNavigationGlobalLoading('Submitting application'); f.submit(); }">
                                 <i class="fas fa-paper-plane"></i> Apply
                             </button>
                         <?php endif; ?>
@@ -3296,7 +3592,7 @@ $companies = $conn->query("
                              #reqUnverifiedModal shown) while any requirement
                              is not yet Verified. The mini button calls the
                              same guard itself before its JS form.submit(). -->
-                        <form method="POST" id="applyForm_<?= (int)$row['id'] ?>" onsubmit="return guardApplyRequirements(event);">
+                        <form method="POST" id="applyForm_<?= (int)$row['id'] ?>" onsubmit="return guardApplyRequirements(event) &amp;&amp; guardApplyPlacement(<?= (int)$row['id'] ?>, event);">
                             <input type="hidden" name="company_id" value="<?= $row['id'] ?>">
                             <input type="hidden" name="apply" value="1">
                             <button type="submit" class="btn-apply">
@@ -3352,6 +3648,7 @@ document.addEventListener("DOMContentLoaded", function() {
     var m7 = document.getElementById('digitalResumeModal'); if (m7) m7.style.display = 'none';
     /* ADJUSTMENT: m8 — requirements-not-verified apply-gate popup */
     var m8 = document.getElementById('reqUnverifiedModal'); if (m8) m8.style.display = 'none';
+    var m9 = document.getElementById('placementMismatchModal'); if (m9) m9.style.display = 'none';
 });
 
 /* ── PROFILE / REGISTERED POPUPS ── */
@@ -3400,6 +3697,7 @@ document.addEventListener('keydown', function(e) {
         closeCancelConfirmModal();
         closeDigitalResumeModal();
         closeReqUnverifiedModal(); /* ADJUSTMENT: apply-gate popup */
+        closePlacementMismatchModal();
     }
 });
 
@@ -3600,6 +3898,55 @@ function closeReqUnverifiedModal() {
     var m = document.getElementById('reqUnverifiedModal');
     if (m) m.style.display = 'none';
 }
+
+/* NEW: PLACEMENT-MISMATCH GUARD — see #placementMismatchModal. Runs after the
+   requirements gate. Returns true (go ahead and apply) when the company's data
+   matches the student's preferred placement, or the student chose "No, Keep Mine". */
+const PLACEMENT_MISMATCHES = <?= json_encode($placement_mismatches, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_PARTIAL_OUTPUT_ON_ERROR) ?>;
+let pendingPlacementCompanyId = null;
+let placementKeepConfirmed = {};
+
+function guardApplyPlacement(companyId, event) {
+    var diff = PLACEMENT_MISMATCHES[companyId];
+    if (!diff || !diff.length || placementKeepConfirmed[companyId]) return true;
+    if (event) { event.preventDefault(); event.stopPropagation(); }
+    pendingPlacementCompanyId = companyId;
+    var html = '';
+    diff.forEach(function(d) {
+        html += '<li><b>' + rumEscape(d.label) + '</b>' +
+                '<span class="pmm-old">' + rumEscape(d.student || '(empty)') + '</span> &rarr; ' +
+                '<span class="pmm-new">' + rumEscape(d.company) + '</span></li>';
+    });
+    document.getElementById('pmmList').innerHTML = html;
+    document.getElementById('placementMismatchModal').style.display = 'flex';
+    return false;
+}
+
+function closePlacementMismatchModal() {
+    pendingPlacementCompanyId = null;
+    var m = document.getElementById('placementMismatchModal');
+    if (m) m.style.display = 'none';
+}
+
+function submitPlacementReplace() {
+    if (pendingPlacementCompanyId === null) return;
+    document.getElementById('pmmCompanyId').value = pendingPlacementCompanyId;
+    startNavigationGlobalLoading('Replacing preferred placement');
+    document.getElementById('placementReplaceForm').submit();
+}
+
+function keepPlacementAndApply() {
+    if (pendingPlacementCompanyId === null) return;
+    var id = pendingPlacementCompanyId;
+    placementKeepConfirmed[id] = true;
+    closePlacementMismatchModal();
+    var f = document.getElementById('applyForm_' + id);
+    if (f) { startNavigationGlobalLoading('Submitting application'); f.submit(); }
+}
+
+document.getElementById('placementMismatchModal').addEventListener('click', function(e) {
+    if (e.target === this) closePlacementMismatchModal();
+});
 
 function guardApplyRequirements(event) {
     if (applyRequirementsVerified) return true;
@@ -4752,6 +5099,13 @@ function clShowTopToast(name, messageText, iconClass, isError) {
     if (srvErr && srvErr.dataset.msg) {
         setTimeout(function () { clShowTopToast('', srvErr.dataset.msg, 'fa-circle-xmark', true); }, 450);
         srvErr.remove();
+    }
+
+    // NEW: result of "Yes, Replace It" (placement replaced + Application SIT removed).
+    var plNote = document.getElementById('clPlacementNotice');
+    if (plNote && plNote.dataset.msg) {
+        setTimeout(function () { clShowTopToast('', plNote.dataset.msg, 'fa-circle-check'); }, 450);
+        plNote.remove();
     }
 
     // Popups carried across a registration reload.
