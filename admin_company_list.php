@@ -5606,6 +5606,7 @@ input[type="file"] { display:none; }
        up and simply carries on from there — same ring position, same dots, no second pop-in, nothing drawn twice.
        Used once, only if recent (15 s); a first visit (nothing saved) behaves as before. */
     var CV_LOADER_KEY = 'cvLoaderEpoch', cvCarriedOver = false;
+    var CV_PHASE_KEY = 'cvLoaderPhase', cvRingAt0 = null, cvDotsAt0 = null, cvPhaseReadAt = 0;   // NEW (loader sync fix)
     try {
         var cvEpoch = parseInt(sessionStorage.getItem(CV_LOADER_KEY) || '', 10);
         sessionStorage.removeItem(CV_LOADER_KEY);
@@ -5615,7 +5616,23 @@ input[type="file"] { display:none; }
             cvBootStart = cvBootStart - cvSince;
             root.style.setProperty('--cv-ring-delay', (-((cvSince / 1000) % 1)).toFixed(3) + 's');
             root.style.setProperty('--cv-dots-delay', (-((cvSince / 1000) % 1.2)).toFixed(3) + 's');
+            /* NEW (loader sync fix): the previous page also handed over where its ring and dots REALLY were in their
+               turn (read from the running animations — see "pagehide" below). The old way assumed the ring started
+               turning the moment the loading page was shown, which is only true for the first loading page after a
+               page opens; a loading page shown later (a link click) had its ring at any angle, so the next page
+               continued from the wrong one — a visible jump. With the real positions it continues exactly. */
+            try {
+                var cvPh = JSON.parse(sessionStorage.getItem(CV_PHASE_KEY) || 'null');
+                if (cvPh && typeof cvPh.ring === 'number' && typeof cvPh.dots === 'number' && Date.now() - cvPh.t >= 0 && Date.now() - cvPh.t < 15000) {
+                    var cvGap = Date.now() - cvPh.t;
+                    cvRingAt0 = (cvPh.ring + cvGap) / 1000; cvDotsAt0 = (cvPh.dots + cvGap) / 1000;
+                    cvPhaseReadAt = (window.performance && performance.now) ? performance.now() : Date.now();
+                    root.style.setProperty('--cv-ring-delay', (-(cvRingAt0 % 1)).toFixed(3) + 's');
+                    root.style.setProperty('--cv-dots-delay', (-(cvDotsAt0 % 1.2)).toFixed(3) + 's');
+                }
+            } catch (e) {}
         }
+        sessionStorage.removeItem(CV_PHASE_KEY);
     } catch (e) {}
     function cvLoaderStartedAt() { return Date.now() - (((window.performance && performance.now) ? performance.now() : Date.now()) - cvBootStart); }
     if (window.requestAnimationFrame) requestAnimationFrame(function () { requestAnimationFrame(function () { cvCoverPainted = root.classList.contains('cv-booting'); }); });
@@ -5624,10 +5641,12 @@ input[type="file"] { display:none; }
             if (!cvCoverPainted || !ov || ov.classList.contains('hidden')) return;
             var now = (window.performance && performance.now) ? performance.now() : Date.now();
             var elapsed = (now - cvBootStart) / 1000;
+            var elapsedRing = (cvRingAt0 !== null) ? cvRingAt0 + (now - cvPhaseReadAt) / 1000 : elapsed;   // NEW (loader sync fix): the real position, when handed over
+            var elapsedDots = (cvDotsAt0 !== null) ? cvDotsAt0 + (now - cvPhaseReadAt) / 1000 : elapsed;
             var spinner = ov.querySelector('.global-loading-spinner');
-            if (spinner) spinner.style.animationDelay = (-(elapsed % 1)).toFixed(3) + 's';   // UPDATED (this adjustment): the ring's 1 s turn
+            if (spinner) spinner.style.animationDelay = (-(elapsedRing % 1)).toFixed(3) + 's';   // UPDATED (this adjustment): the ring's 1 s turn
             var dots = ov.querySelectorAll('.global-loading-dots span');
-            for (var i = 0; i < dots.length; i++) dots[i].style.animationDelay = (-((elapsed - i * 0.2) % 1.2 + 1.2) % 1.2).toFixed(3) + 's';
+            for (var i = 0; i < dots.length; i++) dots[i].style.animationDelay = (-((elapsedDots - i * 0.2) % 1.2 + 1.2) % 1.2).toFixed(3) + 's';
             var box = ov.querySelector('.global-loading-box');
             if (box) {
                 box.style.animation = 'none';   // no second pop-in
@@ -5684,11 +5703,29 @@ input[type="file"] { display:none; }
         new MutationObserver(mark).observe(ov, { attributes: true, attributeFilter: ['class'] });
     }
     if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', cvWatchOverlay); else cvWatchOverlay();
+    // NEW (loader sync fix): milliseconds into the current turn of an element's running CSS animation (null if unknown)
+    function cvAnimPhase(el, period) {
+        try {
+            if (!el || !el.getAnimations) return null;
+            var list = el.getAnimations();
+            for (var i = 0; i < list.length; i++) {
+                var a = list[i], ct = a.currentTime;
+                if (typeof ct !== 'number' || !a.effect || !a.effect.getComputedTiming) continue;
+                var delay = a.effect.getComputedTiming().delay || 0;
+                return (((ct - delay) % period) + period) % period;
+            }
+        } catch (e) {}
+        return null;
+    }
     window.addEventListener('pagehide', function () {
         try {
             var ov = document.getElementById('globalLoadingOverlay');
             if (ov && !ov.classList.contains('hidden') && !ov.classList.contains('success-state')) {
                 sessionStorage.setItem(CV_LOADER_KEY, String(cvShownSince !== null ? cvShownSince : Date.now()));
+                // NEW (loader sync fix): where the ring and the dots really are in their turn right now
+                var ringMs = cvAnimPhase(ov.querySelector('.global-loading-spinner'), 1000);
+                var dotsMs = cvAnimPhase(ov.querySelector('.global-loading-dots span'), 1200);
+                if (ringMs !== null && dotsMs !== null) sessionStorage.setItem(CV_PHASE_KEY, JSON.stringify({ t: Date.now(), ring: ringMs, dots: dotsMs }));
             }
         } catch (e) {}
     });
