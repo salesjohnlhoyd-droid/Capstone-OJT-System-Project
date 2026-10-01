@@ -4271,22 +4271,36 @@ setInterval(_anbWatch, 30000);
         setTimeout(function() { card.classList.remove('rce-status-updated'); }, 1500);
     }
 
-    function notifyStatusChange(key, newStatus) {
+    function notifyStatusChange(key, newStatus, remark) {
         var label = REQ_LABELS[key] || key;
-        /* UPDATED (design adjustment): Font Awesome icon instead of an emoji */
-        var icon  = newStatus === 'Verified' ? 'fas fa-check-circle' : newStatus === 'Denied' ? 'fas fa-times-circle' : 'fas fa-clock';
-        var title = label + ' — ' + newStatus;
-        var msg   = newStatus === 'Verified'
-            ? 'Your "' + label + '" has been verified by the administrator.'
-            : newStatus === 'Denied'
-            ? 'Your "' + label + '" was denied. Please check the remark and re-upload.'
-            : '"' + label + '" status changed to ' + newStatus + '.';
+        /* ADJUSTMENT: encouraging, informative wording; no icon on top and no redundant
+           "<Requirement> — <Status>" title (the requirement name is already in the message). */
+        var title, msg, btn;
+        if (newStatus === 'Verified') {
+            title = 'Great Job!';
+            msg   = 'Your "' + label + '" has been verified by the administrator. One step closer to completing your requirements!';
+            btn   = 'Great, Thanks!';
+        } else if (newStatus === 'Denied') {
+            title = "Let's Fix This Together";
+            msg   = 'Your "' + label + '" needs a quick update before it can be verified. '
+                  + (remark ? 'Administrator\'s note: "' + remark + '". ' : 'Please check the remark on the card. ')
+                  + 'Re-upload the corrected file and you\'ll be back on track!';
+            btn   = 'Got It, I\'ll Re-upload';
+        } else {
+            title = 'Under Review';
+            msg   = 'Your "' + label + '" is now back in the review queue. The administrator will check it soon — no action is needed from you right now.';
+            btn   = 'OK, Got It';
+        }
 
+        /* every lookup is guarded so a missing element can never break the status polling */
         var statusIconEl = document.getElementById('statusChangedIcon');
-        statusIconEl.className = 'notif-modal-icon' + (newStatus === 'Denied' ? ' icon-denied' : newStatus === 'Verified' ? '' : ' icon-pending');
-        statusIconEl.innerHTML = '<i class="' + icon + '"></i>';
-        document.getElementById('statusChangedTitle').textContent = title;
-        document.getElementById('statusChangedMsg').textContent   = msg;
+        if (statusIconEl) { statusIconEl.className = 'notif-modal-icon'; statusIconEl.innerHTML = ''; }
+        var titleEl = document.getElementById('statusChangedTitle');
+        var msgEl   = document.getElementById('statusChangedMsg');
+        var btnEl   = document.getElementById('closeStatusChangedModal');
+        if (titleEl) titleEl.textContent = title;
+        if (msgEl)   msgEl.textContent   = msg;
+        if (btnEl)   btnEl.textContent   = btn;
         showNotifModal('statusChangedModal');
     }
 
@@ -4305,7 +4319,7 @@ setInterval(_anbWatch, 30000);
 
                     if (newStatus !== oldStatus) {
                         applyCardStatus(key, info);
-                        notifyStatusChange(key, newStatus);
+                        notifyStatusChange(key, newStatus, info.remark || '');
                         _lastStatus[key] = newStatus;
                     }
 
