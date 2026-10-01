@@ -2,7 +2,39 @@
 session_start();
 include "db.php";
 require_once __DIR__ . "/placement_hold.php"; // ADJUSTMENT: preferred-placement match / hold helpers
-require_once __DIR__ . "/verify_toast_gate.php"; // ADJUSTMENT: a held application waits until the admin's Verified undo toast is over
+
+/* ============================================================
+   ADJUSTMENT: VERIFY-TOAST GATE (reader side)
+   ------------------------------------------------------------
+   administrator.php writes "Verified" at once and keeps an Undo
+   toast up for up to 5 minutes (recorded in verify_toast_pending
+   under the toast's undo token, removed when the toast ends or is
+   undone). A held application (placement replaced) must not be
+   applied while that toast is still active, so the two release
+   points below call cv_vt_release_if_ready(), which waits until
+   the student has no live entry and then runs the original
+   ph_release_if_ready(). Entries expire by themselves after the
+   5-minute undo window. Any error here falls back to the old
+   behaviour (the release simply runs).
+   ============================================================ */
+if (!defined('CV_VT_WINDOW_SECONDS')) define('CV_VT_WINDOW_SECONDS', 305);
+function cv_vt_pending($conn, $student_id) {
+    try {
+        $student_id = (int)$student_id;
+        if ($student_id <= 0) return false;
+        $conn->query("CREATE TABLE IF NOT EXISTS verify_toast_pending ( undo_token VARCHAR(64) NOT NULL PRIMARY KEY, student_id INT NOT NULL, created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, KEY idx_vt_student (student_id) )");
+        $st = $conn->prepare("SELECT 1 FROM verify_toast_pending WHERE student_id = ? AND created_at >= (NOW() - INTERVAL " . (int)CV_VT_WINDOW_SECONDS . " SECOND) LIMIT 1");
+        $st->bind_param('i', $student_id);
+        $st->execute();
+        $found = (bool)$st->get_result()->fetch_row();
+        $st->close();
+        return $found;
+    } catch (\Throwable $e) { return false; }
+}
+function cv_vt_release_if_ready($conn, $student_id) {
+    if (cv_vt_pending($conn, $student_id)) return;
+    ph_release_if_ready($conn, (int)$student_id);
+}
 
 /* ================= SESSION CHECK ================= */
 if (!isset($_SESSION['user_id']) || $_SESSION['role'] != "student") {

@@ -27,7 +27,45 @@ if (($_SERVER['HTTP_SEC_FETCH_DEST'] ?? 'document') === 'document' && !headers_s
     header('Expires: Sat, 01 Jan 2000 00:00:00 GMT');
 }
 include "db.php";
-require_once __DIR__ . "/verify_toast_gate.php"; // ADJUSTMENT: held applications wait for the Verified undo toast
+// ============================================================================
+// ADJUSTMENT: VERIFY-TOAST GATE (writer side) — a held application waits for the undo toast
+// ----------------------------------------------------------------------------
+// A "Verified" save is written at once while the Undo toast stays up (up to 5 minutes). A student whose
+// application is ON HOLD (placement replaced) must not be applied while that toast is still active, so each
+// Verified save is recorded here under its undo token (cv_vt_mark) and removed when the toast ends
+// (ajax_confirm_send) or is undone (ajax_undo) — cv_vt_clear. company_list.php reads this table before it
+// releases a held application. An entry also expires by itself after the 5-minute undo window, so a closed
+// tab never leaves a student on hold forever. Every function swallows its errors: the save is never affected.
+// ============================================================================
+if (!defined('CV_VT_WINDOW_SECONDS')) define('CV_VT_WINDOW_SECONDS', 305); // undo window (300 s) + a short grace
+function cv_vt_ensure($conn) {
+    static $done = false;
+    if ($done) return true;
+    try {
+        $conn->query("CREATE TABLE IF NOT EXISTS verify_toast_pending ( undo_token VARCHAR(64) NOT NULL PRIMARY KEY, student_id INT NOT NULL, created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, KEY idx_vt_student (student_id) )");
+        $done = true;
+    } catch (\Throwable $e) { return false; }
+    return $done;
+}
+function cv_vt_mark($conn, $student_id, $token) {
+    try {
+        $student_id = (int)$student_id; $token = (string)$token;
+        if ($student_id <= 0 || $token === '' || !cv_vt_ensure($conn)) return;
+        $conn->query("DELETE FROM verify_toast_pending WHERE created_at < (NOW() - INTERVAL " . (int)CV_VT_WINDOW_SECONDS . " SECOND)");
+        $st = $conn->prepare("REPLACE INTO verify_toast_pending (undo_token, student_id, created_at) VALUES (?, ?, NOW())");
+        $st->bind_param('si', $token, $student_id);
+        $st->execute(); $st->close();
+    } catch (\Throwable $e) { /* never affects the save */ }
+}
+function cv_vt_clear($conn, $token) {
+    try {
+        $token = (string)$token;
+        if ($token === '' || !cv_vt_ensure($conn)) return;
+        $st = $conn->prepare("DELETE FROM verify_toast_pending WHERE undo_token = ?");
+        $st->bind_param('s', $token);
+        $st->execute(); $st->close();
+    } catch (\Throwable $e) {}
+}
 include "mail.php";
 
 // ============================================
