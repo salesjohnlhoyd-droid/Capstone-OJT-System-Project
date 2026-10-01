@@ -1602,7 +1602,20 @@ $companies = $conn->query("
         }
         #globalLoadingOverlay.gl-instant { transition: none; }
         .global-loading-box { display: flex; flex-direction: column; align-items: center; gap: 16px; animation: globalLoadingPop 0.35s ease; }
-        .global-loading-spinner { width: 54px; height: 54px; border-radius: 50%; border: 5px solid #A3AFC7; border-top-color: #1B2A4A; animation: globalLoadingSpin 0.85s linear infinite; }
+        /* UPDATED (loading ring): the 12-segment ticking ring used by AccomForm.php / admin_student_list.php (same size, colour, mask and timing) */
+        .global-loading-spinner {
+            width: 64px; height: 64px; border: 0; border-radius: 50%; box-sizing: border-box;
+            background: conic-gradient(from 0deg, rgba(27,42,74,0.12) 0deg, rgba(27,42,74,0.35) 120deg, rgba(27,42,74,0.7) 240deg, #1B2A4A 330deg, #1B2A4A 360deg);
+            -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 9px), #000 calc(100% - 8px)),
+                          repeating-conic-gradient(from 5deg, #000 0deg 20deg, transparent 20deg 30deg);
+            -webkit-mask-composite: source-in;
+                    mask: radial-gradient(farthest-side, transparent calc(100% - 9px), #000 calc(100% - 8px)),
+                          repeating-conic-gradient(from 5deg, #000 0deg 20deg, transparent 20deg 30deg);
+                    mask-composite: intersect;
+            will-change: transform;
+            animation: cvRingSpin 1s steps(12, end) infinite;
+        }
+        @keyframes cvRingSpin { to { transform: rotate(360deg); } }
         .global-loading-text { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; font-size: 13px; font-weight: 700; color: #1B2A4A; text-transform: uppercase; letter-spacing: 0.6px; display: flex; align-items: center; gap: 8px; }
         .global-loading-dots span { animation: globalLoadingDots 1.2s infinite; opacity: 0; }
         .global-loading-dots span:nth-child(2) { animation-delay: 0.2s; }
@@ -2635,6 +2648,8 @@ $companies = $conn->query("
         </div>
     </div>
 </div>
+<!-- Without JavaScript nothing could ever close the overlay — never leave the page covered. -->
+<noscript><style>#globalLoadingOverlay { display: none !important; }</style></noscript>
 <script>
     /* Ported from administrator.php (same counter pattern, same timings):
        showGlobalLoading()/hideGlobalLoading() for in-page work, the first
