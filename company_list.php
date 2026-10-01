@@ -776,6 +776,171 @@ if ($rowCompany = $resCompany->fetch_assoc()) {
 
 $already_registered = ($current_company_id !== null);
 
+/* ============================================================
+   ADJUSTMENT: PREFERRED-PLACEMENT MISMATCH → REPLACE + REMOVE SIT
+   ------------------------------------------------------------
+   The Application SIT (requirement type 'application_sit') is built
+   from the student's "Preference for Placement" (student_information
+   .pref_* — saved on AccomForm.php), so a signed SIT that names a
+   different company than the one being applied to is no longer valid.
+
+   When the student clicks Apply, the company's own data
+   (company_information) is compared with that saved preference. If
+   they do not match, the student is asked to confirm; on confirmation:
+     1) the preferred placement is replaced with the company's data;
+     2) the Application SIT row is deleted from `requirements`
+        (users.validation_status falls back to 'Pending');
+     3) the verified SIT file(s) administrator.php saved into the
+        student's uploads/<First_Middle_Last>/ folder are deleted
+        (same folder / file-name rule as administrator.php).
+   The student then re-submits an Application SIT for the new
+   company from AccomForm.php. Nothing here runs unless a mismatch
+   is detected, so the normal apply flow is untouched.
+   ============================================================ */
+function clPlacementNorm($s) {
+    return preg_replace('/[^a-z0-9]/', '', strtolower(trim((string)$s)));
+}
+
+/* The target company's data, same name rule as the company rows
+   (company_information.company, else the account's own name). */
+function clCompanyPlacementData(mysqli $conn, int $company_id): ?array {
+    if ($company_id <= 0) return null;
+    try {
+        $q = $conn->prepare("SELECT u.first_name, u.last_name, ci.company, ci.company_address, ci.telephone,
+                                    ci.contact_first_name, ci.contact_middle_initial, ci.contact_last_name, ci.position
+                             FROM users u LEFT JOIN company_information ci ON ci.user_id = u.id
+                             WHERE u.id = ? LIMIT 1");
+        if (!$q) return null;
+        $q->bind_param("i", $company_id);
+        $q->execute();
+        $r = $q->get_result()->fetch_assoc();
+        $q->close();
+    } catch (\Throwable $e) { return null; }
+    if (!$r) return null;
+    $name = trim((string)($r['company'] ?? ''));
+    if ($name === '') $name = trim(($r['first_name'] ?? '') . ' ' . ($r['last_name'] ?? ''));
+    if ($name === '') return null;
+    return [
+        'name'    => $name,
+        'address' => trim((string)($r['company_address'] ?? '')),
+        'phone'   => trim((string)($r['telephone'] ?? '')),
+        'c_first' => trim((string)($r['contact_first_name'] ?? '')),
+        'c_mid'   => trim((string)($r['contact_middle_initial'] ?? '')),
+        'c_last'  => trim((string)($r['contact_last_name'] ?? '')),
+        'position'=> trim((string)($r['position'] ?? '')),
+    ];
+}
+
+/* Returns ['pref' => [...], 'company' => [...]] when the saved preferred
+   placement differs from the company being applied to, otherwise null
+   (no preference saved, company data unavailable, or they match). */
+function clPlacementMismatch(mysqli $conn, int $user_id, int $company_id): ?array {
+    $company = clCompanyPlacementData($conn, $company_id);
+    if (!$company) return null;
+    try {
+        $q = $conn->prepare("SELECT pref_company_name, pref_company_address FROM student_information WHERE user_id = ? LIMIT 1");
+        if (!$q) return null;
+        $q->bind_param("i", $user_id);
+        $q->execute();
+        $p = $q->get_result()->fetch_assoc();
+        $q->close();
+    } catch (\Throwable $e) { return null; }
+    if (!$p) return null;
+    $prefName = trim((string)($p['pref_company_name'] ?? ''));
+    $prefAddr = trim((string)($p['pref_company_address'] ?? ''));
+    if ($prefName === '') return null; // nothing saved → nothing to conflict with
+
+    $nameDiffers = clPlacementNorm($prefName) !== clPlacementNorm($company['name']);
+    $addrDiffers = ($prefAddr !== '' && $company['address'] !== ''
+                    && clPlacementNorm($prefAddr) !== clPlacementNorm($company['address']));
+    if (!$nameDiffers && !$addrDiffers) return null;
+
+    return ['pref' => ['name' => $prefName, 'address' => $prefAddr], 'company' => $company];
+}
+
+/* Deletes the verified Application SIT copies from the student's upload
+   folder. Returns [deleted_count, failed_count]. */
+function clRemoveSitUploadFiles(mysqli $conn, int $user_id, string $label): array {
+    $deleted = 0; $failed = 0;
+    try {
+        $uq = $conn->prepare("SELECT first_name, middle_name, last_name FROM users WHERE id = ?");
+        $uq->bind_param("i", $user_id);
+        $uq->execute();
+        $ud = $uq->get_result()->fetch_assoc();
+        $uq->close();
+    } catch (\Throwable $e) { return [0, 1]; }
+    if (!$ud) return [0, 0];
+
+    // Same folder rule as administrator.php (ajax_update_requirement).
+    $safeFirst  = preg_replace("/[^a-zA-Z0-9]/", "_", (string)$ud['first_name']);
+    $safeMiddle = preg_replace("/[^a-zA-Z0-9]/", "_", (string)$ud['middle_name']);
+    $safeLast   = preg_replace("/[^a-zA-Z0-9]/", "_", (string)$ud['last_name']);
+    $folder = !empty($safeMiddle) ? $safeFirst . "_" . $safeMiddle . "_" . $safeLast : $safeFirst . "_" . $safeLast;
+
+    $base = realpath(__DIR__ . '/uploads');
+    $dir  = realpath(__DIR__ . '/uploads/' . $folder);
+    if ($base === false || $dir === false || !is_dir($dir)) return [0, 0];
+    if (strpos($dir, $base . DIRECTORY_SEPARATOR) !== 0) return [0, 0]; // never leave uploads/
+
+    // administrator.php names the copy "<safe label>_verified_<time>.jpg"
+    // (its label's capitalisation differs between places → case-insensitive).
+    $prefix = preg_replace("/[^a-zA-Z0-9]/", "_", $label) . "_verified_";
+    $items = @scandir($dir);
+    if ($items === false) return [0, 1];
+    foreach ($items as $f) {
+        if ($f === '.' || $f === '..') continue;
+        if (stripos($f, $prefix) !== 0) continue;
+        $full = $dir . DIRECTORY_SEPARATOR . $f;
+        if (!is_file($full)) continue;
+        if (@unlink($full)) $deleted++; else $failed++;
+    }
+    return [$deleted, $failed];
+}
+
+/* Replaces the preferred placement with the company's data and removes
+   the Application SIT (DB row + upload-folder copies). Returns
+   ['ok' => bool, 'message' => string]. */
+function clReplacePlacementAndRemoveSit(mysqli $conn, int $user_id, array $company, string $sitLabel): array {
+    $contact = trim($company['c_first'] . ' ' . $company['c_mid'] . ' ' . $company['c_last']);
+    try {
+        $conn->begin_transaction();
+
+        $up = $conn->prepare("UPDATE student_information
+                              SET pref_company_name = ?, pref_company_address = ?, pref_telephone = ?,
+                                  pref_contact_person_first = ?, pref_contact_person_middle = ?, pref_contact_person_last = ?,
+                                  pref_position = ?
+                              WHERE user_id = ?");
+        $up->bind_param("sssssssi", $company['name'], $company['address'], $company['phone'],
+                        $company['c_first'], $company['c_mid'], $company['c_last'], $company['position'], $user_id);
+        $up->execute();
+        $up->close();
+
+        $del = $conn->prepare("DELETE FROM requirements WHERE user_id = ? AND requirement_type = 'application_sit'");
+        $del->bind_param("i", $user_id);
+        $del->execute();
+        $del->close();
+
+        // The student is no longer fully verified (same value administrator.php's recompute writes).
+        try {
+            $vs = $conn->prepare("UPDATE users SET validation_status = 'Pending' WHERE id = ?");
+            if ($vs) { $vs->bind_param("i", $user_id); $vs->execute(); $vs->close(); }
+        } catch (\Throwable $e) { /* column may not exist yet — not fatal */ }
+
+        $conn->commit();
+    } catch (\Throwable $e) {
+        try { $conn->rollback(); } catch (\Throwable $e2) {}
+        return ['ok' => false, 'message' => 'We could not update your preferred placement. Please try again.'];
+    }
+
+    // Files are removed only after the DB change is safely committed.
+    [$deleted, $failed] = clRemoveSitUploadFiles($conn, $user_id, $sitLabel);
+
+    $msg = 'Your preferred placement was updated to ' . $company['name'] . ' and your Application SIT was removed. '
+         . 'Please submit a new Application SIT for this company from your Requirements page, then apply again.';
+    if ($failed > 0) $msg .= ' (Some old SIT files could not be deleted from the server; please inform the administrator.)';
+    return ['ok' => true, 'message' => $msg];
+}
+
 /* ================= HANDLE APPLY ================= */
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['apply'])) {
 
@@ -811,7 +976,28 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['apply'])) {
         $check->execute();
         $exists = $check->get_result();
 
-        if ($exists->num_rows == 0) {
+        /* ADJUSTMENT: preferred placement vs. this company's data. Only
+           looked at for a brand-new application (an existing one still
+           just reports "already applied"). */
+        $placement_mismatch_data = ($exists->num_rows == 0) ? clPlacementMismatch($conn, (int)$user_id, $company_id) : null;
+
+        if ($placement_mismatch_data !== null && empty($_POST['confirm_replace_placement'])) {
+            // Mismatch found → ask first (popup #placementMismatchModal); nothing is changed yet.
+            $placement_mismatch = $placement_mismatch_data;
+            $placement_mismatch['company_id'] = $company_id;
+        } elseif ($placement_mismatch_data !== null) {
+            // Student confirmed → replace the preference and remove the Application SIT.
+            $replaceRes = clReplacePlacementAndRemoveSit($conn, (int)$user_id, $placement_mismatch_data['company'], $reqLabels['application_sit']);
+            if ($replaceRes['ok']) {
+                $success = $replaceRes['message'];
+                // Keep this request's already-computed gate state in sync (SIT is gone).
+                unset($studentReqs['application_sit']);
+                $all_verified = false;
+                $req_gate_statuses['application_sit'] = 'Not Submitted';
+            } else {
+                $error = $replaceRes['message'];
+            }
+        } elseif ($exists->num_rows == 0) {
 
             $student_email = $student['email'];
 
@@ -1060,7 +1246,13 @@ try {
 }
 $company_profile_select = $has_company_profile_col ? "ci.company_profile" : "NULL";
 
-$companies = $conn->query("
+/* ADJUSTMENT (error handling): mysqli runs in STRICT report mode (see db.php), so a failed query would
+   throw and white-screen the whole page. The list query is now guarded: on failure the page still renders
+   (sidebar, navbar, inbox, popups) and shows a friendly message in the card instead of the company rows. */
+$companies          = null;
+$company_load_error = false;
+try {
+    $companies = $conn->query("
     SELECT 
         u.id, 
         u.first_name, 
@@ -1078,6 +1270,13 @@ $companies = $conn->query("
     WHERE u.role = 'company' 
     AND u.company_validation_status = 'verified'
 ");
+    if (!$companies) $company_load_error = true;
+} catch (Throwable $e) {
+    $companies          = null;
+    $company_load_error = true;
+    error_log('company_list.php: company query failed: ' . $e->getMessage());
+}
+$company_total = ($companies instanceof mysqli_result) ? (int)$companies->num_rows : 0;
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -2241,6 +2440,19 @@ $companies = $conn->query("
         #cancelConfirmModal .ccm-btn-keep { background: #e5e7eb !important; color: #374151 !important; }
         #cancelConfirmModal .ccm-btn-confirm { background: #dc2626 !important; }
 
+        /* ══ ADJUSTMENT: PREFERRED-PLACEMENT MISMATCH POPUP ══ */
+        #placementMismatchModal .popup-content { border-top: 5px solid #d97706; width: 460px; }
+        #placementMismatchModal .popup-content h3 { color: #92400e; }
+        #placementMismatchModal .popup-icon { font-size: 42px; margin-bottom: 12px; display: block; }
+        #placementMismatchModal .popup-content p { margin-bottom: 14px; }
+        #placementMismatchModal .rum-list { list-style: none; padding: 0; margin: 0 0 14px; text-align: left; }
+        #placementMismatchModal .rum-list li { padding: 8px 10px; border-bottom: 1px solid #eee; font-size: 14px; }
+        #placementMismatchModal .rum-list li:last-child { border-bottom: none; }
+        #placementMismatchModal .rum-actions { display: flex; gap: 10px; justify-content: center; }
+        #placementMismatchModal .rum-actions button { flex: 1; }
+        #placementMismatchModal .rum-btn-close { background: #e5e7eb !important; color: #374151 !important; }
+        #placementMismatchModal .rum-btn-go { background: #dc2626 !important; }
+
         /* ══ ADJUSTMENT: REQUIREMENTS-NOT-VERIFIED POPUP ══
            Shown when the student clicks Apply (mini or full-size) while
            any of the 8 requirements is not yet Verified. Built on the
@@ -2618,6 +2830,239 @@ $companies = $conn->query("
         #endoToast.show { transform: translateX(-50%) translateY(0); opacity: 1; }
         #endoToast.error { border-left-color: #dc2626; }
         #endoToast button { background: rgba(255,255,255,0.15); border: 1px solid rgba(255,255,255,0.3); color: #fff; border-radius: 6px; padding: 4px 10px; font-size: 12px; font-weight: 700; cursor: pointer; margin-left: 4px; }
+        /* ══════════════════════════════════════════════════════════════════
+           ADJUSTMENT (design): this page now uses the same "Field Ops Grid"
+           design as AccomForm.php / admin_student_list.php — slate-blue page
+           background, a bordered white card, square corners, thin slate
+           borders instead of soft shadows, navy (#1B2A4A) as the action
+           colour, small uppercase labels and flat status colours.
+           ONLY the look changed: every class name, id, form, handler and
+           open/close state that the markup and scripts rely on is kept as it
+           was (this block simply layers over the earlier rules, exactly like
+           the design-adjustment pass on AccomForm.php).
+           ══════════════════════════════════════════════════════════════════ */
+        :root {
+            --primary:          #1B2A4A;
+            --grid-bg:          #EEF1F6;
+            --grid-navy:        #1B2A4A;
+            --grid-border:      #C3CADA;
+            --grid-border-soft: #DCE1EC;
+            --grid-green:       #2C5A2C;
+            --grid-green-bg:    #EAF3EA;
+            --grid-red:         #A02A2A;
+            --grid-red-bg:      #F7E9E9;
+            --grid-amber:       #A0850A;
+            --grid-amber-bg:    #FAF3DC;
+            --grid-muted:       #5A6272;
+            --text:             #2d3748;
+        }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: var(--grid-bg);
+            color: var(--text);
+            line-height: normal;
+        }
+
+        /* Sidebar + navbar — identical to AccomForm.php */
+        .sidebar-header { padding: 20px; }
+        .sidebar-user-info { min-width: 0; }
+        .sidebar-user-name { font-size: 18px; font-weight: bold; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        .sidebar-user-role { font-size: 11px; font-weight: 700; letter-spacing: 0.8px; margin-top: 3px; overflow: hidden; text-overflow: ellipsis; }
+        .sidebar-lock-notice-inner { border-radius: 0; }
+        .navbar { background: var(--neust-maroon); box-shadow: none; }
+
+        /* Card + page heading */
+        .main-wrapper { flex: 1; padding: 30px; background: var(--grid-bg); }
+        .page-inner.card {
+            flex: none;
+            background: var(--white); width: 100%; max-width: 1100px;
+            padding: 32px; margin: 0 auto;
+            border-radius: 0; border: 1px solid var(--grid-border); box-shadow: none;
+        }
+        .page-inner h2 {
+            margin: 0; padding: 0; border: none; font-family: inherit;
+            color: var(--grid-navy); font-size: 20px;
+            text-transform: uppercase; letter-spacing: 0.6px;
+        }
+        .cl-head {
+            display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+            border-bottom: 1px solid var(--grid-border); padding-bottom: 10px; margin-bottom: 14px;
+        }
+        .cl-count {
+            display: inline-flex; align-items: center; background: #fff; border: 1px solid var(--grid-border);
+            padding: 5px 12px; font-size: 11px; font-weight: 700; color: var(--grid-navy);
+            text-transform: uppercase; letter-spacing: 0.4px; white-space: nowrap;
+        }
+        .cl-sub { font-size: 13px; color: var(--grid-muted); margin: 0 0 20px; }
+
+        /* Empty / error state */
+        .cl-state {
+            display: flex; flex-direction: column; align-items: center; text-align: center; gap: 8px;
+            padding: 44px 20px; border: 1px dashed var(--grid-border); background: #F7F8FB; color: var(--grid-muted);
+        }
+        .cl-state i { font-size: 30px; color: #A3AFC7; }
+        .cl-state strong { font-size: 13px; color: var(--grid-navy); text-transform: uppercase; letter-spacing: 0.4px; }
+        .cl-state span { font-size: 13px; line-height: 1.5; max-width: 420px; }
+        .cl-state-error { border-color: #D49A94; background: var(--grid-red-bg); }
+        .cl-state-error i, .cl-state-error strong { color: var(--grid-red); }
+
+        /* Company rows — flat panels with a slate border */
+        .company-row { border-radius: 0; border: 1px solid var(--grid-border); box-shadow: none; margin-bottom: 12px; background: #fff; }
+        .company-row:hover { box-shadow: none; border-color: var(--grid-navy); }
+        .company-summary { padding: 12px 16px; transition: background 0.2s; }
+        .company-summary:hover { background: #F3F4F7; }
+        .toggle-input:checked ~ .company-summary { background: var(--grid-bg); border-bottom: 1px solid var(--grid-border); }
+        .company-summary .company-name {
+            gap: 12px; font-size: 13.5px; color: var(--grid-navy);
+            text-transform: uppercase; letter-spacing: 0.4px; min-width: 0;
+        }
+        .company-summary .company-name i {
+            width: 30px; height: 30px; flex-shrink: 0; border-radius: 0;
+            background: var(--grid-navy); color: #fff; font-size: 14px;
+            display: inline-flex; align-items: center; justify-content: center;
+        }
+        .company-summary .summary-right { color: var(--grid-muted); }
+        .chevron { color: var(--grid-navy); }
+
+        /* Status chips — flat, square */
+        .company-summary .summary-right .badge-current,
+        .company-summary .summary-right .app-stage-chip,
+        .pending-request-badge,
+        .registered-badge {
+            border-radius: 0; border: 1px solid transparent;
+            font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px;
+        }
+        .company-summary .summary-right .badge-current { background: var(--grid-green-bg); color: var(--grid-green); border-color: #BFD8BF; padding: 4px 10px; }
+        .company-summary .summary-right .app-stage-chip { padding: 4px 10px; }
+        .app-stage-chip.awaiting, .pending-request-badge.app-stage-awaiting { background: var(--grid-amber-bg); color: var(--grid-amber); border-color: #E3D49A; }
+        .app-stage-chip.pending,  .pending-request-badge.app-stage-pending  { background: #E4EAF4; color: var(--grid-navy); border-color: #A3AFC7; }
+        .pending-request-badge { background: var(--grid-amber-bg); color: var(--grid-amber); border-color: #E3D49A; padding: 8px 14px; margin-top: 4px; }
+        .registered-badge { background: var(--grid-green-bg); color: var(--grid-green); border-color: #BFD8BF; padding: 8px 14px; }
+
+        /* Details pane */
+        .details-pane { background: #F7F8FB; border-top: none; padding: 20px; }
+        .details-pane p { color: var(--text); }
+        .details-pane p b { color: var(--grid-navy); }
+        .company-profile-box { background: #fff; border: 1px solid var(--grid-border); border-radius: 0; }
+        .company-profile-box .cpb-info p b {
+            font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; margin-right: 6px;
+        }
+        .company-profile-box .cpb-divider { background: var(--grid-border-soft); }
+        .company-profile-box .cpb-title { color: var(--grid-navy); letter-spacing: 0.4px; }
+        .company-profile-box .cpb-text { color: var(--text); }
+        .company-profile-box .cpb-empty { color: var(--grid-muted); }
+        .map iframe { border: 1px solid var(--grid-border); border-radius: 0; }
+
+        /* Buttons — square, navy = primary, red = cancel */
+        .btn-apply, .btn-apply-mini, .btn-cancel-request, .btn-cancel-request-mini {
+            border-radius: 0; font-family: inherit; text-transform: uppercase; letter-spacing: 0.4px; font-weight: 600;
+        }
+        .btn-apply { background: var(--grid-navy); font-size: 12px; padding: 11px 22px; }
+        .btn-apply-mini { background: var(--grid-navy); border: 1px solid var(--grid-navy); font-size: 11px; padding: 6px 12px; }
+        .btn-cancel-request, .btn-cancel-request-mini {
+            background: var(--grid-red-bg); color: var(--grid-red); border: 1px solid #D49A94;
+        }
+        .btn-cancel-request { font-size: 12px; padding: 10px 22px; }
+        .btn-cancel-request-mini { font-size: 11px; padding: 6px 12px; }
+        .btn-cancel-request:hover, .btn-cancel-request-mini:hover { background: var(--grid-red); border-color: var(--grid-red); color: #fff; }
+        .btn-apply:focus-visible, .btn-apply-mini:focus-visible,
+        .btn-cancel-request:focus-visible, .btn-cancel-request-mini:focus-visible,
+        .company-summary:focus-visible { outline: 2px solid var(--grid-navy); outline-offset: 2px; }
+
+        /* Popups (already-registered / pending / cancel / requirements / not-deployed) — same square modal as AccomForm.php */
+        .popup-modal { background: rgba(0,0,0,0.5); backdrop-filter: none; }
+        .popup-content {
+            border-radius: 0; border: 1px solid var(--grid-border); box-shadow: none;
+            padding: 32px; width: 420px; animation: popIn 0.3s ease;
+        }
+        .popup-content h3 {
+            font-family: inherit; font-size: 18px; font-weight: 700; color: #1e293b;
+            text-transform: uppercase; letter-spacing: 0.3px;
+        }
+        .popup-content p { color: var(--grid-muted); line-height: 1.6; }
+        .popup-content button {
+            background: var(--grid-navy); border: 1px solid var(--grid-navy); border-radius: 0;
+            font-size: 12px; text-transform: uppercase; letter-spacing: 0.4px; padding: 10px 28px;
+        }
+        #registeredModal .popup-content, #pendingBlockedModal .popup-content,
+        #cancelConfirmModal .popup-content, #reqUnverifiedModal .popup-content,
+        #placementMismatchModal .popup-content { border-top: 1px solid var(--grid-border); }
+        #registeredModal .popup-icon, #pendingBlockedModal .popup-icon,
+        #placementMismatchModal .popup-icon { color: var(--grid-amber); }
+        #cancelConfirmModal .popup-icon, #reqUnverifiedModal .popup-icon { color: var(--grid-red); }
+        #registeredModal .popup-content h3, #pendingBlockedModal .popup-content h3,
+        #placementMismatchModal .popup-content h3 { color: #1e293b; }
+        #cancelConfirmModal .popup-content h3, #reqUnverifiedModal .popup-content h3 { color: var(--grid-red); }
+        #registeredModal .popup-content button, #pendingBlockedModal .popup-content button { background: var(--grid-navy); }
+        #cancelConfirmModal .ccm-btn-keep, #reqUnverifiedModal .rum-btn-close, #placementMismatchModal .rum-btn-close {
+            background: #fff !important; color: var(--grid-navy) !important; border: 1px solid var(--grid-border) !important;
+        }
+        #cancelConfirmModal .ccm-btn-keep:hover, #reqUnverifiedModal .rum-btn-close:hover, #placementMismatchModal .rum-btn-close:hover { background: #F3F4F7 !important; opacity: 1; }
+        #cancelConfirmModal .ccm-btn-confirm { background: var(--grid-red) !important; border-color: var(--grid-red) !important; }
+        #reqUnverifiedModal .rum-btn-go, #placementMismatchModal .rum-btn-go { background: var(--grid-navy) !important; border-color: var(--grid-navy) !important; }
+        #reqUnverifiedModal .rum-list { border: 1px solid var(--grid-border); border-radius: 0; }
+        #reqUnverifiedModal .rum-list li { border-bottom: 1px solid var(--grid-border-soft); color: var(--text); }
+        #reqUnverifiedModal .rum-chip {
+            border-radius: 0; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.4px; border: 1px solid transparent;
+        }
+        #reqUnverifiedModal .rum-chip.st-pending { background: var(--grid-amber-bg); color: var(--grid-amber); border-color: #E3D49A; }
+        #reqUnverifiedModal .rum-chip.st-denied  { background: var(--grid-red-bg); color: var(--grid-red); border-color: #D49A94; }
+        #reqUnverifiedModal .rum-chip.st-missing { background: #F3F4F7; color: var(--grid-muted); border-color: var(--grid-border); }
+        #placementMismatchModal .rum-list { border-radius: 0; }
+        #placementMismatchModal .rum-list li { border-bottom: 1px solid var(--grid-border-soft); }
+        #reqPreviewModal { backdrop-filter: none; }
+
+        #not-deployed-modal { background: rgba(0,0,0,0.5); backdrop-filter: none; }
+        .ndm-box { border-radius: 0; border: 1px solid var(--grid-border); box-shadow: none; padding: 32px; max-width: 420px; animation: ndm-pop 0.3s ease both; }
+        .ndm-icon { border-radius: 0; background: var(--grid-amber-bg); border: 1px solid #E3D49A; color: var(--grid-amber); width: 64px; height: 64px; }
+        .ndm-title { font-family: inherit; font-size: 18px; font-weight: 700; color: #1e293b; text-transform: uppercase; letter-spacing: 0.3px; }
+        .ndm-message { color: var(--grid-muted); }
+        .ndm-page-name { border-radius: 0; background: var(--grid-bg); border: 1px solid var(--grid-border); color: var(--grid-navy); }
+        .ndm-status-badge { border-radius: 0; background: var(--grid-amber-bg); border: 1px solid #E3D49A; color: var(--grid-amber); text-transform: uppercase; letter-spacing: 0.4px; font-size: 11px; }
+        .ndm-status-dot { background: var(--grid-amber); border-radius: 0; }
+        .ndm-close-btn { background: var(--grid-navy); border-radius: 0; text-transform: uppercase; letter-spacing: 0.4px; font-size: 12px; font-family: inherit; }
+        .ndm-hint { color: var(--grid-muted); }
+
+        /* Inbox (endorsement letters) — button, drawer and cards */
+        #endoInboxBtn { border-radius: 0; width: 40px; height: 40px; background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.3); }
+        #endoInboxBtn:hover { background: rgba(255,255,255,0.18); }
+        #endoInboxBadge { border-radius: 0; }
+        #endoInboxDrawer { box-shadow: none; border-left: 1px solid var(--grid-border); font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        .endo-inbox-head { background: var(--grid-navy); }
+        .endo-inbox-head h3 { font-family: inherit; text-transform: uppercase; letter-spacing: 0.4px; }
+        #endoInboxBody { background: var(--grid-bg); }
+        .endo-card { border-radius: 0; border: 1px solid var(--grid-border); }
+        .endo-card.unread { border-color: var(--grid-navy); box-shadow: none; }
+        .endo-card-icon { border-radius: 0; background: #E4EAF4; color: var(--grid-navy); }
+        .endo-card-title { color: var(--grid-navy); }
+        .endo-new-pill { border-radius: 0; }
+        .endo-status { border-radius: 0; text-transform: uppercase; letter-spacing: 0.4px; font-size: 10.5px; border: 1px solid transparent; }
+        .endo-status.awaiting { background: var(--grid-amber-bg); color: var(--grid-amber); border-color: #E3D49A; }
+        .endo-status.pending  { background: #E4EAF4; color: var(--grid-navy); border-color: #A3AFC7; }
+        .endo-status.verified { background: var(--grid-green-bg); color: var(--grid-green); border-color: #BFD8BF; }
+        .endo-status.rejected { background: var(--grid-red-bg); color: var(--grid-red); border-color: #D49A94; }
+        .endo-act { border-radius: 0; }
+        .endo-act.primary { background: var(--grid-navy); }
+        .endo-act.upload { background: var(--grid-green); }
+        .endo-act.ghost { border-color: var(--grid-border); color: var(--grid-navy); }
+        .endo-remark-box { border-radius: 0; background: var(--grid-red-bg); border-color: #D49A94; color: var(--grid-red); }
+        .endo-remark-box b { color: var(--grid-red); }
+        .endo-batch-note { border-radius: 0; }
+        .endo-empty { color: var(--grid-muted); }
+        .endo-empty i { width: 100%; text-align: center; color: #A3AFC7; }
+        #endoToast { border-radius: 0; box-shadow: none; border: 1px solid #55668C; border-left-width: 4px; background: var(--grid-navy); font-family: inherit; }
+        #endoToast button { border-radius: 0; }
+
+        @media (max-width: 768px) {
+            .main-wrapper { padding: 16px; }
+            .page-inner.card { padding: 20px 16px; }
+            .company-summary { flex-wrap: wrap; gap: 8px; }
+            .company-summary .company-name { font-size: 12.5px; }
+            .popup-content { padding: 24px 20px; }
+        }
+        @media (prefers-reduced-motion: reduce) {
+            .popup-content, .ndm-box { animation: none; }
+        }
     </style>
 </head>
 <body>
@@ -2768,7 +3213,7 @@ $companies = $conn->query("
 <!-- POPUP MODAL — incomplete profile -->
 <div id="profileModal" class="popup-modal" style="display:none;">
     <div class="popup-content">
-        <h3><i class="fas fa-triangle-exclamation" style="color:#d97706;"></i> Incomplete Profile</h3>
+        <h3><i class="fas fa-triangle-exclamation" style="color:var(--grid-amber);"></i> Incomplete Profile</h3>
         <p>Please complete your student profile (skills, experience, and photo) before applying.</p>
         <button onclick="redirectProfile()">Go to Profile</button>
     </div>
@@ -2807,7 +3252,7 @@ $companies = $conn->query("
      / submitCancelConfirm() in the <script> block further down). -->
 <div id="cancelConfirmModal" class="popup-modal" style="display:none;">
     <div class="popup-content">
-        <span class="popup-icon"><i class="fas fa-triangle-exclamation" style="color:#d97706;"></i></span>
+        <span class="popup-icon"><i class="fas fa-triangle-exclamation" style="color:var(--grid-red);"></i></span>
         <h3>Cancel Application Request?</h3>
         <p>This will withdraw your pending application request from this company. This action cannot be undone.</p>
         <div class="ccm-actions">
@@ -2826,7 +3271,7 @@ $companies = $conn->query("
      requirements that are actually still outstanding. -->
 <div id="reqUnverifiedModal" class="popup-modal" style="display:none;">
     <div class="popup-content">
-        <span class="popup-icon"><i class="fas fa-clipboard-list" style="color:var(--maroon);"></i></span>
+        <span class="popup-icon"><i class="fas fa-clipboard-list" style="color:var(--grid-red);"></i></span>
         <h3>Requirements Not Yet Verified</h3>
         <p>You cannot apply to a company until <strong>all</strong> of your requirements are <strong>Verified</strong> by the administrator. <span id="rumCount"></span></p>
         <ul class="rum-list" id="rumList"></ul>
@@ -2836,6 +3281,33 @@ $companies = $conn->query("
         </div>
     </div>
 </div>
+
+<!-- POPUP MODAL — preferred placement does not match the company
+     ADJUSTMENT: shown after Apply when the student's saved Preference for
+     Placement differs from the company's data. Confirming re-posts the
+     same apply request with confirm_replace_placement=1 (see the apply
+     handler): the preference is replaced and the Application SIT removed. -->
+<?php if (!empty($placement_mismatch)): ?>
+<div id="placementMismatchModal" class="popup-modal" style="display:none;">
+    <div class="popup-content">
+        <span class="popup-icon"><i class="fas fa-triangle-exclamation" style="color:var(--grid-amber);"></i></span>
+        <h3>Preferred Placement Doesn't Match</h3>
+        <p>Your saved preferred placement is different from the company you are applying to. Your <strong>Application SIT</strong> was made for the old preference, so it must be replaced.</p>
+        <ul class="rum-list">
+            <li><span><strong>Your preference:</strong><br><?= htmlspecialchars($placement_mismatch['pref']['name']) ?><?= $placement_mismatch['pref']['address'] !== '' ? '<br><small>' . htmlspecialchars($placement_mismatch['pref']['address']) . '</small>' : '' ?></span></li>
+            <li><span><strong>This company:</strong><br><?= htmlspecialchars($placement_mismatch['company']['name']) ?><?= $placement_mismatch['company']['address'] !== '' ? '<br><small>' . htmlspecialchars($placement_mismatch['company']['address']) . '</small>' : '' ?></span></li>
+        </ul>
+        <p><strong>If you continue</strong>, your preferred placement will be replaced with this company's details and your uploaded Application SIT will be <strong>deleted</strong>. You will need to submit a new one before applying.</p>
+        <form method="POST" class="rum-actions" onsubmit="startNavigationGlobalLoading('Updating placement');">
+            <input type="hidden" name="apply" value="1">
+            <input type="hidden" name="company_id" value="<?= (int)$placement_mismatch['company_id'] ?>">
+            <input type="hidden" name="confirm_replace_placement" value="1">
+            <button type="button" class="rum-btn-close" onclick="closePlacementMismatchModal()">Cancel</button>
+            <button type="submit" class="rum-btn-go">Replace &amp; Remove SIT</button>
+        </form>
+    </div>
+</div>
+<?php endif; ?>
 
 <!-- REQUIREMENT PREVIEW MODAL -->
 <div id="reqPreviewModal" style="display:none;">
@@ -2908,7 +3380,7 @@ $companies = $conn->query("
 <!-- NOT-DEPLOYED MODAL -->
 <div id="not-deployed-modal" style="display:none;">
     <div class="ndm-box">
-        <div class="ndm-icon"><i class="fas fa-lock" style="color:#b45309;"></i></div>
+        <div class="ndm-icon"><i class="fas fa-lock" style="color:var(--grid-amber);"></i></div>
         <div class="ndm-title">Page Not Accessible</div>
         <div class="ndm-page-name" id="ndm-page-label">—</div>
         <div class="ndm-status-badge">
@@ -3050,8 +3522,20 @@ $companies = $conn->query("
         </div>
     </nav>
 
-    <div class="page-inner">
-        <h2>Verified Companies</h2>
+    <!-- ADJUSTMENT (design): "Field Ops Grid" layout ported from AccomForm.php — the list now sits in the same
+         slate-blue .main-wrapper + bordered .card (kept as .page-inner so refreshCompanyList() below still finds
+         and live-refreshes it by that selector). Only the look changed; every id / class / handler is intact. -->
+    <div class="main-wrapper">
+    <div class="page-inner card">
+        <div class="cl-head">
+            <h2>Verified Companies</h2>
+            <?php if ($company_total > 0): ?>
+                <span class="cl-count"><?= $company_total ?> partner <?= $company_total === 1 ? 'company' : 'companies' ?></span>
+            <?php endif; ?>
+        </div>
+        <?php if ($company_total > 0): ?>
+            <p class="cl-sub">Select a company to view its details and send your application.</p>
+        <?php endif; ?>
 
         <?php /* ADJUSTMENT: the success banners ("Application submitted! Please wait for admin
                  approval." / "Your application request has been cancelled.") are no longer shown —
@@ -3063,7 +3547,7 @@ $companies = $conn->query("
             <div id="clServerError" data-msg="<?= htmlspecialchars($error, ENT_QUOTES) ?>" hidden></div>
         <?php endif; ?>
 
-        <?php while ($row = $companies->fetch_assoc()):
+        <?php while ($companies instanceof mysqli_result && ($row = $companies->fetch_assoc())):
             $supervisor_name =
                 (!empty($row['contact_first_name']) ? $row['contact_first_name'] : '') .
                 (!empty($row['contact_middle_initial']) ? ' ' . $row['contact_middle_initial'] . '.' : '') .
@@ -3309,7 +3793,22 @@ $companies = $conn->query("
         </div>
 
         <?php endwhile; ?>
+
+        <?php if ($company_load_error): ?>
+            <div class="cl-state cl-state-error">
+                <i class="fas fa-triangle-exclamation"></i>
+                <strong>Unable to load the company list</strong>
+                <span>Something went wrong while loading the partner companies. Please refresh the page or try again in a moment.</span>
+            </div>
+        <?php elseif ($company_total === 0): ?>
+            <div class="cl-state">
+                <i class="fas fa-building-circle-xmark"></i>
+                <strong>No verified companies yet</strong>
+                <span>Partner companies will appear here once they have been verified by the administrator.</span>
+            </div>
+        <?php endif; ?>
     </div><!-- end .page-inner -->
+    </div><!-- end .main-wrapper -->
 </div><!-- end .main-content -->
 
 <script>
@@ -3367,6 +3866,22 @@ document.addEventListener("DOMContentLoaded", function() {
 document.addEventListener("DOMContentLoaded", function() {
     document.getElementById("registeredModal").style.display = "flex";
 });
+<?php endif; ?>
+
+<?php if (!empty($placement_mismatch)): ?>
+/* ADJUSTMENT: preferred placement ≠ company → ask before replacing it / removing the SIT. */
+function closePlacementMismatchModal() {
+    var m = document.getElementById('placementMismatchModal');
+    if (m) m.style.display = 'none';
+}
+document.addEventListener("DOMContentLoaded", function() {
+    var m = document.getElementById('placementMismatchModal');
+    if (m) {
+        m.style.display = 'flex';
+        m.addEventListener('click', function(e) { if (e.target === m) closePlacementMismatchModal(); });
+    }
+});
+document.addEventListener('keydown', function(e) { if (e.key === 'Escape') closePlacementMismatchModal(); });
 <?php endif; ?>
 
 <?php if (!empty($requirements_unverified)): ?>
