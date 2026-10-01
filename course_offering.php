@@ -1056,6 +1056,11 @@ $pageTitle = "Course Offering";
             visibility: hidden;
             pointer-events: none;
         }
+        /* NEW (loader sync fix — same as administrator.php): when the page is reloading / leaving, the
+           overlay must appear on the very next paint — no 0.35s fade-in, because the browser may stop
+           painting this page before a fade would finish. Added by the script only while leaving, and
+           removed again when the overlay hides. */
+        #globalLoadingOverlay.gl-instant { transition: none; }
         .global-loading-box {
             display: flex;
             flex-direction: column;
@@ -1533,6 +1538,7 @@ $pageTitle = "Course Offering";
                 mask: radial-gradient(farthest-side, transparent calc(100% - 9px), #000 calc(100% - 8px)),
                       repeating-conic-gradient(from 5deg, #000 0deg 20deg, transparent 20deg 30deg);
                 mask-composite: intersect;
+        will-change: transform;   /* FIX: the ring keeps turning on the compositor while this large page is busy loading (no pause) — same as administrator.php */
     }
     #globalLoadingOverlay .global-loading-spinner { animation: cvRingSpin 1s steps(12, end) infinite; }
     @keyframes cvRingSpin { to { transform: rotate(360deg); } }
@@ -1785,6 +1791,17 @@ $pageTitle = "Course Offering";
         };
     }
 
+    /* NEW (loader sync fix): 'gl-instant' (no fade-in) is only for the moment of leaving; once the overlay is hidden
+       again (navigation cancelled / a download) it is dropped, so later showings fade in as before — same as administrator.php. */
+    document.addEventListener('DOMContentLoaded', function () {
+        try {
+            var ovw = overlay();
+            if (!ovw || !window.MutationObserver) return;
+            new MutationObserver(function () {
+                if (ovw.classList.contains('hidden') && ovw.classList.contains('gl-instant')) ovw.classList.remove('gl-instant');
+            }).observe(ovw, { attributes: true, attributeFilter: ['class'] });
+        } catch (e) { /* never affects the page */ }
+    });
     // ── 3) leaving by script (reload / redirect after an action) ──
     var lastFileClick = 0;
     var FILE_RE = /[?&][^=&]*(export|download|print|stream|pdf|preview|blob|file|csv)[^=&]*=|\.(pdf|xlsx?|csv|docx?|zip)(\?|$)/i;
@@ -1801,6 +1818,7 @@ $pageTitle = "Course Offering";
         if (Date.now() - lastFileClick < 2000) return;                             // most likely a file download
         var ov = overlay(); if (!ov || !ov.classList.contains('hidden')) return;
         var l = label(); if (l) l.textContent = 'Loading';
+        ov.classList.add('gl-instant');   // NEW (loader sync fix): appears on the very next paint, like administrator.php
         ov.classList.remove('hidden');
         setTimeout(function () { if (!document.hidden) { ov.classList.add('hidden'); } }, 8000);   // still here → it was a download
     });
@@ -1913,6 +1931,7 @@ $pageTitle = "Course Offering";
         navWasHidden = ov.classList.contains('hidden');
         if (navWasHidden) {
             if (label) { navPrevLabel = label.textContent; label.textContent = 'Loading'; }
+            ov.classList.add('gl-instant');   // NEW (loader sync fix): no fade-in while leaving
             setHidden(false);
         }
         clearTimeout(navTimer);
