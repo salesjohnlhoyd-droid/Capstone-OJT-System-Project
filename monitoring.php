@@ -1,4 +1,12 @@
 <?php
+
+// ── CLEAN-UP (project audit): ONE definition of the `email_recovery_requests` table. It used to be written out 4 times in
+//    this file (1 different version(s)). CREATE TABLE IF NOT EXISTS only acts once, so whichever copy ran
+//    first decided the columns; every former copy now calls this complete definition instead. ──
+function cv_ensure_email_recovery_requests_table($conn) {
+    $conn->query("CREATE TABLE IF NOT EXISTS email_recovery_requests ( id INT AUTO_INCREMENT PRIMARY KEY, account_type VARCHAR(20), first_name VARCHAR(100), middle_name VARCHAR(100), last_name VARCHAR(100), old_email VARCHAR(200), new_email VARCHAR(200), reason TEXT, extra_info VARCHAR(300), selfie_blob MEDIUMBLOB, status VARCHAR(20) DEFAULT 'Pending', submitted_at DATETIME DEFAULT CURRENT_TIMESTAMP )");
+}
+
 session_start();
 // ── NEW (this adjustment): LOGOUT + BACK BUTTON — never let the browser keep a copy of this page.
 // After the admin logs out, pressing the browser's Back arrow used to show this page again from the
@@ -26,6 +34,48 @@ if (
     header("Location: admin_login.php");
     exit;
 }
+
+// ============================================================================
+// NEW (this adjustment): NO NOTIFICATIONS LEFT BEHIND BY DELETED ACCOUNTS
+// ----------------------------------------------------------------------------
+// When a student or company account is deleted (Student List, Company List or
+// Manage Accounts), its notifications must disappear from the inboxes of
+// administrator.php / company_validation.php and from every side-menu
+// indicator. The company delete paths now remove them directly; this sweep also
+// clears any that were already left behind (or come from any other path). It
+// removes ONLY notification rows whose account no longer exists in `users`:
+//   • company_requirement_upload_notifications  (Company Requirements inbox + badge)
+//   • admin_application_approvals              (Application Requests inbox + badge)
+//   • moa_requests                             (MOA notifications — rows tied to an account)
+//   • email_recovery_requests, Pending only    (Manage Accounts indicator)
+// Archiving never deletes an account, so archived students / companies are never
+// touched. Runs at most once every 15 seconds per admin; fully guarded.
+// ============================================================================
+if (!function_exists('cv_sweep_orphan_notifications')) {
+    function cv_sweep_orphan_notifications($conn) {
+        $has = function ($t) use ($conn) {
+            try { $r = $conn->query("SHOW TABLES LIKE '" . $conn->real_escape_string($t) . "'"); return $r && $r->num_rows > 0; }
+            catch (\Throwable $e) { return false; }
+        };
+        $run = function ($sql) use ($conn) { try { $conn->query($sql); } catch (\Throwable $e) { /* never affects the page */ } };
+        if (!$has('users')) return;
+        if ($has('company_requirement_upload_notifications'))
+            $run("DELETE n FROM company_requirement_upload_notifications n LEFT JOIN users u ON u.id = n.user_id WHERE u.id IS NULL");
+        if ($has('admin_application_approvals'))
+            $run("DELETE a FROM admin_application_approvals a LEFT JOIN users s ON s.id = a.student_id LEFT JOIN users c ON c.id = a.company_id WHERE s.id IS NULL OR c.id IS NULL");
+        if ($has('moa_requests'))
+            $run("DELETE m FROM moa_requests m LEFT JOIN users u ON u.id = m.user_id WHERE m.user_id > 0 AND u.id IS NULL");
+        if ($has('email_recovery_requests'))
+            $run("DELETE r FROM email_recovery_requests r WHERE r.status = 'Pending' AND NOT EXISTS (SELECT 1 FROM users u WHERE u.email = r.old_email OR u.email = r.new_email)");
+    }
+}
+try {
+    $cvSweepNow = time();
+    if (!isset($_SESSION['cv_orphan_sweep_at']) || $cvSweepNow - (int)$_SESSION['cv_orphan_sweep_at'] >= 15) {
+        $_SESSION['cv_orphan_sweep_at'] = $cvSweepNow;
+        cv_sweep_orphan_notifications($conn);
+    }
+} catch (\Throwable $e) { /* never affects the page */ }
 
 // ── NEW (this adjustment): EMAIL RECOVERY REQUESTS side-menu indicator ─────────
 // Number of Pending rows in email_recovery_requests (the requests handled in
@@ -103,7 +153,7 @@ if (!function_exists('cv_alog_capture')) {
     function cv_alog_status_word($status) {
         $s = strtolower(trim((string)$status));
         $map = ['verified' => 'Verified', 'approved' => 'Approved', 'rejected' => 'Rejected', 'pending' => 'Set to Pending', 'complied' => 'Complied'];
-        return $map[$s] ?? ($s !== '' ? ucwords($s) : 'Updated');
+        return $map[$s] ?? ($s !== '' ? ucwords($s ?? '') : 'Updated');
     }
     function cv_alog_performer($conn) {
         $n = trim((string)($GLOBALS['adminFullName'] ?? ''));
@@ -389,8 +439,46 @@ $conn->query("CREATE TABLE IF NOT EXISTS admin_application_approvals (
     submitted_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     UNIQUE KEY unique_application (student_id, company_id)
 )");
-$app_request_count_res = $conn->query("SELECT COUNT(*) as total FROM admin_application_approvals");
+$app_request_count_res = $conn->query("SELECT COUNT(*) as total FROM admin_application_approvals aaa_c INNER JOIN users aaa_u ON aaa_u.id = aaa_c.student_id");
 $app_request_count = (int)(($app_request_count_res ? $app_request_count_res->fetch_assoc()['total'] : 0));
+
+// ============================================================================
+// NEW (this adjustment): STUDENT REQUIREMENT SUBMISSIONS — side-menu indicator.
+// A student's new / re-uploaded requirement is recorded as a notification by
+// administrator.php (cv_sru_detect()) and counts toward the Student Validation
+// indicator next to the application requests — the same count administrator.php
+// shows. Same helpers as administrator.php (created once per session, so every
+// admin page can count them). Fully guarded: if anything fails the count simply
+// stays the application requests only.
+// ============================================================================
+if (!function_exists('cv_sru_ensure')) {
+    function cv_sru_ensure($conn) {
+        if (!empty($_SESSION['cv_sru_ready'])) return true;
+        try {
+            $conn->query("CREATE TABLE IF NOT EXISTS student_requirement_upload_notifications (
+                id INT AUTO_INCREMENT PRIMARY KEY, user_id INT NOT NULL, detail TEXT NULL,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                admin_viewed TINYINT(1) NOT NULL DEFAULT 0, KEY idx_sru_viewed (admin_viewed), KEY idx_sru_user (user_id))");
+            $conn->query("CREATE TABLE IF NOT EXISTS student_requirement_upload_watch (
+                user_id INT NOT NULL, requirement_type VARCHAR(100) NOT NULL, file_len BIGINT NOT NULL DEFAULT 0,
+                PRIMARY KEY (user_id, requirement_type))");
+            $conn->query("CREATE TABLE IF NOT EXISTS student_requirement_upload_meta (id TINYINT NOT NULL PRIMARY KEY, initialized TINYINT(1) NOT NULL DEFAULT 0)");
+            $_SESSION['cv_sru_ready'] = 1;
+            return true;
+        } catch (\Throwable $e) { return false; }
+    }
+    // unviewed submissions of active (not archived) students
+    function cv_sru_count($conn) {
+        try {
+            if (!cv_sru_ensure($conn)) return 0;
+            $r = $conn->query("SELECT COUNT(*) AS total FROM student_requirement_upload_notifications n
+                               INNER JOIN users u ON u.id = n.user_id WHERE n.admin_viewed = 0 AND COALESCE(u.is_archived, 0) = 0");
+            $row = $r ? $r->fetch_assoc() : null;
+            return (int)($row['total'] ?? 0);
+        } catch (\Throwable $e) { return 0; }
+    }
+}
+try { $app_request_count += cv_sru_count($conn); } catch (\Throwable $e) { /* indicator keeps the application-request count */ }
 
 // ── NEW: Pending MOA request count for sidebar badge (Company Requirements) ──
 // Mirrors the same moa_requests table/query used in company_validation.php
@@ -1080,17 +1168,17 @@ if (isset($_GET['refresh'])) {
                     <div class="log-entry-inner">
                         <div class="log-entry-left">
                             <span class="badge <?= $badgeClass ?>">
-                                <?= htmlspecialchars($row['action_type']) ?>
+                                <?= htmlspecialchars($row['action_type'] ?? '') ?>
                             </span>
                             <strong>
                                 <?= htmlspecialchars($row['account_type'] ?? '') ?>:
                                 <?= htmlspecialchars($row['account_name'] ?? '') ?>
                             </strong>
                             <div>Performed by: <?= htmlspecialchars($row['performed_by'] ?? 'System') ?></div>
-                            <div>Details: <?= htmlspecialchars($row['details']) ?></div>
+                            <div>Details: <?= htmlspecialchars($row['details'] ?? '') ?></div>
                         </div>
                         <div class="log-entry-right">
-                            <?= date('M d, Y h:i A', strtotime($row['created_at'])) ?>
+                            <?= date('M d, Y h:i A', strtotime($row['created_at'] ?? '')) ?>
                         </div>
                     </div>
                 </div>
@@ -1422,6 +1510,7 @@ function cascadeDeleteAccountRecords(mysqli $conn, int $id, string $email, strin
         $targets['company_information']         = ['user_id'];
         $targets['company_profile']             = ['user_id'];
         $targets['company_requirements']        = ['user_id'];
+        $targets['company_requirement_upload_notifications'] = ['user_id'];   // NEW (this adjustment): Company Requirements inbox / side-menu notifications
         $targets['company_messages']            = ['company_id'];
         $targets['attendance_settings']         = ['company_id'];
         $targets['archived_companies']          = ['user_id'];
@@ -1581,7 +1670,7 @@ if (isset($_POST['ajax_delete_account'])) {
     $performer_name = trim($performer_fn . ' ' . $performer_ln);
     if ($performer_name === '') $performer_name = 'Admin';
 
-    $role_label = ucfirst($role);
+    $role_label = ucfirst($role ?? '');
     $details    = "$role_label account deleted for $acc_fullname";
 
     // ── NEW: capture the account's details BEFORE anything is deleted, so
@@ -1905,13 +1994,7 @@ function mon_ensure_recovery_history_column($conn) {
 // ============================================
 if (isset($_POST['ajax_clear_recovery_history'])) {
     header('Content-Type: application/json');
-    $conn->query("CREATE TABLE IF NOT EXISTS email_recovery_requests (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        account_type VARCHAR(20), first_name VARCHAR(100), middle_name VARCHAR(100),
-        last_name VARCHAR(100), old_email VARCHAR(200), new_email VARCHAR(200),
-        reason TEXT, extra_info VARCHAR(300), selfie_blob MEDIUMBLOB,
-        status VARCHAR(20) DEFAULT 'Pending', submitted_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )");
+    cv_ensure_email_recovery_requests_table($conn);   // CLEAN-UP (audit): shared definition, see cv_ensure_email_recovery_requests_table()
     mon_ensure_recovery_history_column($conn);
     $ok = false; $cleared = 0;
     try {
@@ -1937,13 +2020,7 @@ if (isset($_POST['ajax_accept_recovery'])) {
     $req_id = intval($_POST['req_id'] ?? 0);
     if ($req_id <= 0) { echo json_encode(['success'=>false,'message'=>'Invalid request.']); exit; }
 
-    $conn->query("CREATE TABLE IF NOT EXISTS email_recovery_requests (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        account_type VARCHAR(20), first_name VARCHAR(100), middle_name VARCHAR(100),
-        last_name VARCHAR(100), old_email VARCHAR(200), new_email VARCHAR(200),
-        reason TEXT, extra_info VARCHAR(300), selfie_blob MEDIUMBLOB,
-        status VARCHAR(20) DEFAULT 'Pending', submitted_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )");
+    cv_ensure_email_recovery_requests_table($conn);   // CLEAN-UP (audit): shared definition, see cv_ensure_email_recovery_requests_table()
 
     $qr = $conn->prepare("SELECT * FROM email_recovery_requests WHERE id=? AND (status IS NULL OR TRIM(status) = '' OR LOWER(TRIM(status)) = 'pending')");
     $qr->bind_param("i", $req_id); $qr->execute();
@@ -1999,7 +2076,7 @@ if (isset($_POST['ajax_accept_recovery'])) {
     $performer_name = trim(($_SESSION['first_name'] ?? '') . ' ' . ($_SESSION['last_name'] ?? ''));
     if (empty(trim($performer_name))) $performer_name = 'Admin';
     $fullName    = trim($req['first_name'] . ' ' . ($req['middle_name'] ? $req['middle_name'].' ' : '') . $req['last_name']);
-    $acc_type    = ucfirst($req['account_type']);
+    $acc_type    = ucfirst($req['account_type'] ?? '');
     $log_details = "Email recovery request accepted — email changed from $old_email to $new_email and a new password was issued";
 
     $log_stmt = $conn->prepare(
@@ -2018,14 +2095,14 @@ if (isset($_POST['ajax_accept_recovery'])) {
     // can only ever reach $new_email. ──
     // UPDATED (this adjustment): clearer, more informative wording — says when the
     // request was sent, exactly what changed, and what to do next.
-    $reqSubmittedOn = !empty($req['submitted_at']) ? date('F j, Y \\a\\t g:i A', strtotime($req['submitted_at'])) : '';
+    $reqSubmittedOn = !empty($req['submitted_at']) ? date('F j, Y \\a\\t g:i A', strtotime($req['submitted_at'] ?? '')) : '';
     $acceptEmailBody = mon_email_template([
         'theme'           => 'success',
         'band_label'      => 'Request Approved',
         'band_headline'   => 'Your account email has been updated.',
         'name'            => $fullName,
         'paragraphs'      => [
-            'We reviewed your email recovery request' . ($reqSubmittedOn !== '' ? ' from <strong>' . htmlspecialchars($reqSubmittedOn) . '</strong>' : '')
+            'We reviewed your email recovery request' . ($reqSubmittedOn !== '' ? ' from <strong>' . htmlspecialchars($reqSubmittedOn ?? '') . '</strong>' : '')
             . ' and approved it. Your account now signs in with the new email address below, and a new temporary password has been set for you.',
         ],
         'highlight_label' => 'Your New Login Details',
@@ -2035,7 +2112,7 @@ if (isset($_POST['ajax_accept_recovery'])) {
         ],
         'after'           => [
             '<strong>Next step:</strong> log in with these details and change your temporary password right away.',
-            'Your previous email (<strong>' . htmlspecialchars($old_email) . '</strong>) can no longer be used to sign in. If you did not ask for this change, contact the administrator immediately.',
+            'Your previous email (<strong>' . htmlspecialchars($old_email ?? '') . '</strong>) can no longer be used to sign in. If you did not ask for this change, contact the administrator immediately.',
         ],
         'detail_label'    => 'Request',
         'detail_value'    => 'Email Recovery',
@@ -2089,13 +2166,7 @@ if (isset($_POST['ajax_reject_recovery'])) {
 
     if ($req_id <= 0) { echo json_encode(['success'=>false,'message'=>'Invalid request.']); exit; }
 
-    $conn->query("CREATE TABLE IF NOT EXISTS email_recovery_requests (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        account_type VARCHAR(20), first_name VARCHAR(100), middle_name VARCHAR(100),
-        last_name VARCHAR(100), old_email VARCHAR(200), new_email VARCHAR(200),
-        reason TEXT, extra_info VARCHAR(300), selfie_blob MEDIUMBLOB,
-        status VARCHAR(20) DEFAULT 'Pending', submitted_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )");
+    cv_ensure_email_recovery_requests_table($conn);   // CLEAN-UP (audit): shared definition, see cv_ensure_email_recovery_requests_table()
 
     $qr = $conn->prepare("SELECT * FROM email_recovery_requests WHERE id=? AND (status IS NULL OR TRIM(status) = '' OR LOWER(TRIM(status)) = 'pending')");
     $qr->bind_param("i", $req_id); $qr->execute();
@@ -2109,7 +2180,7 @@ if (isset($_POST['ajax_reject_recovery'])) {
     $performer_name = trim(($_SESSION['first_name'] ?? '') . ' ' . ($_SESSION['last_name'] ?? ''));
     if (empty(trim($performer_name))) $performer_name = 'Admin';
     $fullName    = trim($req['first_name'] . ' ' . ($req['middle_name'] ? $req['middle_name'].' ' : '') . $req['last_name']);
-    $acc_type    = ucfirst($req['account_type']);
+    $acc_type    = ucfirst($req['account_type'] ?? '');
     $old_email   = $req['old_email'];
     // UPDATED (this adjustment): a rejected request changes no account, so it is no
     // longer logged as "Account Updated" — it gets its own "Request Rejected" entry.
@@ -2130,7 +2201,7 @@ if (isset($_POST['ajax_reject_recovery'])) {
     // $req['new_email']. ──
     // UPDATED (this adjustment): clearer, more informative wording — explains that
     // nothing on the account changed, why it was rejected, and how to try again.
-    $reqSubmittedOn = !empty($req['submitted_at']) ? date('F j, Y \\a\\t g:i A', strtotime($req['submitted_at'])) : '';
+    $reqSubmittedOn = !empty($req['submitted_at']) ? date('F j, Y \\a\\t g:i A', strtotime($req['submitted_at'] ?? '')) : '';
     $recordWord     = ($req['account_type'] ?? '') === 'company' ? 'company account' : 'student record';
     $rejectTemplate = [
         'theme'           => 'danger',
@@ -2138,7 +2209,7 @@ if (isset($_POST['ajax_reject_recovery'])) {
         'band_headline'   => 'We could not approve your email recovery request.',
         'name'            => $fullName,
         'paragraphs'      => [
-            'We reviewed your email recovery request' . ($reqSubmittedOn !== '' ? ' from <strong>' . htmlspecialchars($reqSubmittedOn) . '</strong>' : '')
+            'We reviewed your email recovery request' . ($reqSubmittedOn !== '' ? ' from <strong>' . htmlspecialchars($reqSubmittedOn ?? '') . '</strong>' : '')
             . ' and could not approve it. <strong>No changes were made to your account</strong> — it still uses its current email address and password.',
         ],
         'after'           => [
@@ -2295,7 +2366,7 @@ function renderTable($result, $role) {
     if ($result->num_rows > 0) {
         echo "<div class='table-section' id='section-$role'>";
         echo "<div style='display:flex; justify-content:space-between; align-items:center; margin-bottom:20px;'>";
-        echo "<h3>".ucfirst($role)." Accounts</h3>";
+        echo "<h3>".ucfirst($role ?? '')." Accounts</h3>";
         echo "<div style='display:flex; gap:10px; align-items:center;'>";
             // Export button removed for all roles
             // ── FIX (search-bar autofill): the "Filter Name..." input below now
@@ -2331,7 +2402,7 @@ function renderTable($result, $role) {
                 $result->data_seek(0);
                 natcasesort($companyTypeOptions);
                 echo "<select id='filter-type-$role' name='filter-type-$role' autocomplete='off' onchange='filterTable(\"$role\", 2, this.value)' class='filter-input'><option value=''>All Company Types</option>";
-                foreach ($companyTypeOptions as $t) echo "<option value='" . htmlspecialchars($t, ENT_QUOTES) . "'>" . htmlspecialchars($t) . "</option>";
+                foreach ($companyTypeOptions as $t) echo "<option value='" . htmlspecialchars($t ?? '', ENT_QUOTES) . "'>" . htmlspecialchars($t ?? '') . "</option>";
                 if ($hasNoType) echo "<option value='—'>Not Set</option>";
                 echo "</select>";
             }
@@ -2371,7 +2442,7 @@ function renderTable($result, $role) {
                 $cellStyle = '';
                 if ($col === 'Full Name') {
                     $fullName = $row['first_name'] . ($row['middle_name'] ? " ".$row['middle_name'] : "") . " " . $row['last_name'];
-                    echo "<td$cellStyle>".htmlspecialchars($fullName)."</td>";
+                    echo "<td$cellStyle>".htmlspecialchars($fullName ?? '')."</td>";
                 } elseif ($col === 'company_type') {
                     // NEW (this adjustment): blank company type shows "—"
                     $typeVal = trim((string)($row[$col] ?? ''));
@@ -2397,7 +2468,7 @@ function renderTable($result, $role) {
             $btnTitle  = $isActive
                 ? "Deactivate this $roleLabelForTitle — they will immediately lose the ability to log in."
                 : "Activate this $roleLabelForTitle — they will be able to log in again.";
-            echo "<td><button type='button' class='status-toggle-btn $btnClass' data-active='$isActive' title='".htmlspecialchars($btnTitle)."' onclick=\"toggleAccountStatus('$role', {$row['id']}, this)\"><i class='fas fa-$btnIcon'></i> $btnLabel</button></td>";
+            echo "<td><button type='button' class='status-toggle-btn $btnClass' data-active='$isActive' title='".htmlspecialchars($btnTitle ?? '')."' onclick=\"toggleAccountStatus('$role', {$row['id']}, this)\"><i class='fas fa-$btnIcon'></i> $btnLabel</button></td>";
 
             // ── UPDATED (adjustment): the Actions column now renders a working
             // Delete button for EVERY role, including Admin — previously Admin
@@ -2419,13 +2490,7 @@ function renderTable($result, $role) {
 }
 
 // ── Ensure email_recovery_requests table exists & fetch requests ──────────────
-$conn->query("CREATE TABLE IF NOT EXISTS email_recovery_requests (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    account_type VARCHAR(20), first_name VARCHAR(100), middle_name VARCHAR(100),
-    last_name VARCHAR(100), old_email VARCHAR(200), new_email VARCHAR(200),
-    reason TEXT, extra_info VARCHAR(300), selfie_blob MEDIUMBLOB,
-    status VARCHAR(20) DEFAULT 'Pending', submitted_at DATETIME DEFAULT CURRENT_TIMESTAMP
-)");
+cv_ensure_email_recovery_requests_table($conn);   // CLEAN-UP (audit): shared definition, see cv_ensure_email_recovery_requests_table()
 $recovery_requests = $conn->query("SELECT * FROM email_recovery_requests ORDER BY submitted_at DESC");
 
 $pending_count = 0;
@@ -2496,7 +2561,7 @@ function mon_render_req_card($req) {
                     <?php endif; ?>
                     <div class="req-head-info">
                         <div class="req-name-row">
-                            <div class="req-name"><?= htmlspecialchars($fullName) ?></div>
+                            <div class="req-name"><?= htmlspecialchars($fullName ?? '') ?></div>
                             <!-- UPDATED (this adjustment): Accept / Reject are icon buttons in the
                                  top-right corner, level with the name; in History the Accepted /
                                  Rejected status sits in the same spot. Same ids / onclick handlers. -->
@@ -2522,8 +2587,8 @@ function mon_render_req_card($req) {
                             </div>
                         </div>
                         <div class="req-head-meta">
-                            <span class="req-type-badge <?= $req['account_type'] ?>"><?= ucfirst($req['account_type']) ?></span>
-                            <span class="req-timestamp"><i class="far fa-clock"></i> <?= date('M d, Y h:i A', strtotime($req['submitted_at'])) ?></span>
+                            <span class="req-type-badge <?= $req['account_type'] ?>"><?= ucfirst($req['account_type'] ?? '') ?></span>
+                            <span class="req-timestamp"><i class="far fa-clock"></i> <?= date('M d, Y h:i A', strtotime($req['submitted_at'] ?? '')) ?></span>
                         </div>
                     </div>
                 </div>
@@ -2553,13 +2618,13 @@ function mon_render_req_card($req) {
                 <div class="req-fields">
                     <?php foreach ($items as $it): ?>
                     <div class="req-field<?= $it[2] ? ' wide' : '' ?>">
-                        <span class="req-field-label"><?= htmlspecialchars($it[0]) ?></span>
+                        <span class="req-field-label"><?= htmlspecialchars($it[0] ?? '') ?></span>
                         <span class="req-field-value"><?= htmlspecialchars($it[1] !== '' ? $it[1] : '—') ?></span>
                     </div>
                     <?php endforeach; ?>
                     <div class="req-field wide">
                         <span class="req-field-label">Reason</span>
-                        <span class="req-field-value req-reason-box"><?= htmlspecialchars($req['reason']) ?></span>
+                        <span class="req-field-value req-reason-box"><?= htmlspecialchars($req['reason'] ?? '') ?></span>
                     </div>
                 </div>
 
@@ -3908,12 +3973,80 @@ if ($adminFullName === '') $adminFullName = 'Administrator';
      unchanged; fetch / XMLHttpRequest keep working exactly as before.
      ══════════════════════════════════════════════════════════════════════ -->
 <style>
-    html.cv-booting::before { content: ''; position: fixed; left: 50%; top: 50%; width: 54px; height: 54px; margin: -44px 0 0 -32px; border-radius: 50%;
-        border: 5px solid #A3AFC7; border-top-color: #1B2A4A; z-index: 20002; animation: cvBootSpin 0.85s linear infinite; }
+    /* the first-paint ring: exactly where the page's own spinner is; its size and look come from the shared ring rule below,
+       and it carries on from the previous page's loading page (--cv-ring-delay). CLEAN-UP (audit): two rules merged into one. */
+    html.cv-booting::before { content: ''; position: fixed; left: 50%; top: 50%; margin: -47.5px 0 0 -32px; z-index: 20002;
+        animation: cvRingSpin 1s steps(12, end) infinite; animation-delay: var(--cv-ring-delay, 0s); }
     html.cv-booting::after { content: 'LOADING'; position: fixed; inset: 0; z-index: 20001; display: flex; align-items: center; justify-content: center;
-        padding-top: 70px; box-sizing: border-box; background: rgba(238, 241, 246, 0.92); color: #1B2A4A;
+        padding: 80px 20.7px 0 0; box-sizing: border-box; background: rgba(238, 241, 246, 0.92); color: #1B2A4A;   /* UPDATED (this adjustment): label exactly where the page's own label is */
         font: 700 13px 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; letter-spacing: 0.6px; }
-    @keyframes cvBootSpin { to { transform: rotate(360deg); } }
+    /* NEW (this adjustment): ENHANCED LOADING RING — instead of one solid arc sweeping round, 12 rounded segments
+       in the site's navy that fade from dark to light around the circle and tick round (like a classic activity
+       indicator). Same 64 px footprint and position as before, so nothing else moves. Used by the first-paint
+       cover AND by this page's own loading page, so both always look identical. */
+    html.cv-booting::before,
+    #globalLoadingOverlay .global-loading-spinner {
+        width: 64px; height: 64px; border: 0; border-radius: 50%; box-sizing: border-box;
+        background: conic-gradient(from 0deg, rgba(27,42,74,0.12) 0deg, rgba(27,42,74,0.35) 120deg, rgba(27,42,74,0.7) 240deg, #1B2A4A 330deg, #1B2A4A 360deg);
+        -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 9px), #000 calc(100% - 8px)),
+                      repeating-conic-gradient(from 5deg, #000 0deg 20deg, transparent 20deg 30deg);
+        -webkit-mask-composite: source-in;
+                mask: radial-gradient(farthest-side, transparent calc(100% - 9px), #000 calc(100% - 8px)),
+                      repeating-conic-gradient(from 5deg, #000 0deg 20deg, transparent 20deg 30deg);
+                mask-composite: intersect;
+    }
+    #globalLoadingOverlay .global-loading-spinner { animation: cvRingSpin 1s steps(12, end) infinite; }
+    @keyframes cvRingSpin { to { transform: rotate(360deg); } }
+    /* NEW (this adjustment): the animated dots after "LOADING", like the page's own loading page, so nothing changes
+       when the page's loading page takes over */
+    /* UPDATED (this adjustment): the three dots fade one after another exactly like the page's own dots
+       (same 1.2 s cycle, 0.2 s apart), so they simply carry on when the page's loading page takes over */
+    html.cv-booting body::before { content: '.'; position: fixed; left: calc(50% + 29.75px); top: calc(50% + 32.5px); z-index: 20003;
+        font: 700 13px/15px 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; letter-spacing: 0.6px; color: rgba(27,42,74,0);
+        animation: cvBootDots 1.2s linear infinite; animation-delay: var(--cv-dots-delay, 0s); pointer-events: none; }
+    @keyframes cvBootDots {
+        0.0% { color: rgba(27,42,74,0.0); text-shadow: 4.23px 0 rgba(27,42,74,0.075), 8.47px 0 rgba(27,42,74,0.424); }
+        2.5% { color: rgba(27,42,74,0.0); text-shadow: 4.23px 0 rgba(27,42,74,0.052), 8.47px 0 rgba(27,42,74,0.342); }
+        5.0% { color: rgba(27,42,74,0.0); text-shadow: 4.23px 0 rgba(27,42,74,0.034), 8.47px 0 rgba(27,42,74,0.273); }
+        7.5% { color: rgba(27,42,74,0.0); text-shadow: 4.23px 0 rgba(27,42,74,0.02), 8.47px 0 rgba(27,42,74,0.215); }
+        10.0% { color: rgba(27,42,74,0.0); text-shadow: 4.23px 0 rgba(27,42,74,0.01), 8.47px 0 rgba(27,42,74,0.166); }
+        12.5% { color: rgba(27,42,74,0.0); text-shadow: 4.23px 0 rgba(27,42,74,0.004), 8.47px 0 rgba(27,42,74,0.126); }
+        15.0% { color: rgba(27,42,74,0.0); text-shadow: 4.23px 0 rgba(27,42,74,0.001), 8.47px 0 rgba(27,42,74,0.094); }
+        17.5% { color: rgba(27,42,74,0.0); text-shadow: 4.23px 0 rgba(27,42,74,0.0), 8.47px 0 rgba(27,42,74,0.067); }
+        20.0% { color: rgba(27,42,74,0.0); text-shadow: 4.23px 0 rgba(27,42,74,0.0), 8.47px 0 rgba(27,42,74,0.046); }
+        22.5% { color: rgba(27,42,74,0.071); text-shadow: 4.23px 0 rgba(27,42,74,0.0), 8.47px 0 rgba(27,42,74,0.029); }
+        25.0% { color: rgba(27,42,74,0.221); text-shadow: 4.23px 0 rgba(27,42,74,0.0), 8.47px 0 rgba(27,42,74,0.017); }
+        27.5% { color: rgba(27,42,74,0.409); text-shadow: 4.23px 0 rgba(27,42,74,0.0), 8.47px 0 rgba(27,42,74,0.008); }
+        30.0% { color: rgba(27,42,74,0.576); text-shadow: 4.23px 0 rgba(27,42,74,0.0), 8.47px 0 rgba(27,42,74,0.002); }
+        32.5% { color: rgba(27,42,74,0.706); text-shadow: 4.23px 0 rgba(27,42,74,0.0), 8.47px 0 rgba(27,42,74,0.0); }
+        35.0% { color: rgba(27,42,74,0.802); text-shadow: 4.23px 0 rgba(27,42,74,0.0), 8.47px 0 rgba(27,42,74,0.0); }
+        37.5% { color: rgba(27,42,74,0.874); text-shadow: 4.23px 0 rgba(27,42,74,0.015), 8.47px 0 rgba(27,42,74,0.0); }
+        40.0% { color: rgba(27,42,74,0.925); text-shadow: 4.23px 0 rgba(27,42,74,0.113), 8.47px 0 rgba(27,42,74,0.0); }
+        42.5% { color: rgba(27,42,74,0.96); text-shadow: 4.23px 0 rgba(27,42,74,0.283), 8.47px 0 rgba(27,42,74,0.0); }
+        45.0% { color: rgba(27,42,74,0.983); text-shadow: 4.23px 0 rgba(27,42,74,0.468), 8.47px 0 rgba(27,42,74,0.0); }
+        47.5% { color: rgba(27,42,74,0.996); text-shadow: 4.23px 0 rgba(27,42,74,0.623), 8.47px 0 rgba(27,42,74,0.0); }
+        50.0% { color: rgba(27,42,74,1.0); text-shadow: 4.23px 0 rgba(27,42,74,0.741), 8.47px 0 rgba(27,42,74,0.0); }
+        52.5% { color: rgba(27,42,74,0.967); text-shadow: 4.23px 0 rgba(27,42,74,0.829), 8.47px 0 rgba(27,42,74,0.0); }
+        55.0% { color: rgba(27,42,74,0.905); text-shadow: 4.23px 0 rgba(27,42,74,0.893), 8.47px 0 rgba(27,42,74,0.038); }
+        57.5% { color: rgba(27,42,74,0.815); text-shadow: 4.23px 0 rgba(27,42,74,0.938), 8.47px 0 rgba(27,42,74,0.163); }
+        60.0% { color: rgba(27,42,74,0.705); text-shadow: 4.23px 0 rgba(27,42,74,0.969), 8.47px 0 rgba(27,42,74,0.346); }
+        62.5% { color: rgba(27,42,74,0.591); text-shadow: 4.23px 0 rgba(27,42,74,0.989), 8.47px 0 rgba(27,42,74,0.524); }
+        65.0% { color: rgba(27,42,74,0.487); text-shadow: 4.23px 0 rgba(27,42,74,0.998), 8.47px 0 rgba(27,42,74,0.666); }
+        67.5% { color: rgba(27,42,74,0.395); text-shadow: 4.23px 0 rgba(27,42,74,0.992), 8.47px 0 rgba(27,42,74,0.773); }
+        70.0% { color: rgba(27,42,74,0.317); text-shadow: 4.23px 0 rgba(27,42,74,0.95), 8.47px 0 rgba(27,42,74,0.852); }
+        72.5% { color: rgba(27,42,74,0.252); text-shadow: 4.23px 0 rgba(27,42,74,0.878), 8.47px 0 rgba(27,42,74,0.91); }
+        75.0% { color: rgba(27,42,74,0.198); text-shadow: 4.23px 0 rgba(27,42,74,0.779), 8.47px 0 rgba(27,42,74,0.95); }
+        77.5% { color: rgba(27,42,74,0.152); text-shadow: 4.23px 0 rgba(27,42,74,0.667), 8.47px 0 rgba(27,42,74,0.977); }
+        80.0% { color: rgba(27,42,74,0.115); text-shadow: 4.23px 0 rgba(27,42,74,0.555), 8.47px 0 rgba(27,42,74,0.993); }
+        82.5% { color: rgba(27,42,74,0.084); text-shadow: 4.23px 0 rgba(27,42,74,0.455), 8.47px 0 rgba(27,42,74,1.0); }
+        85.0% { color: rgba(27,42,74,0.059); text-shadow: 4.23px 0 rgba(27,42,74,0.368), 8.47px 0 rgba(27,42,74,0.981); }
+        87.5% { color: rgba(27,42,74,0.04); text-shadow: 4.23px 0 rgba(27,42,74,0.294), 8.47px 0 rgba(27,42,74,0.929); }
+        90.0% { color: rgba(27,42,74,0.024); text-shadow: 4.23px 0 rgba(27,42,74,0.233), 8.47px 0 rgba(27,42,74,0.848); }
+        92.5% { color: rgba(27,42,74,0.013); text-shadow: 4.23px 0 rgba(27,42,74,0.182), 8.47px 0 rgba(27,42,74,0.743); }
+        95.0% { color: rgba(27,42,74,0.006); text-shadow: 4.23px 0 rgba(27,42,74,0.139), 8.47px 0 rgba(27,42,74,0.629); }
+        97.5% { color: rgba(27,42,74,0.001); text-shadow: 4.23px 0 rgba(27,42,74,0.104), 8.47px 0 rgba(27,42,74,0.52); }
+        100.0% { color: rgba(27,42,74,0.0); text-shadow: 4.23px 0 rgba(27,42,74,0.075), 8.47px 0 rgba(27,42,74,0.424); }
+    }
 </style>
 <script>
 (function () {
@@ -3925,13 +4058,103 @@ if ($adminFullName === '') $adminFullName = 'Administrator';
     // ── 1) first paint: covered until this page's own loading overlay exists ──
     root.classList.add('cv-booting');
     function releaseBoot() { root.classList.remove('cv-booting'); }
+    /* NEW (this adjustment): the loading animation no longer starts over midway. When the page's own loading page
+       takes over from this cover, its spinner continues from the same angle, its dots continue in the same rhythm,
+       and its pop-in is not replayed (it is already on screen). Only for this one hand-over, and only if the cover
+       was actually painted; any later showing of the loading page (e.g. "Saving") animates exactly as before. */
+    var cvBootStart = (window.performance && performance.now) ? performance.now() : Date.now();
+    var cvCoverPainted = false;
+    /* NEW (this adjustment): ONE loading page from the side-menu click / refresh until the new page is ready.
+       The page being left saves the moment its loading page appeared (see "pagehide" below); this page picks it
+       up and simply carries on from there — same ring position, same dots, no second pop-in, nothing drawn twice.
+       Used once, only if recent (15 s); a first visit (nothing saved) behaves as before. */
+    var CV_LOADER_KEY = 'cvLoaderEpoch', cvCarriedOver = false;
+    try {
+        var cvEpoch = parseInt(sessionStorage.getItem(CV_LOADER_KEY) || '', 10);
+        sessionStorage.removeItem(CV_LOADER_KEY);
+        var cvSince = cvEpoch ? Date.now() - cvEpoch : -1;
+        if (cvSince >= 0 && cvSince < 15000) {
+            cvCarriedOver = true; cvCoverPainted = true;
+            cvBootStart = cvBootStart - cvSince;
+            root.style.setProperty('--cv-ring-delay', (-((cvSince / 1000) % 1)).toFixed(3) + 's');
+            root.style.setProperty('--cv-dots-delay', (-((cvSince / 1000) % 1.2)).toFixed(3) + 's');
+        }
+    } catch (e) {}
+    function cvLoaderStartedAt() { return Date.now() - (((window.performance && performance.now) ? performance.now() : Date.now()) - cvBootStart); }
+    if (window.requestAnimationFrame) requestAnimationFrame(function () { requestAnimationFrame(function () { cvCoverPainted = root.classList.contains('cv-booting'); }); });
+    function continueCoverAnimation(ov) {
+        try {
+            if (!cvCoverPainted || !ov || ov.classList.contains('hidden')) return;
+            var now = (window.performance && performance.now) ? performance.now() : Date.now();
+            var elapsed = (now - cvBootStart) / 1000;
+            var spinner = ov.querySelector('.global-loading-spinner');
+            if (spinner) spinner.style.animationDelay = (-(elapsed % 1)).toFixed(3) + 's';   // UPDATED (this adjustment): the ring's 1 s turn
+            var dots = ov.querySelectorAll('.global-loading-dots span');
+            for (var i = 0; i < dots.length; i++) dots[i].style.animationDelay = (-((elapsed - i * 0.2) % 1.2 + 1.2) % 1.2).toFixed(3) + 's';
+            var box = ov.querySelector('.global-loading-box');
+            if (box) {
+                box.style.animation = 'none';   // no second pop-in
+                var restore = new MutationObserver(function () {   // later showings get their pop-in back, as before
+                    if (ov.classList.contains('hidden')) {
+                        restore.disconnect();
+                        setTimeout(function () { box.style.animation = ''; if (spinner) spinner.style.animationDelay = ''; for (var j = 0; j < dots.length; j++) dots[j].style.animationDelay = ''; }, 400);
+                    }
+                });
+                restore.observe(ov, { attributes: true, attributeFilter: ['class'] });
+            }
+        } catch (e) { /* never affects the page */ }
+    }
+    // UPDATED (this adjustment): the cover gives way the instant the page's loading page is in the page (before the
+    // next frame is drawn), so the two are never drawn at the same time
+    var cvHandedOver = false;
+    function cvHandOver(ovEl) {
+        if (cvHandedOver) return;
+        cvHandedOver = true;
+        continueCoverAnimation(ovEl);
+        releaseBoot();
+    }
+    if (window.MutationObserver) {
+        var cvOvWatch = new MutationObserver(function () {
+            var o = document.getElementById('globalLoadingOverlay');
+            if (o) { cvOvWatch.disconnect(); cvHandOver(o); }
+        });
+        cvOvWatch.observe(root, { childList: true, subtree: true });
+        document.addEventListener('DOMContentLoaded', function () { cvOvWatch.disconnect(); });
+    }
     (function waitForOverlay() {
-        if (document.getElementById('globalLoadingOverlay')) { releaseBoot(); return; }
+        var ovEl = document.getElementById('globalLoadingOverlay');
+        if (ovEl) { cvHandOver(ovEl); return; }
         if (document.readyState !== 'loading') { releaseBoot(); return; }   // page without an overlay: never keep it covered
         setTimeout(waitForOverlay, 16);
     })();
     document.addEventListener('DOMContentLoaded', function () { setTimeout(releaseBoot, 0); });
     window.addEventListener('pageshow', function (e) { if (e.persisted) releaseBoot(); });
+
+    /* NEW (this adjustment): remember when this page's loading page appeared, and hand that moment to the next
+       page when this one is left (side-menu link, refresh, redirect) while it is showing — so the next page
+       carries on the same loading page instead of starting a second one. Downloads never leave the page, so
+       they never hand anything over. */
+    var cvShownSince = null;
+    function cvWatchOverlay() {
+        var ov = document.getElementById('globalLoadingOverlay');
+        if (!ov) return;
+        var mark = function () {
+            var shown = !ov.classList.contains('hidden');
+            if (shown && cvShownSince === null) cvShownSince = Date.now();
+            if (!shown) cvShownSince = null;
+        };
+        if (!ov.classList.contains('hidden')) cvShownSince = cvLoaderStartedAt();   // the page's first loading page
+        new MutationObserver(mark).observe(ov, { attributes: true, attributeFilter: ['class'] });
+    }
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', cvWatchOverlay); else cvWatchOverlay();
+    window.addEventListener('pagehide', function () {
+        try {
+            var ov = document.getElementById('globalLoadingOverlay');
+            if (ov && !ov.classList.contains('hidden') && !ov.classList.contains('success-state')) {
+                sessionStorage.setItem(CV_LOADER_KEY, String(cvShownSince !== null ? cvShownSince : Date.now()));
+            }
+        } catch (e) {}
+    });
 
     // ── shared: this page's loading overlay ──
     var LABEL = 'Processing', MIN_MS = 350, SAFETY_MS = 30000;
@@ -4044,6 +4267,10 @@ if ($adminFullName === '') $adminFullName = 'Administrator';
     });
 })();
 </script>
+<!-- NEW (this adjustment): button tooltips can now hold a short description, so they may wrap onto a second line -->
+<style>
+    #cvBtnTip { white-space: normal; max-width: 300px; text-align: center; }
+</style>
 </head>
 <body>
 
@@ -4301,7 +4528,7 @@ document.getElementById('fabMainBadge').style.display = 'flex';
 <div id="profileModal" class="modal">
     <div id="profileModalBox">
         <div class="profile-avatar"><?= htmlspecialchars(strtoupper(substr($adminFullName, 0, 1))) ?></div>
-        <h2 style="text-align:center; color:var(--neust-maroon); margin:0 0 4px; font-weight:700;"><?= htmlspecialchars($adminFullName) ?></h2>
+        <h2 style="text-align:center; color:var(--neust-maroon); margin:0 0 4px; font-weight:700;"><?= htmlspecialchars($adminFullName ?? '') ?></h2>
         <p style="text-align:center; color:#a18a8a; font-size:0.78rem; text-transform:uppercase; letter-spacing:0.6px; font-weight:700; margin:0 0 20px;">Administrator</p>
 
         <div class="profile-row">
@@ -4479,7 +4706,7 @@ document.getElementById('fabMainBadge').style.display = 'flex';
     </script>
     <div class="sidebar-header">
         <div class="sidebar-header-titles">
-            <h2 id="sidebarTitle"><?= htmlspecialchars($adminFullName) ?></h2>
+            <h2 id="sidebarTitle"><?= htmlspecialchars($adminFullName ?? '') ?></h2>
             <span class="sidebar-role-label">Administrator</span>
         </div>
         <button id="toggleBtn" class="toggle-btn"><i class="fas fa-bars"></i></button>
@@ -4560,12 +4787,12 @@ document.getElementById('fabMainBadge').style.display = 'flex';
                     <div class="log-entry">
                         <div class="log-entry-inner">
                             <div class="log-entry-left">
-                                <span class="badge <?= $badgeClass ?>"><?= htmlspecialchars($row['action_type']) ?></span>
+                                <span class="badge <?= $badgeClass ?>"><?= htmlspecialchars($row['action_type'] ?? '') ?></span>
                                 <strong><?= htmlspecialchars($row['account_type'] ?? '') ?>: <?= htmlspecialchars($row['account_name'] ?? '') ?></strong>
                                 <div>Performed by: <?= htmlspecialchars($row['performed_by'] ?? 'System') ?></div>
-                                <div>Details: <?= htmlspecialchars($row['details']) ?></div>
+                                <div>Details: <?= htmlspecialchars($row['details'] ?? '') ?></div>
                             </div>
-                            <div class="log-entry-right"><?= date('M d, Y h:i A', strtotime($row['created_at'])) ?></div>
+                            <div class="log-entry-right"><?= date('M d, Y h:i A', strtotime($row['created_at'] ?? '')) ?></div>
                         </div>
                     </div>
                 <?php endwhile; ?>
@@ -4653,7 +4880,7 @@ document.getElementById('fabMainBadge').style.display = 'flex';
                     <select name="new_admin_school" id="newAdminSchool" onchange="toggleNewAdminSchoolOther()" style="width:100%;padding:15px;margin-bottom:10px;border:1px solid #eee;border-radius:12px;background:#fafafa;box-sizing:border-box;">
                         <option value="">Select School / Campus Branch</option>
                         <?php foreach ($campus_branches as $cb): ?>
-                            <option value="<?= htmlspecialchars($cb) ?>"><?= htmlspecialchars($cb) ?></option>
+                            <option value="<?= htmlspecialchars($cb ?? '') ?>"><?= htmlspecialchars($cb ?? '') ?></option>
                         <?php endforeach; ?>
                         <option value="__other__">Other (type below)</option>
                     </select>
@@ -5173,7 +5400,7 @@ document.addEventListener('DOMContentLoaded', function () {
         $msg = $_GET['success'];
         if ($msg === 'created')      $notifMsg = 'Account created successfully!';
         elseif ($msg === 'deleted')  $notifMsg = 'Account deleted successfully!';
-        else                         $notifMsg = htmlspecialchars($msg);
+        else                         $notifMsg = htmlspecialchars($msg ?? '');
         ?>
         <?php if ($msg === 'deleted'): ?>
             showNotif('delete', 'Account Deleted', <?= json_encode($notifMsg) ?>);
@@ -6716,15 +6943,196 @@ window.addEventListener('pageshow', function (e) {
         for (var k = 0; k < ICONS.length; k++) { if (cls.indexOf(ICONS[k][0]) !== -1) return ICONS[k][1]; }
         return '';
     }
+    /* ─────────────────────────────────────────────────────────────────────
+       UPDATED (this adjustment): tooltips now say, in a few simple words,
+       WHAT the button does — instead of repeating the button's own name.
+       Order: a description written for that exact button → the button's own
+       title / label when it says more than its name → the description for
+       that kind of button (this page first, then the general list) → the
+       old behaviour as a last resort. Counters are understood, e.g.
+       "Delete (2)" / "Export (Excluding 3)".
+       ───────────────────────────────────────────────────────────────────── */
+    var CV_TIP_GENERAL = {
+        'cancel': 'Close this without saving',
+        'close': 'Close this window',
+        'dismiss': 'Hide this message',
+        'ok': 'Close this message',
+        'ok, got it': 'Close this message',
+        'done': 'Close this summary',
+        'save': 'Save your changes',
+        'save changes': 'Save your changes',
+        'save all': 'Save every course you edited',
+        'yes, delete': 'Delete for good — this cannot be undone',
+        'delete': 'Remove this item',
+        'remove': 'Remove this item',
+        'confirm': 'Yes, go ahead',
+        'continue': 'Go on to the next step',
+        'back': 'Go back to the previous step',
+        'next': 'Go to the next page',
+        'prev': 'Go to the previous page',
+        'previous': 'Go to the previous page',
+        'next page': 'Go to the next page',
+        'previous page': 'Go to the previous page',
+        'next month': 'Show the next month',
+        'previous month': 'Show the previous month',
+        'export excel': 'Download this list as an Excel file',
+        'export to excel': 'Download this list as an Excel file',
+        'export filtered': 'Download only the rows that match your filters',
+        'export': 'Download this list as a file',
+        'export (excluding n)': 'Download the list without the entries you ticked',
+        'none, proceed with export': 'Export everyone in the list',
+        'archive batch': 'Move a finished batch to the archive',
+        'unarchive batch': 'Bring an archived batch back',
+        'unarchive': 'Bring this batch back to the active list',
+        'yes, unarchive': 'Bring the batch back to the active list',
+        'view archived batches': 'See the batches you archived',
+        'view archived company batches': 'See the company batches you archived',
+        'undo': 'Reverse your last action',
+        'refresh': 'Load the latest list',
+        'print': 'Print this page',
+        'save as pdf': 'Download this as a PDF file',
+        'select all': 'Tick every item in this list',
+        'clear': 'Untick every item in this list',
+        'import selected': 'Import only the groups you ticked',
+        'cancel import': 'Stop — nothing from the file is added',
+        'skip these students': 'Import the rest and leave these students out',
+        'no, skip these students': 'Import the rest and leave these students out',
+        'no, skip this student': 'Leave this student out',
+        'skip this student': 'Leave this student out',
+        'yes, add course': 'Add this course to Course Offering first',
+        'add course offering': 'Save this course to Course Offering',
+        'edit': 'Choose one entry, then change it',
+        'edit selected': 'Open the entry you picked for editing',
+        'edit (n)': 'Edit the entries you picked',
+        'delete (n)': 'Delete the entries you picked',
+        'view': 'Open the full details',
+        'full view': 'Open the full application',
+        'details': 'Show the full details',
+        'company details': "Show the company's details",
+        'view requirements': "See this company's requirements",
+        'view pdf': 'Open the document',
+        'view pdf (locked)': 'Open the flagged document (read only)',
+        'send': 'Send your message',
+        'open chat': 'Chat with this company',
+        'preview letter': 'See the letter before sending it',
+        'apply & send endorsement letter': 'Assign the students and email the letter',
+        'approve moa': "Approve this company's MOA",
+        'reject': 'Reject it and say what to fix',
+        'accept': 'Accept this request',
+        'send & request revision': 'Ask the company to fix the flagged items',
+        'set signing schedule': 'Pick the MOA signing date and time',
+        're-schedule': 'Change the MOA signing date',
+        'accept proposed schedule': "Agree to the company's proposed date",
+        'review moa': 'Check the MOA the company sent',
+        'moa workflow': "Track each company's MOA progress",
+        'notification inbox': 'See new company notifications',
+        'requirements': "See the companies' requirements",
+        'requirements /': "See the companies' requirements",
+        'allow': "Approve this student's application",
+        'allow application': "Approve this student's application",
+        'deny': "Decline this student's application",
+        'deny application': "Decline this student's application",
+        'approve & send letter': 'Approve and email the endorsement letter',
+        'application requests': 'See new student application requests',
+        'update id': "Save the student's new ID number",
+        'add student': 'Add a student',
+        'remove student': 'Take this student off the list',
+        'confirm & create admin': 'Create the new admin account',
+        'verify credentials': 'Check the details before creating the account',
+        'verify otp': 'Confirm the code sent by email',
+        'clear history': 'Remove all finished recovery requests',
+        'clear log': 'Remove every activity log entry',
+        'confirm accept': 'Approve this email change',
+        'confirm reject': 'Decline this email change',
+        'accept request': 'Approve this email change request',
+        'reject request': 'Decline this email change request',
+        'history': 'Show requests already handled',
+        'pending': 'Show requests waiting for you',
+        'quick actions': 'Open shortcuts for common tasks',
+        'attendance': 'Show the attendance records',
+        'reports': 'Show the weekly reports',
+        'comment': 'Leave feedback on this report',
+        'edit comment': 'Change your feedback',
+        'save comment': 'Save your feedback',
+        'upload': 'Let the student see this grade',
+        'unupload': 'Hide this grade from the student',
+        'upload selected': 'Show the ticked grades to students',
+        'unupload selected': 'Hide the ticked grades from students',
+        'backup now': 'Make a copy of the database now',
+        'add company manually': 'Open the form to add one company',
+        'add company': 'Save this new company',
+        'import companies': 'Add many companies from an Excel file',
+        'import students': 'Add many students from an Excel file',
+        'log out': 'Sign out of your account',
+        'logout': 'Sign out of your account',
+        'notifications': 'See new notifications',
+        'search': 'Search the list',
+        'filter': 'Narrow down the list',
+        'menu': 'Open the menu'
+    };
+    var CV_TIP_PAGE = {
+        'admin_student_list.php': {
+            'delete': 'Choose students to remove', 'yes': 'Choose students to leave out of the export', 'done': 'Close this summary'
+        },
+        'admin_company_list.php': {
+            'delete': 'Choose companies to remove', 'yes': 'Choose companies to leave out of the export', 'done': 'Close this summary'
+        },
+        'course_offering.php': {
+            'delete': 'Choose courses to remove', 'next course': 'Go to the next course', 'previous course': 'Go to the previous course'
+        },
+        'company_validation.php': { 'done': 'Mark this MOA as completed', 'back': 'Go back to the list' },
+        'admin_final_grades.php': { 'export': 'Download the grades as a file' },
+        'system_setting.php': { 'delete': 'Delete this backup', 'refresh': 'Load the latest backup list' },
+        'monitoring.php': { 'delete': 'Delete this account for good' }
+    };
+    var CV_TIP_EXACT = [   // [CSS selector, description] — for buttons whose words mean different things on the same page
+        ['#toggleBtn', null],
+        ['#addStudentBtn', 'Open the form to add one student'],
+        ['#addStudentForm button[type="submit"]', 'Save this new student'],
+        ['#addCourseOfferingBtn', 'Open the form to add a course'],
+        ['#importAddCourseSubmitBtn', 'Save this course, then continue'],
+        ['#courseOfferingSubmitBtn', 'Save this course'],
+        ['#addCompanyBtn', 'Open the form to add one company'],
+        ['#alogClearBtn', 'Remove every activity log entry'],
+        ['#studentImportFilterCloseBtn', 'Stop — nothing from the file is added'],
+        ['#importClassificationCloseBtn', 'Stop — nothing from the file is added'],
+        ['#exportChoiceCloseBtn', 'Cancel the export'],
+        ['#globalResultOkBtn', 'Close this message']
+    ];
+    var CV_TIP_PAGE_NAME = (window.location.pathname.split('/').pop() || '').toLowerCase();
+    function cvTipKey(t) {
+        return String(t || '').replace(/\s+/g, ' ').trim().toLowerCase()
+            .replace(/^[\u2190\u2192\u2039\u203a\u00ab\u00bb\u00d7\u2715<>\s]+|[\u2190\u2192\u2039\u203a\u00ab\u00bb\u00d7\u2715<>\s]+$/g, '')
+            .replace(/\d+/g, 'n');
+    }
+    function cvTipDescribe(key) {
+        var page = CV_TIP_PAGE[CV_TIP_PAGE_NAME] || {};
+        // try the name as it is, then without a trailing counter ("Pending 3", "Requirements 2 / 5")
+        var keys = [key, String(key).replace(/(\s+n(\s*\/\s*n)?)+$/, '').replace(/\s*\/\s*$/, '').trim()];
+        for (var k = 0; k < keys.length; k++) {
+            if (Object.prototype.hasOwnProperty.call(page, keys[k])) return page[keys[k]];
+            if (Object.prototype.hasOwnProperty.call(CV_TIP_GENERAL, keys[k])) return CV_TIP_GENERAL[keys[k]];
+        }
+        return '';
+    }
     function labelOf(b) {
         if (b.id === 'toggleBtn') {
             var sb = document.getElementById('sidebar');
-            return sb && sb.classList.contains('collapsed') ? 'Expand menu' : 'Collapse menu';
+            return sb && sb.classList.contains('collapsed') ? 'Show the full menu' : 'Make the menu smaller';
         }
-        var t = b.getAttribute('data-cv-tip') || b.getAttribute('aria-label') || b.getAttribute('data-cv-title') || b.getAttribute('title') || '';
-        if (!t) t = b.tagName === 'INPUT' ? (b.value || '') : (b.textContent || '');
-        t = t.replace(/\s+/g, ' ').trim();
-        if (/^[\u00D7\u2715xX]$/.test(t)) t = 'Close';
+        for (var i = 0; i < CV_TIP_EXACT.length; i++) {
+            try { if (CV_TIP_EXACT[i][1] && b.matches(CV_TIP_EXACT[i][0])) return CV_TIP_EXACT[i][1]; } catch (x) {}
+        }
+        var visible = (b.tagName === 'INPUT' ? (b.value || '') : (b.textContent || '')).replace(/\s+/g, ' ').trim();
+        if (/^[\u00D7\u2715xX]$/.test(visible)) visible = 'Close';
+        var own = (b.getAttribute('data-cv-tip') || b.getAttribute('aria-label') || b.getAttribute('data-cv-title') || b.getAttribute('title') || '').replace(/\s+/g, ' ').trim();
+        // the button's own title / label, when it says more than the button's name (more than one word)
+        if (own && own.indexOf(' ') !== -1 && cvTipKey(own) !== cvTipKey(visible) && own.length <= 160 && !cvTipDescribe(cvTipKey(own))) return own;
+        var d = cvTipDescribe(cvTipKey(visible)) || cvTipDescribe(cvTipKey(own));
+        if (!d && (!visible || /^[^A-Za-z0-9]+$/.test(visible))) d = cvTipDescribe(cvTipKey(iconName(b)));
+        if (d) return d;
+        // last resort — the old behaviour
+        var t = own || visible;
         if (!t || /^[^A-Za-z0-9]+$/.test(t)) t = iconName(b);
         return t.length > 60 ? '' : t;     // long text (e.g. whole cards acting as buttons) gets no tooltip
     }
@@ -6894,8 +7302,16 @@ window.addEventListener('pageshow', function (e) {
         });
     }
 
+    // NEW (this adjustment): new requirement submission → administrator.php opens that student's requirements
+    function openStudentUpload(id, uid) {
+        var view = g('cvViewStudentUpload');
+        if (typeof view === 'function') { view(parseInt(id, 10), parseInt(uid, 10)); return; }
+        goTo('administrator.php?open_student_upload=' + encodeURIComponent(id) + '&uid=' + encodeURIComponent(uid));
+    }
+
     function go(spec) {
         var p = String(spec || '').split(':');
+        if (p[0] === 'studentupload') { openStudentUpload(p[1], p[2]); return; }
         if (p[0] === 'notif') openNotif(p[1], p[2], p[3]);
         else if (p[0] === 'app') openApp(p[1]);
         else if (p[0] === 'recovery') openRecovery(p[1]);
@@ -6922,8 +7338,9 @@ window.addEventListener('pageshow', function (e) {
     if (params.get('open_notif')) spec = 'notif:' + params.get('open_notif') + ':' + (params.get('uid') || 0) + ':' + (params.get('type') || 'new_request');
     else if (params.get('open_app_request')) spec = 'app:' + params.get('open_app_request');
     else if (params.get('open_recovery')) spec = 'recovery:' + params.get('open_recovery');
+    else if (params.get('open_student_upload')) spec = 'studentupload:' + params.get('open_student_upload') + ':' + (params.get('uid') || 0);   // NEW (this adjustment)
     if (spec) {
-        ['open_notif', 'uid', 'type', 'open_app_request', 'open_recovery'].forEach(function (k) { params.delete(k); });
+        ['open_notif', 'uid', 'type', 'open_app_request', 'open_recovery', 'open_student_upload'].forEach(function (k) { params.delete(k); });
         if (window.history.replaceState) {
             var q = params.toString();
             window.history.replaceState({}, document.title, window.location.pathname + (q ? '?' + q : '') + window.location.hash);
@@ -6931,6 +7348,91 @@ window.addEventListener('pageshow', function (e) {
         var start = function () { setTimeout(function () { go(spec); }, 600); };
         if (document.readyState === 'complete') start(); else window.addEventListener('load', start);
     }
+})();
+</script>
+<!-- ══════════════════════════════════════════════════════════════════════
+     NEW (this adjustment) — NEW REQUIREMENT SUBMISSION POPUP + INDICATOR
+     Same design and behaviour as the other popups on this page (and as
+     company_validation.php's "uploaded new requirement document(s)" popup):
+     checked right away and then every 4 s; submissions that were already
+     waiting when the page opened do not pop up; each one pops up once (a
+     further file merged into it pops up again, listing everything); clicking
+     it opens that student's requirements (administrator.php). The Student Validation indicator is
+     kept in step with the Inbox total (application requests + submissions).
+     Ported from administrator.php: the submissions list, the detection and the
+     indicator count all come from administrator.php?student_upload_list=1, so
+     every admin page shows the same popups once, whichever page is open.
+     ══════════════════════════════════════════════════════════════════════ -->
+<script>
+(function () {
+    'use strict';
+    if (window._cvStudentUploadPopupReady) return;
+    window._cvStudentUploadPopupReady = true;
+    var SRU_ENDPOINT    = 'administrator.php?student_upload_list=1';
+    var SRU_POLL_MS     = 4000;
+    var SRU_TOAST_MS    = 7000;
+    var SRU_STORE_KEY   = 'cvStudentUploadKnown';
+    var SRU_STORE_FRESH = 45000;
+    var known = null, inFlight = false;
+    function esc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
+    function sigOf(r) { return String(r.id) + '@' + String(r.sig || ''); }
+    function readStore() {
+        try {
+            var o = JSON.parse(sessionStorage.getItem(SRU_STORE_KEY) || 'null');
+            if (!o || !Array.isArray(o.ids) || (Date.now() - (o.ts || 0)) > SRU_STORE_FRESH) return null;
+            return new Set(o.ids.map(String));
+        } catch (e) { return null; }
+    }
+    function writeStore() { if (!known) return; try { sessionStorage.setItem(SRU_STORE_KEY, JSON.stringify({ ids: Array.from(known), ts: Date.now() })); } catch (e) {} }
+    function layoutToasts() {
+        if (typeof window.cvLayoutTopToasts === 'function') { window.cvLayoutTopToasts(); return; }
+        var top = 30, undo = document.getElementById('undoToast');
+        if (undo && undo.classList.contains('show')) top = Math.max(top, undo.getBoundingClientRect().bottom + 12);
+        document.querySelectorAll('.cv-top-toast').forEach(function (el) { el.style.top = top + 'px'; top += el.offsetHeight + 12; });
+    }
+    function showPopup(r) {
+        var labels = (r.items || []).map(function (i) { return i.label || i.key || ''; }).filter(Boolean);
+        var what = labels.length === 1 ? 'a new requirement: ' + labels[0] : (labels.length + ' new requirements: ' + labels.join(', '));
+        var div = document.createElement('div');
+        div.className = 'cv-top-toast';
+        div.setAttribute('role', 'status');
+        div.innerHTML = '<i class="fas fa-file-arrow-up"></i><span><strong>' + esc(r.full_name || 'A student') + '</strong> submitted ' + esc(what) + ' \u2014 check the Application Requests inbox.</span>';
+        document.body.appendChild(div);
+        if (window.cvTagToast) window.cvTagToast(div, 'studentupload:' + r.id + ':' + r.user_id);   // clickable
+        layoutToasts();
+        requestAnimationFrame(function () { div.classList.add('show'); });
+        setTimeout(function () { div.classList.remove('show'); setTimeout(function () { div.remove(); layoutToasts(); }, 400); }, SRU_TOAST_MS);
+    }
+    function setBadge(count) {
+        var badge = document.getElementById('sidebarAppBadge');
+        if (!badge) return;
+        count = parseInt(count, 10) || 0;
+        badge.textContent = count;
+        badge.style.display = count > 0 ? 'inline-flex' : 'none';
+    }
+    function poll() {
+        if (inFlight || document.hidden) return;
+        inFlight = true;
+        fetch(SRU_ENDPOINT, { credentials: 'same-origin', cache: 'no-store' })
+            .then(function (r) { return r.json(); })
+            .then(function (d) {
+                inFlight = false;
+                if (!d || !d.success || !Array.isArray(d.rows)) return;
+                var now = new Set(d.rows.map(sigOf));
+                setBadge(d.count);
+                if (typeof window.cvRenderStudentUploads === 'function') window.cvRenderStudentUploads(d.rows);   // administrator.php's Inbox, if open
+                if (known === null) { known = readStore() || now; if (known === now) { writeStore(); return; } }
+                var fresh = d.rows.filter(function (r) { return !known.has(sigOf(r)); });
+                known = now; writeStore();
+                fresh.forEach(showPopup);
+            })
+            .catch(function () { inFlight = false; });
+    }
+    setTimeout(function () { poll(); setInterval(poll, SRU_POLL_MS); }, 0);
+    document.addEventListener('visibilitychange', function () { if (!document.hidden && known !== null) poll(); });
+    window.addEventListener('focus', function () { if (known !== null) poll(); });
+    window.addEventListener('pageshow', function (e) { if (e.persisted) poll(); });
+    window.addEventListener('pagehide', writeStore);
 })();
 </script>
 </body>
