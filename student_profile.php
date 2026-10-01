@@ -2626,9 +2626,24 @@ function addDynamicField(group, inputName, prefix) {
     renumberEntries(group, prefix);
     updateRemoveButtonsState(group);
     drRepaginateResume(function() {
-        textarea.focus();
-        if (typeof textarea.scrollIntoView === 'function') {
-            textarea.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        /* ADJUSTMENT: the new field may have landed on another resume page — go to that page first (a field on a hidden
+           page cannot take focus), then focus and scroll to it. Falls back to the group's last field if the element
+           is no longer attached. */
+        let target = textarea.isConnected ? textarea : null;
+        if (!target) {
+            const all = document.querySelectorAll('#drPagesWrap textarea[name="' + inputName + '"]');
+            target = all.length ? all[all.length - 1] : null;
+        }
+        if (target) {
+            const paper = target.closest('.dr-paper');
+            const pages = Array.prototype.slice.call(document.querySelectorAll('#drPagesWrap .dr-paper'));
+            const at = paper ? pages.indexOf(paper) : -1;
+            if (at > -1 && at !== drCurrentPageIndex) drShowPage(at);
+        }
+        const focusEl = target || textarea;
+        focusEl.focus();
+        if (typeof focusEl.scrollIntoView === 'function') {
+            focusEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
         }
     });
 }
@@ -2687,6 +2702,19 @@ const DR_CONTENT_WIDTH  = DR_PAGE_W - (28 * 2);
 const DR_BLOCK_GAP      = 10;
 const DR_SAFETY_BUFFER  = 10;
 let   drCurrentPageIndex = 0;
+
+/* ADJUSTMENT (stay on the resume page after a reload): same idea as AccomForm.php's remembered section — the A4 resume
+   page the student was on is kept in sessionStorage (per student) and restored when the page loads again (a refresh, the
+   refresh after "Update Resume", coming back from another page). It is read here, synchronously, before any repagination
+   can write page 1 over it. The first visit, a missing / unreadable value or storage being blocked all fall back to
+   page 1 as before; repagination clamps the number if the resume now has fewer pages. */
+const DR_PAGE_STORAGE_KEY = 'ojt_profile_resume_page_' + <?= json_encode((int)$user_id) ?>;
+(function () {
+    try {
+        const saved = parseInt(sessionStorage.getItem(DR_PAGE_STORAGE_KEY) || '', 10);
+        if (!isNaN(saved) && saved > 0) drCurrentPageIndex = saved;
+    } catch (e) {}
+})();
 
 function drMeasureSandboxHeight(elements, width) {
     const w = width || DR_CONTENT_WIDTH;
@@ -2843,6 +2871,7 @@ function drShowPage(index) {
     if (index < 0) index = 0;
     if (index > pages.length - 1) index = pages.length - 1;
     drCurrentPageIndex = index;
+    try { sessionStorage.setItem(DR_PAGE_STORAGE_KEY, String(index)); } catch (e) {}   /* ADJUSTMENT: remembered for the next load */
 
     pages.forEach((p, i) => {
         p.classList.toggle('dr-page-active', i === index);
