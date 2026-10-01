@@ -4011,8 +4011,6 @@ $cfLiveState = [
             min-width: 0; /* allow long labels/filenames to ellipsis instead of overflowing their column */
         }
         .req-grid .compliance-req-item:last-child { margin-bottom: 14px; }
-        /* MOA requirement card on the Company Details & MOA page: one card, kept at a normal card width */
-        .req-grid.cf-info-moa-grid { grid-template-columns: repeat(auto-fill, minmax(190px, 260px)); }
 
         /* ══════════════════════════════════════════════════════════════
            ADJUSTMENT (this revision) — REQUESTED LAYOUT CHANGE ONLY:
@@ -5266,7 +5264,7 @@ $cfLiveState = [
                 <?php
                 // ADJUSTMENT: which page opens first — the Requirements page when the administrator
                 // flagged the MOA for revision (that panel lives there), otherwise Company Information.
-                $cfInitialPage = !empty($moa_needs_revision) ? 'cf-requirements-page' : 'cf-info-page';
+                $cfInitialPage = 'cf-info-page';   // the MOA Document Status / revision panel now lives on this page
                 ?>
                 <div class="cf-page-switcher">
                     <button type="button" class="cf-switch-page-btn" data-page="cf-info-page">
@@ -5276,292 +5274,6 @@ $cfLiveState = [
                         <i class="fas fa-clipboard-check"></i> Requirements
                     </button>
                 </div>
-
-<?php
-// ADJUSTMENT: one requirement card, rendered by a closure so the SAME markup (ids, data attributes, input names, status
-// logic) can be used in the Requirements grid and for the MOA requirement on the Company Information page.
-$cfRenderReqCard = function ($reqKey, $reqLabel) use ($company_requirement_rows, $moa_existing_reqs) {
-                        $isMoaExistingItem = array_key_exists($reqKey, $moa_existing_reqs);
-
-                        // FIX (this update): $rowsForKey is now the FULL
-                        // ARRAY of every company_requirements row saved
-                        // under this requirement_type (see the fetch query
-                        // above), not just one. A requirement with 2+ saved
-                        // files renders as a single overlaying "stacked
-                        // card" entry further down, mirroring the same
-                        // visual already used for a fresh multi-file
-                        // selection in company_register.php's Step 3.
-                        $reqAllRows   = $company_requirement_rows[$reqKey] ?? [];
-                        // UPDATED (this adjustment): when the admin REJECTS a requirement its file(s) are removed but the
-                        // rows stay (status "Rejected" + the admin's remark), so that the company can see why. Only rows
-                        // that still hold a file are files — for the count, the stacked card and the preview — while the
-                        // status below is still worked out from EVERY row. Before, those emptied rows were counted as
-                        // files, so a rejected requirement kept showing "N files" / a broken "Preview unavailable" tile.
-                        $rowsForKey   = array_values(array_filter($reqAllRows, function ($rrf) { return !empty($rrf['file_name']); }));
-                        $reqFileCount = count($rowsForKey);
-                        $reqHasFile   = $reqFileCount > 0;
-
-                        // Aggregate status across every file saved for this
-                        // requirement: Denied takes priority (it needs the
-                        // company's attention), then Pending, and only
-                        // Verified when EVERY file for this requirement has
-                        // individually been verified.
-                        $reqStatus = null;
-                        $reqRemark = '';
-                        if (!empty($reqAllRows)) {
-                            $hasDenied = false; $hasNonVerified = false;
-                            foreach ($reqAllRows as $rr) {
-                                $st = $rr['status'] ?? 'Pending';
-                                if (cfIsRejectedStatus($st)) {
-                                    $hasDenied = true;
-                                    if (empty($reqRemark) && !empty($rr['remark'])) $reqRemark = $rr['remark'];
-                                }
-                                if ($st !== 'Verified') $hasNonVerified = true;
-                            }
-                            if ($hasDenied) $reqStatus = 'Rejected';
-                            elseif ($hasNonVerified) $reqStatus = 'Pending';
-                            else $reqStatus = 'Verified';
-                        }
-
-                        // Per-file metadata (id + whether it's a PDF) for
-                        // the overlaying card / preview modal below.
-                        $reqFileMetaList = [];
-                        foreach ($rowsForKey as $rr) {
-                            $isPdfRow = false;
-                            if (!empty($rr['file_name'])) {
-                                $finfo_rr = new finfo(FILEINFO_MIME_TYPE);
-                                $mime_rr  = $finfo_rr->buffer($rr['file_name']);
-                                $isPdfRow = (strpos($mime_rr, 'pdf') !== false || strpos($mime_rr, 'octet') !== false);
-                            }
-                            $reqFileMetaList[] = ['id' => (int) $rr['id'], 'isPdf' => $isPdfRow];
-                        }
-                        $reqFileMetaJson = htmlspecialchars(json_encode($reqFileMetaList), ENT_QUOTES);
-
-                        // The internal token stays 'denied' (the status-aware CSS and JS below key on it); only the LABEL shown to the company changed.
-                        $badgeClass = ($reqStatus === 'Rejected') ? 'denied' : ($reqStatus ? strtolower($reqStatus) : 'not-submitted');
-                        $badgeLabel = $reqStatus ?: 'Not Submitted';
-                        $cfCardSig  = cfLiveRowsSig($reqAllRows); // LIVE UPDATES: changes whenever this requirement's rows change
-                    ?>
-                    <!-- NEW (this revision) — STATUS DETECTION HOOKS.
-                         The card now carries the requirement's real,
-                         server-computed status (the very same $badgeClass /
-                         $badgeLabel values that already render the status
-                         pill inside it), plus whether it currently has any
-                         saved file and how many. The status-aware CSS above
-                         keys off data-req-status directly, so the card's
-                         appearance updates the moment the page renders —
-                         no click, no extra request. The script at the
-                         bottom reads the same attributes to apply the
-                         behavioural parts (drop-zone wording, the "Action
-                         required" flag, and the Denied-only staged-note
-                         rule). Purely additive attributes: no existing id,
-                         class, input name, PHP branch or logic changed. -->
-                    <div class="compliance-req-item"
-                         data-req-status="<?= htmlspecialchars($badgeClass, ENT_QUOTES) ?>"
-                         data-req-status-label="<?= htmlspecialchars($badgeLabel, ENT_QUOTES) ?>"
-                         data-req-key="<?= htmlspecialchars($reqKey, ENT_QUOTES) ?>"
-                         data-req-has-file="<?= $reqHasFile ? '1' : '0' ?>"
-                         data-req-file-count="<?= (int) $reqFileCount ?>"
-                         data-live-sig="<?= htmlspecialchars($cfCardSig, ENT_QUOTES) ?>">
-                        <div class="compliance-req-top">
-                            <!-- ADJUSTMENT (this revision): the requirement name is now the
-                                 FIRST element in the card, above the file preview. Same
-                                 markup, same .req-info class and same $reqLabel / MOA-tag
-                                 output as before — only its position in the card moved. -->
-                            <div class="req-info">
-                                <?= htmlspecialchars($reqLabel) ?>
-                                <?php if ($isMoaExistingItem): ?>
-                                    <span class="req-moa-tag">MOA Upload</span>
-                                <?php endif; ?>
-                            </div>
-
-                            <!-- NEW: every file-preview variant (single thumb/PDF tile, the
-                                 multi-file stack, or the empty placeholder) now lives inside
-                                 this single wrapper so JS can swap it out as one unit the
-                                 instant the company selects a new/replacement file. -->
-                            <?php
-                            // ADJUSTMENT (this revision): Pending / Rejected use the admin panel's display —
-                            // status pill on the preview's top-right corner (see .req-card-ribbon CSS).
-                            $reqUsesRibbon = true; // ADJUSTMENT: the status pill is now shown for every state (Verified / Pending / Rejected / Not Submitted), like AccomForm.php
-                            $reqRejPanel   = ($reqStatus === 'Rejected' && !$reqHasFile); // preview is the "Awaiting re-upload" placeholder
-                            ?>
-                            <div class="req-preview-wrap<?= $reqRejPanel ? ' req-preview-wrap--rejected' : '' ?>">
-                            <div class="req-preview-slot" id="reqPreviewSlot_<?= htmlspecialchars($reqKey) ?>" data-req-key="<?= htmlspecialchars($reqKey, ENT_QUOTES) ?>">
-                            <?php if ($reqHasFile && $reqFileCount === 1): ?>
-                                <!-- Single saved file — same plain thumbnail / PDF badge as before,
-                                     now enlarged (see .req-thumb-wrap / .req-thumb-img CSS) to match
-                                     the height of the upload/reupload button. -->
-                                <?php if ($reqFileMetaList[0]['isPdf']): ?>
-                                    <div class="req-thumb-wrap creq-preview-trigger" data-req-key="<?= htmlspecialchars($reqKey, ENT_QUOTES) ?>" data-req-files="<?= $reqFileMetaJson ?>" data-req-label="<?= htmlspecialchars($reqLabel, ENT_QUOTES) ?>" title="Preview <?= htmlspecialchars($reqLabel) ?>">
-                                        <i class="fas fa-file-pdf"></i>
-                                    </div>
-                                <?php else: ?>
-                                    <!-- ADJUSTMENT (this revision): if this file can no longer be streamed
-                                         back (e.g. the admin removed the blob when denying it, or the stored
-                                         bytes aren't a renderable image), the browser would otherwise show a
-                                         broken-image icon with the alt/title text spilling across the tile.
-                                         The inline onerror below swaps the <img> for the SAME neutral
-                                         placeholder tile used by a requirement with no file yet, so the card
-                                         keeps its shape. It is self-contained (no helper function, so it works
-                                         even if the error fires before the page's scripts run) and touches
-                                         nothing else — the status badge, denial reason and upload area are
-                                         all still rendered exactly as before. -->
-                                    <img class="req-thumb-img creq-preview-trigger" data-req-key="<?= htmlspecialchars($reqKey, ENT_QUOTES) ?>" data-req-files="<?= $reqFileMetaJson ?>" data-req-label="<?= htmlspecialchars($reqLabel, ENT_QUOTES) ?>"
-                                        src="CompanyForm.php?stream_own_requirement=<?= urlencode($reqKey) ?>&file_id=<?= (int) $reqFileMetaList[0]['id'] ?>"
-                                        alt=""
-                                        onerror="this.onerror=null;var d=document.createElement('div');d.className='req-thumb-empty';d.setAttribute('aria-hidden','true');var ic=document.createElement('i');ic.className='fas fa-file-circle-xmark';var sp=document.createElement('span');sp.textContent='Preview unavailable';d.appendChild(ic);d.appendChild(sp);if(this.parentNode){this.parentNode.replaceChild(d,this);}"
-                                        title="Preview <?= htmlspecialchars($reqLabel) ?>">
-                                <?php endif; ?>
-                            <?php elseif ($reqHasFile && $reqFileCount > 1): ?>
-                                <!-- FIX (this update): 2+ saved files for this requirement — show as one
-                                     overlaying "stacked card" entry instead of only ever displaying the
-                                     last-fetched row. Click opens the preview modal, which can page
-                                     through every file via prev/next (see the JS further down).
-                                     ADJUSTMENT (this revision): stack enlarged (see .req-file-stack CSS)
-                                     to match the enlarged single-file thumbnail / button height. -->
-                                <div class="req-file-stack-wrap creq-preview-trigger" data-req-key="<?= htmlspecialchars($reqKey, ENT_QUOTES) ?>" data-req-files="<?= $reqFileMetaJson ?>" data-req-label="<?= htmlspecialchars($reqLabel, ENT_QUOTES) ?>" title="Preview all <?= (int) $reqFileCount ?> files for <?= htmlspecialchars($reqLabel) ?>">
-                                    <div class="req-file-stack">
-                                        <?php
-                                        $layerCount = min(3, $reqFileCount);
-                                        for ($li = $layerCount - 1; $li >= 0; $li--):
-                                            $layerMeta = $reqFileMetaList[$li];
-                                        ?>
-                                        <?php if ($layerMeta['isPdf']): ?>
-                                            <div class="req-stack-layer req-stack-layer-pdf layer-<?= $li + 1 ?>"><i class="fas fa-file-pdf"></i></div>
-                                        <?php else: ?>
-                                            <div class="req-stack-layer layer-<?= $li + 1 ?>" style="background-image:url('CompanyForm.php?stream_own_requirement=<?= urlencode($reqKey) ?>&file_id=<?= (int) $layerMeta['id'] ?>');"></div>
-                                        <?php endif; ?>
-                                        <?php endfor; ?>
-                                        <span class="req-stack-count-badge"><?= (int) $reqFileCount ?></span>
-                                    </div>
-                                    <div class="req-file-stack-label"><?= (int) $reqFileCount ?> files</div>
-                                </div>
-                            <?php else: ?>
-                                <!-- ADJUSTMENT (this revision): nothing has been uploaded for this
-                                     requirement yet, so the preview slot shows a neutral placeholder
-                                     tile instead of collapsing. This keeps every card in the grid the
-                                     same shape, exactly as in the supplied design. It is decorative
-                                     only — no preview trigger, no data attributes, no inputs, and it
-                                     never renders once a file exists. -->
-                                <?php if ($reqStatus === 'Rejected'): ?>
-                                <!-- ADJUSTMENT (this revision): a rejected requirement's file was removed by the admin —
-                                     shown with the same pink dashed "Rejected / Awaiting re-upload" placeholder the
-                                     admin panel uses (company_validation.php's .cv-rej-placeholder). -->
-                                <div class="req-rej-placeholder" aria-hidden="true">
-                                    <i class="fas fa-file-circle-xmark"></i>
-                                    <span>Awaiting re-upload</span>
-                                </div>
-                                <?php else: ?>
-                                <div class="req-thumb-empty" aria-hidden="true">
-                                    <i class="fas fa-hourglass-half"></i>
-                                    <span>No file yet</span>
-                                </div>
-                                <?php endif; ?>
-                            <?php endif; ?>
-                            </div>
-                            <?php if ($reqUsesRibbon): ?>
-                            <!-- ADJUSTMENT (this revision): the status pill on the preview's top-right corner. It keeps the
-                                 same id (reqStatusBadge_<key>) and status class the staging JS below already targets. -->
-                            <div class="req-card-ribbon <?= htmlspecialchars($badgeClass) ?>" id="reqStatusBadge_<?= htmlspecialchars($reqKey) ?>">
-                                <?php if ($reqStatus === 'Rejected'): ?>
-                                    <span class="req-rb req-rb-rejected"><i class="fas fa-ban"></i> <?= htmlspecialchars($badgeLabel) ?></span>
-                                <?php elseif ($reqStatus === 'Verified'): ?>
-                                    <span class="req-rb req-rb-verified"><i class="fas fa-check"></i> <?= htmlspecialchars($badgeLabel) ?></span>
-                                <?php elseif ($reqStatus): ?>
-                                    <span class="req-rb req-rb-pending"><?= htmlspecialchars($badgeLabel) ?></span>
-                                <?php else: ?>
-                                    <span class="req-rb req-rb-awaiting"><?= htmlspecialchars($badgeLabel) ?></span>
-                                <?php endif; ?>
-                            </div>
-                            <?php endif; ?>
-                            </div><!-- /.req-preview-wrap -->
-
-                            <!-- ADJUSTMENT (this revision): wrapped in .compliance-req-info so the
-                                 name / status block is its own vertically-centered flex column
-                                 between the file display and the action button.
-
-                                 ── UPDATED (this adjustment): status, the denial remark, and the
-                                 "action required" reminder used to be three separate stacked
-                                 elements (a status-badge pill, a remark-badge, and a CSS-only
-                                 "req-action-required" flag) — they are now ONE combined info box
-                                 (.req-status-combined) built from the exact same $badgeClass /
-                                 $badgeLabel / $reqRemark values as before, just presented together.
-                                 It keeps the same id (reqStatusBadge_<key>) the staging JS below
-                                 already hides on file-select, so that behavior is unchanged; the
-                                 separate remark-badge id and the CSS-only "req-action-required"
-                                 flag are retired since everything now lives in this one element. -->
-                            <?php /* ADJUSTMENT (this revision): a Verified requirement no longer shows the green "Verified" status box above the
-                                      "Verified — no further action needed" lock — the info block is hidden entirely so it leaves no empty gap. */ ?>
-                            <?php /* ADJUSTMENT (this revision): a Pending requirement now shows only the corner pill above, so its info block is hidden too (no empty gap). A Rejected one keeps this block for the "Remark:" box below. */ ?>
-                            <div class="compliance-req-info"<?= ($reqStatus === 'Verified' || $reqStatus === 'Pending' || !$reqStatus) ? ' style="display:none;"' : '' ?>>
-                                <?php if ($reqStatus === 'Rejected'): ?>
-                                <!-- ADJUSTMENT (this revision): the admin's rejection remark in its own pink "Remark:" box
-                                     (company_validation.php's .cv-card-remark). Same $reqRemark value as before; hidden by JS
-                                     the moment a replacement file is staged, together with the pill. -->
-                                <div class="req-card-remark" id="reqRemarkBox_<?= htmlspecialchars($reqKey) ?>"><i class="fas fa-comment-dots"></i><span><b>Remark:</b> <span class="req-card-remark-text"><?= htmlspecialchars(((string) $reqRemark) !== '' ? (string) $reqRemark : '—') ?></span></span></div>
-                                <?php endif; ?>
-                                <?php if (!$reqUsesRibbon && $reqStatus !== 'Verified'): ?>
-                                <div class="req-status-combined <?= htmlspecialchars($badgeClass) ?>" id="reqStatusBadge_<?= htmlspecialchars($reqKey) ?>">
-                                    <div class="req-status-combined-top">
-                                        <?php if ($reqStatus === 'Verified'): ?>
-                                            <i class="fas fa-check-circle"></i>
-                                        <?php elseif ($reqStatus === 'Rejected'): ?>
-                                            <i class="fas fa-times-circle"></i>
-                                        <?php elseif ($reqStatus): ?>
-                                            <i class="fas fa-clock"></i>
-                                        <?php else: ?>
-                                            <i class="fas fa-minus-circle"></i>
-                                        <?php endif; ?>
-                                        <span><?= htmlspecialchars($badgeLabel) ?></span>
-                                    </div>
-                                    <?php if ($reqStatus === 'Rejected'): ?>
-                                        <?php if (!empty($reqRemark)): ?>
-                                        <div class="req-status-combined-detail">Reason: <?= htmlspecialchars($reqRemark) ?></div>
-                                        <?php endif; ?>
-                                        <div class="req-status-combined-detail">Please re-upload this document.</div>
-                                    <?php endif; ?>
-                                </div>
-                                <?php endif; ?>
-
-                                <!-- NEW: hidden-by-default note shown by JS in place of the combined
-                                     status box above the instant a replacement file is staged for
-                                     THIS item — but only when this item was originally Denied (see
-                                     the wasDenied check in the change handler in the script below). -->
-                                <div class="req-staged-note" id="reqStagedNote_<?= htmlspecialchars($reqKey) ?>" style="display:none;">
-                                    <i class="fas fa-rotate"></i> New file selected — ready to resubmit
-                                </div>
-                            </div>
-
-                            <!-- ADJUSTMENT (this revision): the verified-lock badge / upload button
-                                 is now its own .compliance-req-action flex column, vertically
-                                 centered beside the file display and info block above, instead of
-                                 being stacked underneath the status badge inside the info column. -->
-                            <div class="compliance-req-action">
-                                <?php if ($reqStatus === 'Verified'): ?>
-                                    <div class="verified-lock">
-                                        <i class="fas fa-check-circle"></i> Verified — no further action needed
-                                    </div>
-                                <?php else: ?>
-                                    <div class="req-file-drop" id="reqDrop_c_<?= htmlspecialchars($reqKey) ?>" onclick="document.getElementById('reqFileInput_<?= htmlspecialchars($reqKey) ?>').click()">
-                                        <span class="req-file-icon"><i class="fas fa-upload"></i></span>
-                                        <span class="req-file-text" id="reqFileText_<?= htmlspecialchars($reqKey) ?>">
-                                            <?= ($reqStatus === 'Rejected') ? 'Re-upload' : ($reqHasFile ? 'Click to replace file(s)' : 'Click to upload') ?>
-                                        </span>
-                                    </div>
-                                    <!-- FIX (this update): now accepts multiple files (name="req_<key>[]"),
-                                         matching company_register.php's Step 3 requirement uploads. A hidden
-                                         "_expected_count" field (kept in sync by JS below) lets the server
-                                         detect and report a request that silently loses files in transit. -->
-                                    <input type="file" id="reqFileInput_<?= htmlspecialchars($reqKey) ?>" name="req_<?= htmlspecialchars($reqKey) ?>[]" multiple
-                                        class="compliance-file-input" data-label="<?= htmlspecialchars($reqLabel) ?>" data-req-key="<?= htmlspecialchars($reqKey, ENT_QUOTES) ?>"
-                                        accept="image/*,.pdf,application/pdf" style="display:none;">
-                                    <input type="hidden" id="reqCount_c_<?= htmlspecialchars($reqKey) ?>" name="req_<?= htmlspecialchars($reqKey) ?>_expected_count" value="0">
-                                <?php endif; ?>
-                            </div>
-                        </div>
-                    </div>
-<?php };
-?>
 
                 <div id="cf-info-page" class="cf-page-content">
 
@@ -5963,33 +5675,6 @@ $cfRenderReqCard = function ($reqKey, $reqLabel) use ($company_requirement_rows,
                 </div><!-- /#cfCompanyInfoRegion -->
                 <?php endif; ?>
 
-                <?php
-                // ADJUSTMENT: the MOA requirement (the "MOA Document (Existing Partnership)" upload, only present for
-                // "Existing" request-type companies) now sits here on the Company Information page, directly below
-                // Company Profile / Brief Description. It is the same card as before (same ids, input names, status
-                // pill, preview and upload behaviour) and is saved by this page's Save Changes button through the
-                // same submit_compliance_docs handler. "New" request-type companies are unaffected (no such item).
-                $cfInfoMoaKeys = array_values(array_filter(array_keys($reqDefsForType), function ($k) use ($moa_existing_reqs) {
-                    return array_key_exists($k, $moa_existing_reqs);
-                }));
-                ?>
-                <?php if (!empty($cfInfoMoaKeys)): ?>
-                <div class="cf-info-moa-section" id="cfInfoMoaSection">
-                    <h3 style="color: var(--neust-maroon); font-size: 16px; margin: 28px 0 4px;">
-                        <i class="fas fa-file-signature" style="margin-right: 10px;"></i>MOA Requirement
-                    </h3>
-                    <p style="font-size:12px;color:#718096;margin:0 0 16px;">
-                        Since your MOA request type is <strong>Existing</strong>, please upload your MOA document here, then click <strong>Save Changes</strong> below.
-                        Accepted: PDF or any picture format &middot; Max <?= (int) $reqMaxFileSizeMB ?> MB per file.
-                    </p>
-                    <div class="compliance-status-card">
-                        <div class="req-grid cf-info-moa-grid">
-                        <?php foreach ($cfInfoMoaKeys as $cfMoaKey) { $cfRenderReqCard($cfMoaKey, $reqDefsForType[$cfMoaKey]); } ?>
-                        </div>
-                    </div>
-                </div>
-                <?php endif; ?>
-
                 <?php if ($moa_needs_initial_creation): ?>
 
                 <!-- ═══════════════════════════════════════════════
@@ -6029,19 +5714,7 @@ $cfRenderReqCard = function ($reqKey, $reqLabel) use ($company_requirement_rows,
                 </div>
                 <?php endif; ?>
 
-                <?php if (!$moa_needs_initial_creation): ?>
-                <?php // ADJUSTMENT: the info page's own submit button — saves the editable profile fields (same submit_compliance_docs handler as before). ?>
-                <div class="cf-info-save-row">
-                    <button type="submit" name="submit_compliance_docs" value="1" class="submit-all">
-                        <i class="fas fa-save" style="margin-right:8px;"></i>Save Changes
-                    </button>
-                </div>
-                <?php endif; ?>
-
-                </div><!-- /#cf-info-page -->
-
-                <div id="cf-requirements-page" class="cf-page-content">
-
+                <?php // ADJUSTMENT: MOA Document Status — moved here from the Requirements page so it sits right below Company Profile / Brief Description. Markup, ids and logic are unchanged; it is still shown only for "New" request-type companies ($showMoaSection). ?>
                 <?php if ($showMoaSection): ?>
                 <!-- ═══════════════════════════════════════════════
                      ADJUSTMENT: The entire "MOA Document Status"
@@ -6379,6 +6052,21 @@ $cfRenderReqCard = function ($reqKey, $reqLabel) use ($company_requirement_rows,
                 </div>
                 <?php endif; // end $showMoaSection ?>
 
+                <?php if (!$moa_needs_initial_creation): ?>
+                <?php // ADJUSTMENT: the info page's own submit button — saves the editable profile fields (same submit_compliance_docs handler as before). ?>
+                <div class="cf-info-save-row">
+                    <button type="submit" name="submit_compliance_docs" value="1" class="submit-all">
+                        <i class="fas fa-save" style="margin-right:8px;"></i>Save Changes
+                    </button>
+                </div>
+                <?php endif; ?>
+
+                </div><!-- /#cf-info-page -->
+
+                <div id="cf-requirements-page" class="cf-page-content">
+
+                <?php // ADJUSTMENT: the MOA Document Status section now lives on the Company Information page (see below Company Profile / Brief Description). ?>
+
 
                 <!-- ═══════════════════════════════════════════════
                      COMPLIANCE REQUIREMENTS (NEW) — classification-based
@@ -6479,7 +6167,7 @@ $cfRenderReqCard = function ($reqKey, $reqLabel) use ($company_requirement_rows,
                 <p style="font-size:12px;color:#718096;margin:0 0 16px;">
                     Accepted: PDF or any picture format (JPG, PNG, GIF, WEBP, BMP, ...) &middot; picture uploads support selecting multiple files, but PDF uploads are limited to one file &middot; Max <?= (int)$reqMaxFileSizeMB ?>MB each. Uploading a new file for an item resubmits it for review.
                     <?php if ($moa_request_type_norm === 'existing'): ?>
-                        Since your MOA request type is <strong>Existing</strong>, your MOA document is uploaded under <strong>MOA Requirement</strong> on the <strong>Company Details &amp; MOA</strong> page.
+                        Since your MOA request type is <strong>Existing</strong>, please also upload your MOA document below.
                     <?php endif; ?>
                 </p>
 
@@ -6555,14 +6243,286 @@ $cfRenderReqCard = function ($reqKey, $reqLabel) use ($company_requirement_rows,
                     <?php
                     $anyComplianceItemShown = false;
                     foreach ($reqDefsForType as $reqKey => $reqLabel):
-                        // ADJUSTMENT: the "MOA Document (Existing Partnership)" requirement now lives on the Company
-                        // Information page (under Company Profile / Brief Description) — see $cfRenderReqCard above.
-                        // It is still part of $reqDefsForType, so it stays counted in the status summary and saved by
-                        // the same submit_compliance_docs handler; it is only skipped in this grid.
-                        if (array_key_exists($reqKey, $moa_existing_reqs)) { continue; }
                         $anyComplianceItemShown = true;
-                        $cfRenderReqCard($reqKey, $reqLabel);
+                        $isMoaExistingItem = array_key_exists($reqKey, $moa_existing_reqs);
+
+                        // FIX (this update): $rowsForKey is now the FULL
+                        // ARRAY of every company_requirements row saved
+                        // under this requirement_type (see the fetch query
+                        // above), not just one. A requirement with 2+ saved
+                        // files renders as a single overlaying "stacked
+                        // card" entry further down, mirroring the same
+                        // visual already used for a fresh multi-file
+                        // selection in company_register.php's Step 3.
+                        $reqAllRows   = $company_requirement_rows[$reqKey] ?? [];
+                        // UPDATED (this adjustment): when the admin REJECTS a requirement its file(s) are removed but the
+                        // rows stay (status "Rejected" + the admin's remark), so that the company can see why. Only rows
+                        // that still hold a file are files — for the count, the stacked card and the preview — while the
+                        // status below is still worked out from EVERY row. Before, those emptied rows were counted as
+                        // files, so a rejected requirement kept showing "N files" / a broken "Preview unavailable" tile.
+                        $rowsForKey   = array_values(array_filter($reqAllRows, function ($rrf) { return !empty($rrf['file_name']); }));
+                        $reqFileCount = count($rowsForKey);
+                        $reqHasFile   = $reqFileCount > 0;
+
+                        // Aggregate status across every file saved for this
+                        // requirement: Denied takes priority (it needs the
+                        // company's attention), then Pending, and only
+                        // Verified when EVERY file for this requirement has
+                        // individually been verified.
+                        $reqStatus = null;
+                        $reqRemark = '';
+                        if (!empty($reqAllRows)) {
+                            $hasDenied = false; $hasNonVerified = false;
+                            foreach ($reqAllRows as $rr) {
+                                $st = $rr['status'] ?? 'Pending';
+                                if (cfIsRejectedStatus($st)) {
+                                    $hasDenied = true;
+                                    if (empty($reqRemark) && !empty($rr['remark'])) $reqRemark = $rr['remark'];
+                                }
+                                if ($st !== 'Verified') $hasNonVerified = true;
+                            }
+                            if ($hasDenied) $reqStatus = 'Rejected';
+                            elseif ($hasNonVerified) $reqStatus = 'Pending';
+                            else $reqStatus = 'Verified';
+                        }
+
+                        // Per-file metadata (id + whether it's a PDF) for
+                        // the overlaying card / preview modal below.
+                        $reqFileMetaList = [];
+                        foreach ($rowsForKey as $rr) {
+                            $isPdfRow = false;
+                            if (!empty($rr['file_name'])) {
+                                $finfo_rr = new finfo(FILEINFO_MIME_TYPE);
+                                $mime_rr  = $finfo_rr->buffer($rr['file_name']);
+                                $isPdfRow = (strpos($mime_rr, 'pdf') !== false || strpos($mime_rr, 'octet') !== false);
+                            }
+                            $reqFileMetaList[] = ['id' => (int) $rr['id'], 'isPdf' => $isPdfRow];
+                        }
+                        $reqFileMetaJson = htmlspecialchars(json_encode($reqFileMetaList), ENT_QUOTES);
+
+                        // The internal token stays 'denied' (the status-aware CSS and JS below key on it); only the LABEL shown to the company changed.
+                        $badgeClass = ($reqStatus === 'Rejected') ? 'denied' : ($reqStatus ? strtolower($reqStatus) : 'not-submitted');
+                        $badgeLabel = $reqStatus ?: 'Not Submitted';
+                        $cfCardSig  = cfLiveRowsSig($reqAllRows); // LIVE UPDATES: changes whenever this requirement's rows change
                     ?>
+                    <!-- NEW (this revision) — STATUS DETECTION HOOKS.
+                         The card now carries the requirement's real,
+                         server-computed status (the very same $badgeClass /
+                         $badgeLabel values that already render the status
+                         pill inside it), plus whether it currently has any
+                         saved file and how many. The status-aware CSS above
+                         keys off data-req-status directly, so the card's
+                         appearance updates the moment the page renders —
+                         no click, no extra request. The script at the
+                         bottom reads the same attributes to apply the
+                         behavioural parts (drop-zone wording, the "Action
+                         required" flag, and the Denied-only staged-note
+                         rule). Purely additive attributes: no existing id,
+                         class, input name, PHP branch or logic changed. -->
+                    <div class="compliance-req-item"
+                         data-req-status="<?= htmlspecialchars($badgeClass, ENT_QUOTES) ?>"
+                         data-req-status-label="<?= htmlspecialchars($badgeLabel, ENT_QUOTES) ?>"
+                         data-req-key="<?= htmlspecialchars($reqKey, ENT_QUOTES) ?>"
+                         data-req-has-file="<?= $reqHasFile ? '1' : '0' ?>"
+                         data-req-file-count="<?= (int) $reqFileCount ?>"
+                         data-live-sig="<?= htmlspecialchars($cfCardSig, ENT_QUOTES) ?>">
+                        <div class="compliance-req-top">
+                            <!-- ADJUSTMENT (this revision): the requirement name is now the
+                                 FIRST element in the card, above the file preview. Same
+                                 markup, same .req-info class and same $reqLabel / MOA-tag
+                                 output as before — only its position in the card moved. -->
+                            <div class="req-info">
+                                <?= htmlspecialchars($reqLabel) ?>
+                                <?php if ($isMoaExistingItem): ?>
+                                    <span class="req-moa-tag">MOA Upload</span>
+                                <?php endif; ?>
+                            </div>
+
+                            <!-- NEW: every file-preview variant (single thumb/PDF tile, the
+                                 multi-file stack, or the empty placeholder) now lives inside
+                                 this single wrapper so JS can swap it out as one unit the
+                                 instant the company selects a new/replacement file. -->
+                            <?php
+                            // ADJUSTMENT (this revision): Pending / Rejected use the admin panel's display —
+                            // status pill on the preview's top-right corner (see .req-card-ribbon CSS).
+                            $reqUsesRibbon = true; // ADJUSTMENT: the status pill is now shown for every state (Verified / Pending / Rejected / Not Submitted), like AccomForm.php
+                            $reqRejPanel   = ($reqStatus === 'Rejected' && !$reqHasFile); // preview is the "Awaiting re-upload" placeholder
+                            ?>
+                            <div class="req-preview-wrap<?= $reqRejPanel ? ' req-preview-wrap--rejected' : '' ?>">
+                            <div class="req-preview-slot" id="reqPreviewSlot_<?= htmlspecialchars($reqKey) ?>" data-req-key="<?= htmlspecialchars($reqKey, ENT_QUOTES) ?>">
+                            <?php if ($reqHasFile && $reqFileCount === 1): ?>
+                                <!-- Single saved file — same plain thumbnail / PDF badge as before,
+                                     now enlarged (see .req-thumb-wrap / .req-thumb-img CSS) to match
+                                     the height of the upload/reupload button. -->
+                                <?php if ($reqFileMetaList[0]['isPdf']): ?>
+                                    <div class="req-thumb-wrap creq-preview-trigger" data-req-key="<?= htmlspecialchars($reqKey, ENT_QUOTES) ?>" data-req-files="<?= $reqFileMetaJson ?>" data-req-label="<?= htmlspecialchars($reqLabel, ENT_QUOTES) ?>" title="Preview <?= htmlspecialchars($reqLabel) ?>">
+                                        <i class="fas fa-file-pdf"></i>
+                                    </div>
+                                <?php else: ?>
+                                    <!-- ADJUSTMENT (this revision): if this file can no longer be streamed
+                                         back (e.g. the admin removed the blob when denying it, or the stored
+                                         bytes aren't a renderable image), the browser would otherwise show a
+                                         broken-image icon with the alt/title text spilling across the tile.
+                                         The inline onerror below swaps the <img> for the SAME neutral
+                                         placeholder tile used by a requirement with no file yet, so the card
+                                         keeps its shape. It is self-contained (no helper function, so it works
+                                         even if the error fires before the page's scripts run) and touches
+                                         nothing else — the status badge, denial reason and upload area are
+                                         all still rendered exactly as before. -->
+                                    <img class="req-thumb-img creq-preview-trigger" data-req-key="<?= htmlspecialchars($reqKey, ENT_QUOTES) ?>" data-req-files="<?= $reqFileMetaJson ?>" data-req-label="<?= htmlspecialchars($reqLabel, ENT_QUOTES) ?>"
+                                        src="CompanyForm.php?stream_own_requirement=<?= urlencode($reqKey) ?>&file_id=<?= (int) $reqFileMetaList[0]['id'] ?>"
+                                        alt=""
+                                        onerror="this.onerror=null;var d=document.createElement('div');d.className='req-thumb-empty';d.setAttribute('aria-hidden','true');var ic=document.createElement('i');ic.className='fas fa-file-circle-xmark';var sp=document.createElement('span');sp.textContent='Preview unavailable';d.appendChild(ic);d.appendChild(sp);if(this.parentNode){this.parentNode.replaceChild(d,this);}"
+                                        title="Preview <?= htmlspecialchars($reqLabel) ?>">
+                                <?php endif; ?>
+                            <?php elseif ($reqHasFile && $reqFileCount > 1): ?>
+                                <!-- FIX (this update): 2+ saved files for this requirement — show as one
+                                     overlaying "stacked card" entry instead of only ever displaying the
+                                     last-fetched row. Click opens the preview modal, which can page
+                                     through every file via prev/next (see the JS further down).
+                                     ADJUSTMENT (this revision): stack enlarged (see .req-file-stack CSS)
+                                     to match the enlarged single-file thumbnail / button height. -->
+                                <div class="req-file-stack-wrap creq-preview-trigger" data-req-key="<?= htmlspecialchars($reqKey, ENT_QUOTES) ?>" data-req-files="<?= $reqFileMetaJson ?>" data-req-label="<?= htmlspecialchars($reqLabel, ENT_QUOTES) ?>" title="Preview all <?= (int) $reqFileCount ?> files for <?= htmlspecialchars($reqLabel) ?>">
+                                    <div class="req-file-stack">
+                                        <?php
+                                        $layerCount = min(3, $reqFileCount);
+                                        for ($li = $layerCount - 1; $li >= 0; $li--):
+                                            $layerMeta = $reqFileMetaList[$li];
+                                        ?>
+                                        <?php if ($layerMeta['isPdf']): ?>
+                                            <div class="req-stack-layer req-stack-layer-pdf layer-<?= $li + 1 ?>"><i class="fas fa-file-pdf"></i></div>
+                                        <?php else: ?>
+                                            <div class="req-stack-layer layer-<?= $li + 1 ?>" style="background-image:url('CompanyForm.php?stream_own_requirement=<?= urlencode($reqKey) ?>&file_id=<?= (int) $layerMeta['id'] ?>');"></div>
+                                        <?php endif; ?>
+                                        <?php endfor; ?>
+                                        <span class="req-stack-count-badge"><?= (int) $reqFileCount ?></span>
+                                    </div>
+                                    <div class="req-file-stack-label"><?= (int) $reqFileCount ?> files</div>
+                                </div>
+                            <?php else: ?>
+                                <!-- ADJUSTMENT (this revision): nothing has been uploaded for this
+                                     requirement yet, so the preview slot shows a neutral placeholder
+                                     tile instead of collapsing. This keeps every card in the grid the
+                                     same shape, exactly as in the supplied design. It is decorative
+                                     only — no preview trigger, no data attributes, no inputs, and it
+                                     never renders once a file exists. -->
+                                <?php if ($reqStatus === 'Rejected'): ?>
+                                <!-- ADJUSTMENT (this revision): a rejected requirement's file was removed by the admin —
+                                     shown with the same pink dashed "Rejected / Awaiting re-upload" placeholder the
+                                     admin panel uses (company_validation.php's .cv-rej-placeholder). -->
+                                <div class="req-rej-placeholder" aria-hidden="true">
+                                    <i class="fas fa-file-circle-xmark"></i>
+                                    <span>Awaiting re-upload</span>
+                                </div>
+                                <?php else: ?>
+                                <div class="req-thumb-empty" aria-hidden="true">
+                                    <i class="fas fa-hourglass-half"></i>
+                                    <span>No file yet</span>
+                                </div>
+                                <?php endif; ?>
+                            <?php endif; ?>
+                            </div>
+                            <?php if ($reqUsesRibbon): ?>
+                            <!-- ADJUSTMENT (this revision): the status pill on the preview's top-right corner. It keeps the
+                                 same id (reqStatusBadge_<key>) and status class the staging JS below already targets. -->
+                            <div class="req-card-ribbon <?= htmlspecialchars($badgeClass) ?>" id="reqStatusBadge_<?= htmlspecialchars($reqKey) ?>">
+                                <?php if ($reqStatus === 'Rejected'): ?>
+                                    <span class="req-rb req-rb-rejected"><i class="fas fa-ban"></i> <?= htmlspecialchars($badgeLabel) ?></span>
+                                <?php elseif ($reqStatus === 'Verified'): ?>
+                                    <span class="req-rb req-rb-verified"><i class="fas fa-check"></i> <?= htmlspecialchars($badgeLabel) ?></span>
+                                <?php elseif ($reqStatus): ?>
+                                    <span class="req-rb req-rb-pending"><?= htmlspecialchars($badgeLabel) ?></span>
+                                <?php else: ?>
+                                    <span class="req-rb req-rb-awaiting"><?= htmlspecialchars($badgeLabel) ?></span>
+                                <?php endif; ?>
+                            </div>
+                            <?php endif; ?>
+                            </div><!-- /.req-preview-wrap -->
+
+                            <!-- ADJUSTMENT (this revision): wrapped in .compliance-req-info so the
+                                 name / status block is its own vertically-centered flex column
+                                 between the file display and the action button.
+
+                                 ── UPDATED (this adjustment): status, the denial remark, and the
+                                 "action required" reminder used to be three separate stacked
+                                 elements (a status-badge pill, a remark-badge, and a CSS-only
+                                 "req-action-required" flag) — they are now ONE combined info box
+                                 (.req-status-combined) built from the exact same $badgeClass /
+                                 $badgeLabel / $reqRemark values as before, just presented together.
+                                 It keeps the same id (reqStatusBadge_<key>) the staging JS below
+                                 already hides on file-select, so that behavior is unchanged; the
+                                 separate remark-badge id and the CSS-only "req-action-required"
+                                 flag are retired since everything now lives in this one element. -->
+                            <?php /* ADJUSTMENT (this revision): a Verified requirement no longer shows the green "Verified" status box above the
+                                      "Verified — no further action needed" lock — the info block is hidden entirely so it leaves no empty gap. */ ?>
+                            <?php /* ADJUSTMENT (this revision): a Pending requirement now shows only the corner pill above, so its info block is hidden too (no empty gap). A Rejected one keeps this block for the "Remark:" box below. */ ?>
+                            <div class="compliance-req-info"<?= ($reqStatus === 'Verified' || $reqStatus === 'Pending' || !$reqStatus) ? ' style="display:none;"' : '' ?>>
+                                <?php if ($reqStatus === 'Rejected'): ?>
+                                <!-- ADJUSTMENT (this revision): the admin's rejection remark in its own pink "Remark:" box
+                                     (company_validation.php's .cv-card-remark). Same $reqRemark value as before; hidden by JS
+                                     the moment a replacement file is staged, together with the pill. -->
+                                <div class="req-card-remark" id="reqRemarkBox_<?= htmlspecialchars($reqKey) ?>"><i class="fas fa-comment-dots"></i><span><b>Remark:</b> <span class="req-card-remark-text"><?= htmlspecialchars(((string) $reqRemark) !== '' ? (string) $reqRemark : '—') ?></span></span></div>
+                                <?php endif; ?>
+                                <?php if (!$reqUsesRibbon && $reqStatus !== 'Verified'): ?>
+                                <div class="req-status-combined <?= htmlspecialchars($badgeClass) ?>" id="reqStatusBadge_<?= htmlspecialchars($reqKey) ?>">
+                                    <div class="req-status-combined-top">
+                                        <?php if ($reqStatus === 'Verified'): ?>
+                                            <i class="fas fa-check-circle"></i>
+                                        <?php elseif ($reqStatus === 'Rejected'): ?>
+                                            <i class="fas fa-times-circle"></i>
+                                        <?php elseif ($reqStatus): ?>
+                                            <i class="fas fa-clock"></i>
+                                        <?php else: ?>
+                                            <i class="fas fa-minus-circle"></i>
+                                        <?php endif; ?>
+                                        <span><?= htmlspecialchars($badgeLabel) ?></span>
+                                    </div>
+                                    <?php if ($reqStatus === 'Rejected'): ?>
+                                        <?php if (!empty($reqRemark)): ?>
+                                        <div class="req-status-combined-detail">Reason: <?= htmlspecialchars($reqRemark) ?></div>
+                                        <?php endif; ?>
+                                        <div class="req-status-combined-detail">Please re-upload this document.</div>
+                                    <?php endif; ?>
+                                </div>
+                                <?php endif; ?>
+
+                                <!-- NEW: hidden-by-default note shown by JS in place of the combined
+                                     status box above the instant a replacement file is staged for
+                                     THIS item — but only when this item was originally Denied (see
+                                     the wasDenied check in the change handler in the script below). -->
+                                <div class="req-staged-note" id="reqStagedNote_<?= htmlspecialchars($reqKey) ?>" style="display:none;">
+                                    <i class="fas fa-rotate"></i> New file selected — ready to resubmit
+                                </div>
+                            </div>
+
+                            <!-- ADJUSTMENT (this revision): the verified-lock badge / upload button
+                                 is now its own .compliance-req-action flex column, vertically
+                                 centered beside the file display and info block above, instead of
+                                 being stacked underneath the status badge inside the info column. -->
+                            <div class="compliance-req-action">
+                                <?php if ($reqStatus === 'Verified'): ?>
+                                    <div class="verified-lock">
+                                        <i class="fas fa-check-circle"></i> Verified — no further action needed
+                                    </div>
+                                <?php else: ?>
+                                    <div class="req-file-drop" id="reqDrop_c_<?= htmlspecialchars($reqKey) ?>" onclick="document.getElementById('reqFileInput_<?= htmlspecialchars($reqKey) ?>').click()">
+                                        <span class="req-file-icon"><i class="fas fa-upload"></i></span>
+                                        <span class="req-file-text" id="reqFileText_<?= htmlspecialchars($reqKey) ?>">
+                                            <?= ($reqStatus === 'Rejected') ? 'Re-upload' : ($reqHasFile ? 'Click to replace file(s)' : 'Click to upload') ?>
+                                        </span>
+                                    </div>
+                                    <!-- FIX (this update): now accepts multiple files (name="req_<key>[]"),
+                                         matching company_register.php's Step 3 requirement uploads. A hidden
+                                         "_expected_count" field (kept in sync by JS below) lets the server
+                                         detect and report a request that silently loses files in transit. -->
+                                    <input type="file" id="reqFileInput_<?= htmlspecialchars($reqKey) ?>" name="req_<?= htmlspecialchars($reqKey) ?>[]" multiple
+                                        class="compliance-file-input" data-label="<?= htmlspecialchars($reqLabel) ?>" data-req-key="<?= htmlspecialchars($reqKey, ENT_QUOTES) ?>"
+                                        accept="image/*,.pdf,application/pdf" style="display:none;">
+                                    <input type="hidden" id="reqCount_c_<?= htmlspecialchars($reqKey) ?>" name="req_<?= htmlspecialchars($reqKey) ?>_expected_count" value="0">
+                                <?php endif; ?>
+                            </div>
+                        </div>
+                    </div>
                     <?php endforeach; ?>
                     </div>
 
@@ -6595,8 +6555,9 @@ $cfRenderReqCard = function ($reqKey, $reqLabel) use ($company_requirement_rows,
     var saved = null;
     try { saved = sessionStorage.getItem(KEY); } catch (e) {}
     /* an upload error belongs to the Requirements page; a revision flag opens it too */
+    var forceInfo = <?= json_encode(!empty($moa_needs_revision)) ?>;   // an MOA revision request is answered on the Company Details & MOA page
     var target = (params.get('msg') === 'upload_error') ? 'cf-requirements-page'
-               : (initial === 'cf-requirements-page' ? initial : (saved || initial));
+               : (forceInfo ? 'cf-info-page' : (initial === 'cf-requirements-page' ? initial : (saved || initial)));
     function switchPage(id) {
         if (!document.getElementById(id)) id = 'cf-info-page';
         document.querySelectorAll('.cf-page-content').forEach(function (p) { p.classList.remove('cf-active-page'); });
