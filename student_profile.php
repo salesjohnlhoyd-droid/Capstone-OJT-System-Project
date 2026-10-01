@@ -838,6 +838,16 @@ if ($student['deploy_status'] === "Deployed") {
         .cv-top-toast strong { color: #ffffff; font-weight: 700; }
         .cv-top-toast.is-error i { color: #f87171; }
 
+        /* ADJUSTMENT: clickable popup (administrator.php's .cv-top-toast[data-cv-go] pattern) — a small "View ›"
+           marks it; clicking it (or Enter / Space) opens what it is about: the Inbox (letter) or the company row. */
+        .cv-top-toast[data-cv-go] { pointer-events: auto; cursor: pointer; transition: opacity 0.35s, top 0.3s ease, background-color 0.15s ease; }
+        .cv-top-toast[data-cv-go]:hover { background: #24375E; }
+        .cv-top-toast[data-cv-go]:focus-visible { outline: 2px solid #F7C600; outline-offset: 2px; }
+        .cv-top-toast .cv-toast-go { flex-shrink: 0; margin-left: 6px; color: #F7C600; font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px; white-space: nowrap; }
+        .cv-top-toast .cv-toast-go i { color: inherit; font-size: 9px; margin-left: 3px; }
+        .cv-go-highlight { outline: 2px solid #F7C600 !important; outline-offset: 2px; animation: cvGoFlash 2.6s ease; }
+        @keyframes cvGoFlash { 0%, 55% { box-shadow: 0 0 0 5px rgba(247, 198, 0, 0.35); } 100% { box-shadow: 0 0 0 0 rgba(247, 198, 0, 0); } }
+
         .logout-link { margin-top: auto; padding: 20px; border-top: 1px solid rgba(255,255,255,0.1); }
         .logout-link a {
             border: 1px solid var(--neust-gold); color: var(--neust-gold);
@@ -2996,13 +3006,14 @@ setInterval(_anbWatch, 30000);
             top += el.offsetHeight + 12;
         });
     }
-    function showToast(name, text, icon) {
+    function showToast(name, text, icon, go) {
         var div = document.createElement('div');
         div.className = 'cv-top-toast';
         div.setAttribute('role', 'status');
         div.innerHTML = '<i class="fas ' + esc(icon || 'fa-circle-info') + '"></i><span>' +
             (name ? '<strong>' + esc(name) + '</strong> ' : '') + esc(text) + '</span>';
         document.body.appendChild(div);
+        tagToast(div, go);
         layoutToasts();
         requestAnimationFrame(function () { div.classList.add('show'); });
         setTimeout(function () {
@@ -3010,6 +3021,43 @@ setInterval(_anbWatch, 30000);
             setTimeout(function () { div.remove(); layoutToasts(); }, 400);
         }, 7000);
     }
+
+    // Clickable popup (administrator.php's data-cv-go pattern): opens the Inbox / the company on company_list.php.
+    function tagToast(el, spec) {
+        if (!el || !spec) return;
+        el.setAttribute('data-cv-go', spec);
+        el.setAttribute('role', 'link');
+        el.setAttribute('tabindex', '0');
+        el.setAttribute('aria-label', (el.textContent || '').replace(/\s+/g, ' ').trim() + ' \u2014 open');
+        var hint = document.createElement('span');
+        hint.className = 'cv-toast-go';
+        hint.setAttribute('aria-hidden', 'true');
+        hint.innerHTML = 'View <i class="fas fa-chevron-right"></i>';
+        el.appendChild(hint);
+    }
+    function goSpecFor(ev) { return ev.inbox ? 'inbox' : (ev.id ? 'company:' + ev.id : ''); }
+    function goTo(spec) {
+        var p = String(spec || '').split(':');
+        var url = null;
+        if (p[0] === 'inbox') url = 'company_list.php?inbox=1';
+        else if (p[0] === 'company' && /^\d+$/.test(p[1] || '')) url = 'company_list.php?open_company=' + p[1];
+        if (url) window.location.href = url;
+    }
+    function activate(toast) {
+        var spec = toast.getAttribute('data-cv-go');
+        toast.classList.remove('show');
+        setTimeout(function () { if (toast.parentNode) toast.parentNode.removeChild(toast); layoutToasts(); }, 350);
+        goTo(spec);
+    }
+    document.addEventListener('click', function (e) {
+        var t = e.target && e.target.closest ? e.target.closest('.cv-top-toast[data-cv-go]') : null;
+        if (t) { e.preventDefault(); activate(t); }
+    });
+    document.addEventListener('keydown', function (e) {
+        if (e.key !== 'Enter' && e.key !== ' ') return;
+        var t = e.target && e.target.closest ? e.target.closest('.cv-top-toast[data-cv-go]') : null;
+        if (t) { e.preventDefault(); activate(t); }
+    });
 
     function setBadge(n) {
         if (!badge) return;
@@ -3037,32 +3085,32 @@ setInterval(_anbWatch, 30000);
         var prevReg = prev.registered ? String(prev.registered) : null;
         var nextReg = next.registered ? String(next.registered) : null;
         if (nextReg && nextReg !== prevReg) {
-            out.push({ name: nameOf(nextReg), text: 'accepted your application — you are now registered as their OJT trainee.', icon: 'fa-circle-check' });
+            out.push({ id: nextReg, name: nameOf(nextReg), text: 'accepted your application — you are now registered as their OJT trainee.', icon: 'fa-circle-check' });
         }
         if (prevReg && prevReg !== nextReg) {
-            out.push({ name: nameOf(prevReg), text: 'no longer has you registered as their OJT trainee.', icon: 'fa-circle-info' });
+            out.push({ id: prevReg, name: nameOf(prevReg), text: 'no longer has you registered as their OJT trainee.', icon: 'fa-circle-info' });
         }
         var pp = prev.pending || {}, np = next.pending || {};
         Object.keys(pp).forEach(function (id) {
             if (np[id] === pp[id]) return;
             if (!np[id]) {
                 if (id === nextReg) return; // accepted — already announced above
-                if (pp[id] === 'hold') { out.push({ name: nameOf(id), text: '— your on-hold application was cancelled.', icon: 'fa-circle-xmark' }); return; }
+                if (pp[id] === 'hold') { out.push({ id: id, name: nameOf(id), text: '— your on-hold application was cancelled.', icon: 'fa-circle-xmark' }); return; }
                 out.push(pp[id] === 'admin'
-                    ? { name: nameOf(id), text: '— your application was not approved by the administrator.', icon: 'fa-circle-xmark' }
-                    : { name: nameOf(id), text: 'did not accept your application.', icon: 'fa-circle-xmark' });
+                    ? { id: id, name: nameOf(id), text: '— your application was not approved by the administrator.', icon: 'fa-circle-xmark' }
+                    : { id: id, name: nameOf(id), text: 'did not accept your application.', icon: 'fa-circle-xmark' });
             } else if (pp[id] === 'hold' && np[id] === 'admin') {
-                out.push({ name: nameOf(id), text: '— your requirements are verified again, so your application was sent automatically and is Waiting for the Approval.', icon: 'fa-paper-plane' });
+                out.push({ id: id, name: nameOf(id), text: '— your requirements are verified again, so your application was sent automatically and is Waiting for the Approval.', icon: 'fa-paper-plane' });
             } else if (pp[id] === 'admin' && np[id] === 'company') {
-                out.push({ name: nameOf(id), text: '— the administrator approved your application. It is now Under Company Validation; your endorsement letter is in your Inbox (Company List).', icon: 'fa-envelope-circle-check' });
+                out.push({ id: id, name: nameOf(id), text: '— the administrator approved your application. It is now Under Company Validation; your endorsement letter is in your Inbox (Company List).', icon: 'fa-envelope-circle-check', inbox: true });
             }
         });
         Object.keys(np).forEach(function (id) {
             if (!pp[id]) out.push(np[id] === 'hold'
-                ? { name: nameOf(id), text: '— your application is On Hold until your new Application SIT is verified.', icon: 'fa-pause-circle' }
+                ? { id: id, name: nameOf(id), text: '— your application is On Hold until your new Application SIT is verified.', icon: 'fa-pause-circle' }
                 : np[id] === 'company'
-                ? { name: nameOf(id), text: '— the administrator applied you to this company. It is now Under Company Validation; your endorsement letter is in your Inbox (Company List).', icon: 'fa-envelope-circle-check' }
-                : { name: nameOf(id), text: '— your application was sent and is Waiting for the Approval.', icon: 'fa-paper-plane' });
+                ? { id: id, name: nameOf(id), text: '— the administrator applied you to this company. It is now Under Company Validation; your endorsement letter is in your Inbox (Company List).', icon: 'fa-envelope-circle-check', inbox: true }
+                : { id: id, name: nameOf(id), text: '— your application was sent and is Waiting for the Approval.', icon: 'fa-paper-plane' });
         });
         return out;
     }
@@ -3082,7 +3130,7 @@ setInterval(_anbWatch, 30000);
                 save(next);
                 if (next.endo) setBadge(next.endo.attention);
                 if (!prev) return;                 // first look: just a baseline
-                describe(prev, next).forEach(function (ev) { showToast(ev.name, ev.text, ev.icon); });
+                describe(prev, next).forEach(function (ev) { showToast(ev.name, ev.text, ev.icon, goSpecFor(ev)); });
             })
             .catch(function () { /* silent — retried on the next tick */ })
             .finally(function () { busy = false; });

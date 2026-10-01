@@ -1992,6 +1992,16 @@ $companies = $conn->query("
         .cv-top-toast strong { color: #ffffff; font-weight: 700; }
         .cv-top-toast.is-error i { color: #f87171; } /* ADJUSTMENT: an error gets a red icon, same popup otherwise */
 
+        /* ADJUSTMENT: clickable popup (administrator.php's .cv-top-toast[data-cv-go] pattern) — a small "View ›"
+           marks it; clicking it (or Enter / Space) opens what it is about: the Inbox (letter) or the company row. */
+        .cv-top-toast[data-cv-go] { pointer-events: auto; cursor: pointer; transition: opacity 0.35s, top 0.3s ease, background-color 0.15s ease; }
+        .cv-top-toast[data-cv-go]:hover { background: #24375E; }
+        .cv-top-toast[data-cv-go]:focus-visible { outline: 2px solid #F7C600; outline-offset: 2px; }
+        .cv-top-toast .cv-toast-go { flex-shrink: 0; margin-left: 6px; color: #F7C600; font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px; white-space: nowrap; }
+        .cv-top-toast .cv-toast-go i { color: inherit; font-size: 9px; margin-left: 3px; }
+        .cv-go-highlight { outline: 2px solid #F7C600 !important; outline-offset: 2px; animation: cvGoFlash 2.6s ease; }
+        @keyframes cvGoFlash { 0%, 55% { box-shadow: 0 0 0 5px rgba(247, 198, 0, 0.35); } 100% { box-shadow: 0 0 0 0 rgba(247, 198, 0, 0); } }
+
         /* ADJUSTMENT: application status in the company panel — same pill as the inbox used */
         .company-summary .summary-right .app-stage-chip {
             display: inline-flex; align-items: center; gap: 5px;
@@ -5311,6 +5321,77 @@ if (new URLSearchParams(window.location.search).get('inbox') === '1') {
    ══════════════════════════════════════════════════════════════════════ */
 var CL_LIVE_TOASTS_KEY = 'cl_live_toasts';
 
+/* ══════════════════════════════════════════════════════════════════════
+   ADJUSTMENT: CLICKABLE POPUPS — same pattern as administrator.php (cvTagToast / data-cv-go).
+   spec = "inbox" (the endorsement letter) | "company:<id>" (that company's row, opened + highlighted).
+   Also reachable from the other student pages' popups via company_list.php?inbox=1 / ?open_company=<id>.
+   Unknown / already-gone targets are ignored quietly.
+   ══════════════════════════════════════════════════════════════════════ */
+function clTagToast(el, spec) {
+    if (!el || !spec || el.hasAttribute('data-cv-go')) return;
+    el.setAttribute('data-cv-go', spec);
+    el.setAttribute('role', 'link');
+    el.setAttribute('tabindex', '0');
+    el.setAttribute('aria-label', (el.textContent || '').replace(/\s+/g, ' ').trim() + ' \u2014 open');
+    var hint = document.createElement('span');
+    hint.className = 'cv-toast-go';
+    hint.setAttribute('aria-hidden', 'true');
+    hint.innerHTML = 'View <i class="fas fa-chevron-right"></i>';
+    el.appendChild(hint);
+}
+function clGoSpecFor(ev) {
+    if (!ev) return '';
+    if (ev.letterFor) return 'inbox';
+    return ev.id ? 'company:' + ev.id : '';
+}
+function clOpenCompany(id) {
+    try {
+        id = String(id || '').replace(/\D/g, '');
+        var input = id ? document.getElementById('company_' + id) : null;
+        if (!input) return;
+        if (!input.checked) { input.checked = true; input.dispatchEvent(new Event('change', { bubbles: true })); }
+        var row = input.closest('.company-row') || input;
+        try { row.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch (e) { row.scrollIntoView(); }
+        row.classList.remove('cv-go-highlight'); void row.offsetWidth; row.classList.add('cv-go-highlight');
+        setTimeout(function () { row.classList.remove('cv-go-highlight'); }, 2800);
+    } catch (e) {}
+}
+function clGo(spec) {
+    var p = String(spec || '').split(':');
+    if (p[0] === 'inbox') { if (typeof openEndoInbox === 'function') openEndoInbox(); }
+    else if (p[0] === 'company') clOpenCompany(p[1]);
+}
+function clActivateToast(toast) {
+    var spec = toast.getAttribute('data-cv-go');
+    toast.classList.remove('show');
+    setTimeout(function () { if (toast.parentNode) toast.parentNode.removeChild(toast); clLayoutTopToasts(); }, 350);
+    clGo(spec);
+}
+document.addEventListener('click', function (e) {
+    var t = e.target && e.target.closest ? e.target.closest('.cv-top-toast[data-cv-go]') : null;
+    if (t) { e.preventDefault(); clActivateToast(t); }
+});
+document.addEventListener('keydown', function (e) {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    var t = e.target && e.target.closest ? e.target.closest('.cv-top-toast[data-cv-go]') : null;
+    if (t) { e.preventDefault(); clActivateToast(t); }
+});
+/* Arriving from a popup on another page: ?open_company=<id> — done once, then removed from the address bar. */
+(function () {
+    try {
+        var params = new URLSearchParams(window.location.search);
+        var oc = params.get('open_company');
+        if (!oc || !/^\d+$/.test(oc)) return;
+        params.delete('open_company');
+        if (window.history.replaceState) {
+            var q = params.toString();
+            window.history.replaceState({}, document.title, window.location.pathname + (q ? '?' + q : '') + window.location.hash);
+        }
+        var start = function () { setTimeout(function () { clOpenCompany(oc); }, 700); };
+        if (document.readyState === 'complete') start(); else window.addEventListener('load', start);
+    } catch (e) {}
+})();
+
 function clLayoutTopToasts() {
     var top = 30;
     document.querySelectorAll('.cv-top-toast').forEach(function (el) {
@@ -5320,13 +5401,14 @@ function clLayoutTopToasts() {
 }
 
 // Same popup as administrator.php (cvShowTopToast / showStudentVerifiedToast).
-function clShowTopToast(name, messageText, iconClass, isError) {
+function clShowTopToast(name, messageText, iconClass, isError, go) {
     var div = document.createElement('div');
     div.className = 'cv-top-toast' + (isError ? ' is-error' : '');
     div.setAttribute('role', 'status');
     div.innerHTML = '<i class="fas ' + rumEscape(iconClass || 'fa-circle-info') + '"></i><span>' +
         (name ? '<strong>' + rumEscape(name) + '</strong> ' : '') + rumEscape(messageText) + '</span>';
     document.body.appendChild(div);
+    clTagToast(div, go);   // ADJUSTMENT: clickable popup ("View ›")
     clLayoutTopToasts();
     requestAnimationFrame(function () { div.classList.add('show'); });
     setTimeout(function () {
@@ -5356,33 +5438,33 @@ function clShowTopToast(name, messageText, iconClass, isError) {
         var prevReg = prev.registered ? String(prev.registered) : null;
         var nextReg = next.registered ? String(next.registered) : null;
         if (nextReg && nextReg !== prevReg) {
-            out.push({ name: nameOf(nextReg), text: 'accepted your application \u2014 you are now registered as their OJT trainee.', icon: 'fa-circle-check' });
+            out.push({ id: nextReg, name: nameOf(nextReg), text: 'accepted your application \u2014 you are now registered as their OJT trainee.', icon: 'fa-circle-check' });
         }
         if (prevReg && prevReg !== nextReg) {
-            out.push({ name: nameOf(prevReg), text: 'no longer has you registered as their OJT trainee.', icon: 'fa-circle-info' });
+            out.push({ id: prevReg, name: nameOf(prevReg), text: 'no longer has you registered as their OJT trainee.', icon: 'fa-circle-info' });
         }
         var pp = prev.pending || {}, np = next.pending || {};
         Object.keys(pp).forEach(function (id) {
             if (np[id] === pp[id]) return;
             if (!np[id]) {
                 if (id === nextReg) return; // accepted — already announced above
-                if (pp[id] === 'hold') { out.push({ name: nameOf(id), text: '\u2014 your on-hold application was cancelled.', icon: 'fa-circle-xmark' }); return; }
+                if (pp[id] === 'hold') { out.push({ id: id, name: nameOf(id), text: '\u2014 your on-hold application was cancelled.', icon: 'fa-circle-xmark' }); return; }
                 out.push(pp[id] === 'admin'
-                    ? { name: nameOf(id), text: '\u2014 your application was not approved by the administrator.', icon: 'fa-circle-xmark' }
-                    : { name: nameOf(id), text: 'did not accept your application.', icon: 'fa-circle-xmark' });
+                    ? { id: id, name: nameOf(id), text: '\u2014 your application was not approved by the administrator.', icon: 'fa-circle-xmark' }
+                    : { id: id, name: nameOf(id), text: 'did not accept your application.', icon: 'fa-circle-xmark' });
             } else if (pp[id] === 'hold' && np[id] === 'admin') {
-                out.push({ name: nameOf(id), text: '\u2014 your requirements are verified again, so your application was sent automatically and is Waiting for the Approval.', icon: 'fa-paper-plane' });
+                out.push({ id: id, name: nameOf(id), text: '\u2014 your requirements are verified again, so your application was sent automatically and is Waiting for the Approval.', icon: 'fa-paper-plane' });
             } else if (pp[id] === 'admin' && np[id] === 'company') {
-                out.push({ name: nameOf(id), text: '\u2014 the administrator approved your application. It is now Under Company Validation; your endorsement letter is in your Inbox.', icon: 'fa-envelope-circle-check', letterFor: String(id) });
+                out.push({ id: id, name: nameOf(id), text: '\u2014 the administrator approved your application. It is now Under Company Validation; your endorsement letter is in your Inbox.', icon: 'fa-envelope-circle-check', letterFor: String(id) });
             }
         });
         Object.keys(np).forEach(function (id) {
             if (!pp[id]) out.push(np[id] === 'hold'
-                ? { name: nameOf(id), text: '\u2014 your application is On Hold until your new Application SIT is verified.', icon: 'fa-pause-circle' }
+                ? { id: id, name: nameOf(id), text: '\u2014 your application is On Hold until your new Application SIT is verified.', icon: 'fa-pause-circle' }
                 : np[id] === 'company'
                 // ADJUSTMENT: applied by the administrator (monitoring dashboard) — straight to the company.
-                ? { name: nameOf(id), text: '\u2014 the administrator applied you to this company. It is now Under Company Validation; your endorsement letter is in your Inbox.', icon: 'fa-envelope-circle-check', letterFor: String(id) }
-                : { name: nameOf(id), text: '\u2014 your application was sent and is Waiting for the Approval.', icon: 'fa-paper-plane' });
+                ? { id: id, name: nameOf(id), text: '\u2014 the administrator applied you to this company. It is now Under Company Validation; your endorsement letter is in your Inbox.', icon: 'fa-envelope-circle-check', letterFor: String(id) }
+                : { id: id, name: nameOf(id), text: '\u2014 your application was sent and is Waiting for the Approval.', icon: 'fa-paper-plane' });
         });
         return out;
     }
@@ -5451,7 +5533,7 @@ function clShowTopToast(name, messageText, iconClass, isError) {
                 var expected = events.filter(function (ev) { return ev.letterFor; }).map(function (ev) { return ev.letterFor; });
                 return Promise.all([refreshCompanyList(), fetchInboxWithLetters(expected)]).then(function (out) {
                     endoApplyInbox(out[1], true);
-                    events.forEach(function (ev) { clShowTopToast(ev.name, ev.text, ev.icon); });
+                    events.forEach(function (ev) { clShowTopToast(ev.name, ev.text, ev.icon, false, clGoSpecFor(ev)); });
                 });
             })
             .catch(function () { /* silent — retried on the next tick */ })
@@ -5474,7 +5556,7 @@ function clShowTopToast(name, messageText, iconClass, isError) {
         var saved = JSON.parse(sessionStorage.getItem(CL_LIVE_TOASTS_KEY) || 'null');
         sessionStorage.removeItem(CL_LIVE_TOASTS_KEY);
         if (saved && saved.length) {
-            setTimeout(function () { saved.forEach(function (ev) { clShowTopToast(ev.name, ev.text, ev.icon); }); }, 450);
+            setTimeout(function () { saved.forEach(function (ev) { clShowTopToast(ev.name, ev.text, ev.icon, false, clGoSpecFor(ev)); }); }, 450);
         }
     } catch (e) {}
 })();
