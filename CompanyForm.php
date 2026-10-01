@@ -214,6 +214,76 @@ $reqMaxFileSizeMB = 5;
 $reqAllowedMimes  = ['image/jpeg', 'image/png', 'application/pdf'];
 
 /**
+ * ADJUSTMENT: every picture format is accepted for the compliance requirements
+ * (JPG, PNG, GIF, WEBP, BMP, ...), not just JPG / PNG. Formats other than JPG /
+ * PNG are converted to PNG on upload so the administrator's review pages and
+ * every browser keep showing them like any other saved picture. Returns the
+ * bytes to store, or null when the picture cannot be decoded by the server.
+ */
+function cfNormalizePictureBytes(string $tmpPath, string $mime): ?string
+{
+    if ($mime === 'image/jpeg' || $mime === 'image/png') {
+        $raw = @file_get_contents($tmpPath);
+        return ($raw === false || $raw === '') ? null : $raw;
+    }
+    $raw = @file_get_contents($tmpPath);
+    $img = ($raw !== false && $raw !== '') ? @imagecreatefromstring($raw) : false;
+    if (!$img) return null;
+    imagealphablending($img, false);
+    imagesavealpha($img, true);
+    ob_start();
+    imagepng($img);
+    $png = ob_get_clean();
+    imagedestroy($img);
+    return ($png === false || $png === '') ? null : $png;
+}
+
+/* ADJUSTMENT (action loading page): what changed in the company's information.
+   cfSnapshotInfo() reads the stored row (SELECT * so a column that does not exist yet is simply absent);
+   cfDiffInfoAreas() compares a "before" and "after" snapshot and returns the AREAS that changed, named like
+   the Company Information page: [['title' => 'Contact Person', 'fields' => ['Position', ...]], ...]. */
+function cfSnapshotInfo(mysqli $conn, int $uid): array
+{
+    $row = [];
+    $q = $conn->prepare("SELECT * FROM company_information WHERE user_id=? LIMIT 1");
+    if ($q) {
+        $q->bind_param("i", $uid);
+        $q->execute();
+        $res = $q->get_result();
+        $row = $res ? ($res->fetch_assoc() ?: []) : [];
+        $q->close();
+    }
+    return $row;
+}
+
+function cfDiffInfoAreas(array $before, array $after): array
+{
+    $map = [
+        'Contact Person' => [
+            'contact_first_name'     => 'Contact First Name',
+            'contact_middle_initial' => 'Contact Middle Name',
+            'contact_last_name'      => 'Contact Last Name',
+            'position'               => 'Position',
+            'telephone'              => 'Telephone / Contact Number',
+        ],
+        'Company Details' => [
+            'company'                => 'Company Name',
+            'company_address'        => 'Complete Office Address',
+            'company_profile'        => 'Company Profile',
+        ],
+    ];
+    $areas = [];
+    foreach ($map as $title => $cols) {
+        $changed = [];
+        foreach ($cols as $col => $label) {
+            if (trim((string)($before[$col] ?? '')) !== trim((string)($after[$col] ?? ''))) $changed[] = $label;
+        }
+        if ($changed) $areas[] = ['title' => $title, 'fields' => $changed];
+    }
+    return $areas;
+}
+
+/**
  * Validate ALL files submitted for one compliance-requirement field
  * ($_FILES[$fieldName][] — now a multi-file input), mirroring the exact
  * same rules and array-handling technique as company_register.php's
@@ -284,6 +354,30 @@ function cfValidateRequirementUploadsMulti(string $fieldName, string $label, int
         }
     }
 
+    // ADJUSTMENT: PDF upload limit — same rule as company_register.php's
+    // regValidateRequirementUploads(): a requirement accepts exactly ONE PDF,
+    // and a PDF cannot be mixed with pictures in the same selection.
+    // (Also enforced client-side with a popup; this is the server backstop.)
+    $cfPdfCount = 0; $cfOtherCount = 0;
+    foreach ($submittedIndexes as $idx) {
+        if ($errors[$idx] !== UPLOAD_ERR_OK) continue;
+        if (@mime_content_type($tmpNames[$idx]) === 'application/pdf') $cfPdfCount++; else $cfOtherCount++;
+    }
+    if ($cfPdfCount > 1) {
+        return [
+            'ok' => false,
+            'error' => "Only one PDF file can be selected for \"$label\". Please choose a single PDF file, or switch to picture files if you need to upload multiple files for this document.",
+            'bytes' => [],
+        ];
+    }
+    if ($cfPdfCount === 1 && $cfOtherCount > 0) {
+        return [
+            'ok' => false,
+            'error' => "Please select files of the same format only for \"$label\" — either all pictures or a single PDF, not a mix of both.",
+            'bytes' => [],
+        ];
+    }
+
     $filesForKey = [];
     foreach ($submittedIndexes as $idx) {
         $thisFileName = $namesArr[$idx] ?? 'a file';
@@ -300,11 +394,19 @@ function cfValidateRequirementUploadsMulti(string $fieldName, string $label, int
         }
 
         $mime = @mime_content_type($tmp);
-        if (!$mime || !in_array($mime, $allowedMimes, true)) {
-            return ['ok' => false, 'error' => "\"$label\" ($thisFileName) must be a JPG, PNG, or PDF file.", 'bytes' => []];
+        $isPicture = $mime && strpos($mime, 'image/') === 0; // ADJUSTMENT: any picture format is accepted
+        if (!$mime || (!$isPicture && !in_array($mime, $allowedMimes, true))) {
+            return ['ok' => false, 'error' => "\"$label\" ($thisFileName) must be a PDF or a picture file (JPG, PNG, GIF, WEBP, BMP, ...).", 'bytes' => []];
         }
 
-        $bytes = @file_get_contents($tmp);
+        if ($isPicture) {
+            $bytes = cfNormalizePictureBytes($tmp, $mime);
+            if ($bytes === null) {
+                return ['ok' => false, 'error' => "\"$label\" ($thisFileName) is in a picture format this server cannot read. Please convert it to JPG or PNG and try again.", 'bytes' => []];
+            }
+        } else {
+            $bytes = @file_get_contents($tmp);
+        }
         if ($bytes === false || $bytes === '') {
             return ['ok' => false, 'error' => "Failed to read \"$label\" ($thisFileName). Please try again.", 'bytes' => []];
         }
@@ -1868,6 +1970,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_moa_creation']
     exit;
 }
 
+/* ADJUSTMENT (action loading page): when the files are bigger than the server's post_max_size, PHP drops the
+   whole request (empty $_POST and $_FILES) and the page would just come back unchanged. For the background
+   (AJAX) submit, say so in a JSON answer instead of letting the loading screen end without a result. */
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && empty($_POST) && empty($_FILES)
+    && (int) ($_SERVER['CONTENT_LENGTH'] ?? 0) > 0
+    && isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) === 'xmlhttprequest') {
+    header('Content-Type: application/json');
+    echo json_encode(['success' => false, 'errors' => ['The selected files are larger than the server allows in one submission (limit ' . ini_get('post_max_size') . '). Please select fewer or smaller files and try again.']]);
+    exit;
+}
+
 /* ================= SUBMIT / RESUBMIT COMPLIANCE REQUIREMENT DOCUMENTS =================
    NEW — integrates the classification-based compliance checklist from
    company_register.php's Step 3 ("Classification & Docs") into this page.
@@ -1884,6 +1997,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_moa_creation']
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_compliance_docs'])) {
     $uploadErrors = [];
     $filesToSave  = [];
+
+    // ADJUSTMENT (action loading page): the page sends this form in the background (XMLHttpRequest) so its
+    // loading screen can show progress and name what was updated. Those requests get a JSON answer; a normal
+    // browser post keeps the redirects below exactly as before.
+    $cfAjax = isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) === 'xmlhttprequest';
+    if ($cfAjax) {
+        header('Content-Type: application/json');
+        set_exception_handler(function ($e) {
+            error_log('CompanyForm submit_compliance_docs: ' . $e->getMessage());
+            echo json_encode(['success' => false, 'errors' => ['The server could not save your changes right now. Please try again in a moment.']]);
+            exit;
+        });
+    }
+    $cfInfoBefore = cfSnapshotInfo($conn, (int) $user_id);
 
     // ── ADJUSTMENT (this update): save the unlocked profile fields for
     // "Existing" request-type companies. Only runs for those companies
@@ -2007,7 +2134,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_compliance_doc
         }
     }
 
+    $cfInfoAreas = $cfProfileSaved ? cfDiffInfoAreas($cfInfoBefore, cfSnapshotInfo($conn, (int) $user_id)) : [];
+
     if (!empty($uploadErrors)) {
+        if ($cfAjax) {
+            // information already saved above stays saved; tell the page which areas, so nothing is silently lost
+            echo json_encode(['success' => false, 'errors' => array_values($uploadErrors), 'areas' => $cfInfoAreas]);
+            exit;
+        }
         $_SESSION['compliance_upload_errors'] = $uploadErrors;
         header("Location: CompanyForm.php?msg=upload_error");
         exit;
@@ -2019,8 +2153,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_compliance_doc
         // reinsert-each-file) instead of the old single-row upsert, so a
         // resubmission with multiple files ends up with exactly that many
         // rows (no orphaned old rows, no silent single-file cap).
+        $cfUploaded = [];
         foreach ($filesToSave as $reqKey => $bytesList) {
             cfReplaceCompanyRequirementFiles($conn, $user_id, $reqKey, $bytesList);
+            $cfUploaded[] = ['label' => (string) ($reqDefsForType[$reqKey] ?? $reqKey), 'count' => is_array($bytesList) ? count($bytesList) : 1];
+        }
+        if ($cfAjax) {
+            echo json_encode(['success' => true, 'areas' => $cfInfoAreas, 'uploaded' => $cfUploaded]);
+            exit;
         }
         header("Location: CompanyForm.php?msg=submitted");
         exit;
@@ -2029,11 +2169,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_compliance_doc
     // ADJUSTMENT (this update): no files, but an "Existing" company saved
     // its unlocked profile fields — show the normal success modal.
     if ($cfProfileSaved) {
+        if ($cfAjax) {
+            echo json_encode(['success' => true, 'areas' => $cfInfoAreas, 'uploaded' => []]);
+            exit;
+        }
         header("Location: CompanyForm.php?msg=submitted");
         exit;
     }
 
     // Nothing was selected at all — just reload quietly.
+    if ($cfAjax) {
+        echo json_encode(['success' => true, 'areas' => [], 'uploaded' => []]);
+        exit;
+    }
     header("Location: CompanyForm.php");
     exit;
 }
@@ -3863,6 +4011,8 @@ $cfLiveState = [
             min-width: 0; /* allow long labels/filenames to ellipsis instead of overflowing their column */
         }
         .req-grid .compliance-req-item:last-child { margin-bottom: 14px; }
+        /* MOA requirement card on the Company Details & MOA page: one card, kept at a normal card width */
+        .req-grid.cf-info-moa-grid { grid-template-columns: repeat(auto-fill, minmax(190px, 260px)); }
 
         /* ══════════════════════════════════════════════════════════════
            ADJUSTMENT (this revision) — REQUESTED LAYOUT CHANGE ONLY:
@@ -4314,14 +4464,20 @@ $cfLiveState = [
             gap: 16px;
             animation: globalLoadingPop 0.35s ease;
         }
+        /* UPDATED (loading ring): the 12-segment ticking ring of admin_student_list.php (same size, colour, mask and timing) */
         .global-loading-spinner {
-            width: 54px;
-            height: 54px;
-            border-radius: 50%;
-            border: 5px solid var(--grid-border, #C3CADA);
-            border-top-color: var(--neust-maroon, #1B2A4A);
-            animation: globalLoadingSpin 0.85s linear infinite;
+            width: 64px; height: 64px; border: 0; border-radius: 50%; box-sizing: border-box;
+            background: conic-gradient(from 0deg, rgba(27,42,74,0.12) 0deg, rgba(27,42,74,0.35) 120deg, rgba(27,42,74,0.7) 240deg, #1B2A4A 330deg, #1B2A4A 360deg);
+            -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 9px), #000 calc(100% - 8px)),
+                          repeating-conic-gradient(from 5deg, #000 0deg 20deg, transparent 20deg 30deg);
+            -webkit-mask-composite: source-in;
+                    mask: radial-gradient(farthest-side, transparent calc(100% - 9px), #000 calc(100% - 8px)),
+                          repeating-conic-gradient(from 5deg, #000 0deg 20deg, transparent 20deg 30deg);
+                    mask-composite: intersect;
+            will-change: transform;
+            animation: cvRingSpin 1s steps(12, end) infinite;
         }
+        @keyframes cvRingSpin { to { transform: rotate(360deg); } }
         .global-loading-text {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             font-size: 13px;
@@ -4342,6 +4498,48 @@ $cfLiveState = [
         @keyframes globalLoadingSpin { to { transform: rotate(360deg); } }
         @keyframes globalLoadingPop { from { transform: scale(0.9); opacity: 0; } to { transform: scale(1); opacity: 1; } }
         @keyframes globalLoadingDots { 0%, 20% { opacity: 0; } 50% { opacity: 1; } 100% { opacity: 0; } }
+
+        /* ══════════════════════════════════════════════════════════
+           ADJUSTMENT (action loading page) — success state of the full-page loader.
+           Same look and wording pattern as admin_student_list.php's loading page
+           (spinner → green check + message), plus a list of the AREAS that were
+           updated. Used by showGlobalSuccess() in the script below.
+           ══════════════════════════════════════════════════════════ */
+        .global-loading-success { display: none; flex-direction: column; align-items: center; gap: 10px; text-align: center; max-width: 460px; width: calc(100vw - 40px); padding: 0 20px; box-sizing: border-box; }
+        #globalLoadingOverlay.success-state .global-loading-spinner,
+        #globalLoadingOverlay.success-state .global-loading-text { display: none; }
+        #globalLoadingOverlay.success-state .global-loading-success { display: flex; }
+        .gls-check {
+            width: 64px; height: 64px; border-radius: 50%;
+            background: var(--grid-green, #2C5A2C); color: #fff;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 30px; box-shadow: 0 0 0 8px var(--grid-green-bg, #EAF3EA);
+            animation: glsCheckPop 0.45s cubic-bezier(.34,1.56,.64,1);
+        }
+        .gls-title {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            font-size: 15px; font-weight: 700; color: var(--grid-navy, #1B2A4A);
+            text-transform: uppercase; letter-spacing: 0.6px; margin-top: 6px;
+        }
+        .gls-message { font-size: 13px; color: var(--grid-muted, #5B6478); line-height: 1.5; }
+        .gls-message:empty { display: none; }
+        .gls-areas { display: flex; flex-direction: column; gap: 8px; width: 100%; max-height: 34vh; overflow-y: auto; text-align: left; margin-top: 2px; }
+        .gls-areas:empty { display: none; }
+        .gls-area { background: #fff; border: 1px solid var(--grid-border-soft, #DCE1EC); padding: 8px 12px; }
+        .gls-area-title { font-size: 11px; font-weight: 700; color: var(--grid-navy, #1B2A4A); text-transform: uppercase; letter-spacing: 0.5px; }
+        .gls-area-fields { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
+        .gls-chip { font-size: 11px; font-weight: 600; color: var(--grid-green, #2C5A2C); background: var(--grid-green-bg, #EAF3EA); padding: 2px 8px; border-radius: 2px; }
+        .gls-warn { width: 100%; box-sizing: border-box; text-align: left; font-size: 12px; line-height: 1.45; color: var(--grid-amber, #A0850A); background: var(--grid-amber-bg, #FAF3DC); border: 1px solid var(--grid-amber, #A0850A); padding: 8px 12px; }
+        .gls-warn:empty { display: none; }
+        .gls-sub { font-size: 11px; color: var(--grid-muted, #5B6478); opacity: .8; display: flex; align-items: center; gap: 6px; }
+        .gls-sub:empty { display: none; }
+        .gls-continue {
+            margin-top: 4px; padding: 10px 28px; border-radius: 0; font-weight: 600; cursor: pointer;
+            border: 1px solid var(--grid-navy, #1B2A4A); background: var(--grid-navy, #1B2A4A); color: #fff;
+            text-transform: uppercase; letter-spacing: 0.5px; font-size: 12px; font-family: inherit;
+        }
+        .gls-continue:hover { background: #fff; color: var(--grid-navy, #1B2A4A); }
+        @keyframes glsCheckPop { from { transform: scale(0.3); opacity: 0; } to { transform: scale(1); opacity: 1; } }
 
         /* ═══════════════════════════════════════════════════
            NEW (this adjustment) — LIVE UPDATES: brief highlight on a
@@ -4408,6 +4606,195 @@ $cfLiveState = [
             cursor: pointer;
         }
 
+        /* ══════════════════════════════════════════════════════════════
+           ADJUSTMENT: REQUIREMENT CARD DESIGN — MATCHED TO AccomForm.php
+           ------------------------------------------------------------
+           The compliance requirement cards now use the same design as the
+           Documentary Requirements cards in AccomForm.php: a flat gallery
+           card with the document preview on top and the status pill in its
+           top-right corner, a dashed "No file yet" / pink "Rejected" panel
+           when there is nothing to show, then the requirement name, the
+           rejection remark and a compact upload row underneath, plus the
+           "N requirements · N verified …" summary line with a progress bar.
+           Presentation only — every id, class, data attribute, input name,
+           PHP branch and script hook the page uses is unchanged.
+           ══════════════════════════════════════════════════════════════ */
+        .cf-req-summary { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px 16px; margin: 0 0 14px; }
+        .cf-req-summary-text { font-size: 13px; color: #3E4963; }
+        .cf-req-summary-text b { color: var(--neust-maroon); }
+        .cf-progress { display: flex; align-items: center; gap: 10px; }
+        .cf-progress-bar { width: 120px; height: 8px; background: #C9D3E6; overflow: hidden; }
+        .cf-progress-fill { height: 8px; background: #2C5A2C; transition: width 0.3s ease; }
+        .cf-progress-pct { font-size: 12px; color: #3E4963; white-space: nowrap; }
+
+        .req-grid { grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); column-gap: 14px; row-gap: 14px; }
+        .req-grid .compliance-req-item,
+        .req-grid .compliance-req-item[data-req-status],
+        .req-grid .compliance-req-item[data-req-status]:hover,
+        .req-grid .compliance-req-item:hover {
+            padding: 0; margin-bottom: 0; border: 1px solid #A3AFC7; border-radius: 0;
+            background: #ffffff; box-shadow: 0 1px 3px rgba(27,42,74,0.16);
+            overflow: hidden; display: flex; flex-direction: column;
+        }
+        .req-grid .compliance-req-item:last-child { margin-bottom: 0; }
+        .req-grid .compliance-req-top { flex: 1; align-items: stretch; text-align: left; gap: 0; }
+
+        /* order inside a card: preview → name → remark / notes → upload row (markup order is unchanged) */
+        .compliance-req-top > .req-preview-wrap    { order: 0; }
+        .compliance-req-top > .req-info            { order: 1; }
+        .compliance-req-top > .compliance-req-info { order: 2; }
+        .compliance-req-top > .compliance-req-action { order: 3; }
+
+        .req-grid .compliance-req-item .req-info { font-size: 13.5px; font-weight: 700; color: #1B2A4A; letter-spacing: 0; line-height: 1.35; padding: 12px 12px 0; margin: 0; width: auto; }
+        .req-grid .compliance-req-top > .req-info { margin-bottom: 0; }
+        .req-grid .compliance-req-info { align-items: stretch; text-align: left; padding: 8px 12px 0; gap: 8px; width: auto; }
+        .req-grid .compliance-req-action { padding: 8px 12px 12px; margin-top: auto; width: auto; }
+
+        /* preview area — grey panel, picture fills it, status pill in the corner */
+        .req-grid .req-preview-wrap,
+        .req-grid .req-preview-wrap.req-preview-wrap--rejected,
+        .req-grid .compliance-req-item.req-staged .req-preview-wrap.req-preview-wrap--rejected {
+            position: relative; width: 100%; max-width: none; height: auto; min-height: 176px; flex: 1 0 176px;
+            box-sizing: border-box; padding: 0; background: #E4EAF4; border-radius: 0;
+            display: flex; align-items: center; justify-content: center;
+        }
+        .req-grid .req-preview-wrap .req-preview-slot,
+        .req-grid .req-preview-wrap--rejected .req-preview-slot,
+        .req-grid .compliance-req-item.req-staged .req-preview-wrap--rejected .req-preview-slot {
+            position: absolute; inset: 0; width: auto; height: auto;
+            display: flex; align-items: center; justify-content: center;
+        }
+        .req-grid .req-thumb-img,
+        .req-grid .req-thumb-img:hover {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%; margin: 0;
+            border: none; border-radius: 0; object-fit: cover; object-position: top center;
+            box-shadow: none; transform: none; background: transparent;
+        }
+        .req-grid .req-thumb-wrap { width: 110px; height: 110px; border-radius: 0; border: 1px solid #A3AFC7; box-shadow: none; }
+        .req-grid .req-thumb-wrap:hover { transform: none; box-shadow: none; }
+        .req-grid .compliance-req-item .req-thumb-img,
+        .req-grid .compliance-req-item .req-thumb-wrap { border-color: #A3AFC7; }
+        .req-grid .compliance-req-item .req-thumb-img { border: none; }
+
+        .req-grid .req-thumb-empty,
+        .req-grid .req-rej-placeholder {
+            position: absolute; top: 14px; right: 14px; bottom: 14px; left: 14px; width: auto; height: auto;
+            box-sizing: border-box; border-radius: 0; gap: 6px; flex-shrink: 1;
+            font-size: 12px; font-weight: 600; line-height: 1.4; text-align: center;
+        }
+        .req-grid .req-thumb-empty { background: transparent; border: 1px dashed #A3AFC7; color: #3E4963; }
+        .req-grid .req-thumb-empty i, .req-grid .req-thumb-empty i.fa-file-circle-xmark { font-size: 20px; color: #3E4963; }
+        .req-grid .req-thumb-empty span { font-size: 12px; font-weight: 600; letter-spacing: 0; text-transform: none; }
+        .req-grid .req-rej-placeholder { background: #F2D5D1; border: 1px dashed #D49A94; color: #A02A2A; gap: 8px; }
+        .req-grid .req-rej-placeholder i { font-size: 24px; }
+
+        /* status pill — every state (Verified / Pending / Rejected / Not Submitted) */
+        .req-grid .req-card-ribbon { top: 10px; right: 10px; }
+        .req-grid .req-rb { font-size: 11px; padding: 3px 9px; border-radius: 0; }
+        .req-rb-verified { background: #D9E8D2; color: #2C5A2C; }
+        .req-rb-pending  { background: #F3E7B5; color: #7A5A0B; }
+        .req-rb-awaiting { background: #E4EAF4; color: #3E4963; }
+        .req-rb-rejected { background: #F2D5D1; color: #A02A2A; }
+
+        /* remark + staged note */
+        .req-grid .req-card-remark { background: #F2D5D1; border: 1px solid #D49A94; border-radius: 0; color: #A02A2A; font-size: 12px; padding: 7px 10px; }
+        .req-grid .req-staged-note { border-radius: 0; }
+
+        /* upload row: [icon] label [Choose] — same as AccomForm's requirement cards */
+        .req-grid .req-file-drop {
+            border: 1px solid #A3AFC7; border-radius: 0; background: #ffffff;
+            padding: 6px 6px 6px 10px; min-height: 0; gap: 6px; justify-content: flex-start; text-align: left;
+        }
+        .req-grid .req-file-drop::after {
+            content: 'Choose'; margin-left: auto; flex-shrink: 0; white-space: nowrap;
+            background: var(--neust-maroon); color: #ffffff; font-size: 11px; font-weight: 600;
+            text-transform: uppercase; letter-spacing: 0.3px; padding: 6px 10px;
+        }
+        .req-grid .req-file-icon { font-size: 12px; color: #1B2A4A; }
+        .req-grid .req-file-text { font-size: 11px; font-weight: 600; color: #1B2A4A; flex: 1; min-width: 0; }
+        /* rejected requirement: the button label reads "Re-upload required" in red (until a replacement is chosen) */
+        .req-grid .compliance-req-item[data-req-status="denied"] .req-file-text { color: #A02A2A; }
+        .req-grid .compliance-req-item.req-staged .req-file-text { color: #1B2A4A; }
+        .req-grid .req-file-drop.has-file { border-color: #2C5A2C; background: #EAF3EA; }
+        .req-grid .verified-lock { border-radius: 0; font-size: 12px; padding: 8px 10px; }
+
+        /* several saved / selected files — the layered card stack, squared like the rest */
+        .req-grid .req-file-stack .req-stack-layer { border-radius: 0; border-color: #C3CADA; }
+
+
+        /* ══ ADJUSTMENT: "Only One PDF Allowed" / "Mixed File Formats" popup — same design as AccomForm.php's ══ */
+        .cf-pdf-overlay {
+            display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.5); justify-content: center; align-items: center; z-index: 10000;
+            animation: fadeInModal 0.25s ease;
+        }
+        .cf-pdf-box {
+            background: #ffffff; padding: 32px; border-radius: 0; border: 1px solid #dcdfe6;
+            width: 420px; max-width: 92%; text-align: center; box-shadow: none;
+            animation: popIn 0.3s ease;
+        }
+        .cf-pdf-title { font-size: 18px; font-weight: 700; color: #1e293b; margin: 0 0 8px; text-transform: uppercase; letter-spacing: 0.3px; }
+        .cf-pdf-msg   { color: #5A6272; font-size: 14px; margin: 0 0 24px; line-height: 1.6; }
+        .cf-pdf-list  {
+            text-align: left; background: #EEF1F6; border: 1px solid #C3CADA; border-radius: 0;
+            padding: 12px 16px 12px 32px; margin: 0 0 18px; font-size: 13px; color: #1B2A4A; line-height: 1.8;
+        }
+        .cf-pdf-btn {
+            background: var(--neust-maroon); color: #ffffff; border: 1px solid var(--neust-maroon);
+            padding: 10px 28px; border-radius: 0; font-weight: 600; font-size: 12px; cursor: pointer;
+            text-transform: uppercase; letter-spacing: 0.4px; transition: opacity 0.2s; font-family: inherit;
+        }
+        .cf-pdf-btn:hover { opacity: 0.88; }
+        .cf-pdf-btn:focus-visible { outline: 2px solid var(--neust-maroon); outline-offset: 2px; }
+        /* ADJUSTMENT (action loading page): the "Upload Problem" popup now has the same square look as the page's other
+           popups (.cf-pdf-*, same as AccomForm.php): square box, uppercase dark title, the problems in a boxed list and a
+           square button. Scoped CSS only, so every place that opens it (page reload, background submit) matches. */
+        #complianceErrorModal .modal-content {
+            background: #ffffff; padding: 32px; border-radius: 0; border: 1px solid #dcdfe6;
+            width: 420px; max-width: 92%; text-align: center; box-shadow: none;
+        }
+        #complianceErrorModal .notif-modal-title { font-size: 18px; color: #1e293b; text-transform: uppercase; letter-spacing: 0.3px; }
+        #complianceErrorModal .notif-modal-msg {
+            text-align: left; background: #EEF1F6; border: 1px solid #C3CADA; border-radius: 0;
+            padding: 12px 16px; margin: 0 0 18px; font-size: 13px; color: #1B2A4A; line-height: 1.8; word-break: break-word;
+        }
+        #complianceErrorModal .notif-modal-btn {
+            background: var(--neust-maroon); color: #ffffff; border: 1px solid var(--neust-maroon); border-radius: 0;
+            padding: 10px 28px; font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: 0.4px; font-family: inherit;
+        }
+        /* ADJUSTMENT: small helper line under the file list of the file-size popup */
+        .cf-pdf-list li.cf-pdf-tip { list-style: none; margin-left: -16px; margin-top: 4px; font-size: 12px; color: #5A6272; line-height: 1.5; }
+
+        /* ══ ADJUSTMENT: TWO-PAGE LAYOUT (same pattern as AccomForm.php) ══
+           "Company Information" (the input fields + their own Save button) and
+           "Requirements" (MOA Document Status + Compliance Requirements + their
+           own Submit button) are now separate pages switched by square tabs.
+           Both pages still live inside the page's one <form>, so every field,
+           name, id, handler and script is exactly as before. */
+        .cf-page-switcher {
+            display: flex; gap: 8px; margin-bottom: 30px;
+            border-bottom: 1px solid #dcdfe6; padding-bottom: 14px;
+            padding-right: 44px; /* room for the "i" info button */
+            flex-wrap: wrap; align-items: center;
+        }
+        .cf-switch-page-btn {
+            background: #fff; border: 1px solid #dcdfe6; padding: 10px 18px;
+            font-size: 12px; font-weight: 600; color: var(--neust-maroon);
+            cursor: pointer; border-radius: 0; text-transform: uppercase; letter-spacing: 0.4px;
+            transition: background 0.2s, color 0.2s, opacity 0.2s;
+            font-family: inherit; display: inline-flex; align-items: center;
+        }
+        .cf-switch-page-btn i { margin-right: 8px; }
+        .cf-switch-page-btn.active { background: var(--neust-maroon); border-color: var(--neust-maroon); color: #fff; }
+        .cf-switch-page-btn:not(.active):hover { background: #f3f4f7; color: var(--neust-maroon); }
+        .cf-switch-page-btn:focus-visible { outline: 2px solid var(--neust-maroon); outline-offset: 2px; }
+        .cf-page-content { display: none; animation: cfPageFade 0.25s ease-out; }
+        .cf-page-content.cf-active-page { display: block; }
+        @keyframes cfPageFade { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+        .cf-info-save-row { margin-top: 24px; }
+        @media (max-width: 768px) { .cf-switch-page-btn { flex: 1; justify-content: center; } }
+        @media (prefers-reduced-motion: reduce) { .cf-page-content { animation: none; } }
+
     </style>
 </head>
 <body>
@@ -4427,6 +4814,17 @@ $cfLiveState = [
         <div class="global-loading-text">
             <span id="globalLoadingLabel">Loading</span>
             <span class="global-loading-dots"><span>.</span><span>.</span><span>.</span></span>
+        </div>
+        <!-- ADJUSTMENT (action loading page): success state — check icon + message + the AREAS that were updated
+             (same pattern as admin_student_list.php's success loading page). Shown by showGlobalSuccess(). -->
+        <div class="global-loading-success" id="globalLoadingSuccess" role="status" aria-live="polite">
+            <div class="gls-check"><i class="fas fa-check"></i></div>
+            <div class="gls-title" id="globalLoadingSuccessTitle">Success</div>
+            <div class="gls-message" id="globalLoadingSuccessMsg"></div>
+            <div class="gls-areas" id="globalLoadingSuccessAreas"></div>
+            <div class="gls-warn" id="globalLoadingSuccessWarn"></div>
+            <div class="gls-sub" id="globalLoadingSuccessSub"></div>
+            <button type="button" class="gls-continue" id="globalLoadingContinueBtn">Continue</button>
         </div>
     </div>
 </div>
@@ -4536,12 +4934,33 @@ $cfLiveState = [
 <div id="complianceErrorModal" class="modal" style="z-index:10000;">
     <div class="modal-content">
         <?php /* ADJUSTMENT (this revision): emoji icon removed from this popup. */ ?>
-        <p class="warn-modal-title">Upload Problem</p>
-        <p class="warn-modal-msg" id="complianceErrorMsg">Some documents could not be uploaded.</p>
-        <button id="closeComplianceErrorModal" class="warn-modal-btn">OK, I'll fix it</button>
+        <?php /* ADJUSTMENT: uses the page's standard popup look (.notif-modal-title / -msg / -btn, same as the "Submission Successful" popup) instead of the amber warning style. */ ?>
+        <p class="notif-modal-title">Upload Problem</p>
+        <p class="notif-modal-msg" id="complianceErrorMsg">Some documents could not be uploaded.</p>
+        <button id="closeComplianceErrorModal" class="notif-modal-btn">OK, I'll fix it</button>
     </div>
 </div>
    
+<!-- ADJUSTMENT: PDF-limit popup ("Only One PDF Allowed" / "Mixed File Formats Not Allowed") — same design as AccomForm.php's -->
+<div id="cfPdfLimitModal" class="cf-pdf-overlay">
+    <div class="cf-pdf-box">
+        <p class="cf-pdf-title" id="cfPdfLimitTitle">Only One PDF Allowed</p>
+        <p class="cf-pdf-msg" id="cfPdfLimitMsg"></p>
+        <ul class="cf-pdf-list" id="cfPdfLimitList"></ul>
+        <button type="button" id="closeCfPdfLimit" class="cf-pdf-btn">OK, Fix It</button>
+    </div>
+</div>
+
+<!-- ADJUSTMENT: requirement-status popup ("Great Job!" / "Let's Fix This Together" / "Under Review") — same design and wording
+     as AccomForm.php's status popup. Reuses the page's .cf-pdf-* square popup box; filled and shown by the live-updates script. -->
+<div id="cfStatusChangedModal" class="cf-pdf-overlay" role="dialog" aria-modal="true" aria-labelledby="cfStatusChangedTitle">
+    <div class="cf-pdf-box">
+        <p class="cf-pdf-title" id="cfStatusChangedTitle">Requirement Status Updated</p>
+        <p class="cf-pdf-msg" id="cfStatusChangedMsg">A requirement status has been updated by the administrator.</p>
+        <button type="button" id="closeCfStatusChanged" class="cf-pdf-btn">OK</button>
+    </div>
+</div>
+
 <!-- ADJUSTMENT (this revision): popup opened by the new "i" info button in the
      top-right corner of the form card. Holds the Classification notice and, only
      when applicable, the MOA-creation notice — same conditional logic as before,
@@ -4842,7 +5261,309 @@ $cfLiveState = [
                 <i class="fas fa-info-circle"></i>
             </button>
 
-            <form action="" method="POST" enctype="multipart/form-data">
+            <form action="" method="POST" enctype="multipart/form-data" id="cfMainForm">
+
+                <?php
+                // ADJUSTMENT: which page opens first — the Requirements page when the administrator
+                // flagged the MOA for revision (that panel lives there), otherwise Company Information.
+                $cfInitialPage = !empty($moa_needs_revision) ? 'cf-requirements-page' : 'cf-info-page';
+                ?>
+                <div class="cf-page-switcher">
+                    <button type="button" class="cf-switch-page-btn" data-page="cf-info-page">
+                        <i class="fas fa-building"></i> Company Details &amp; MOA
+                    </button>
+                    <button type="button" class="cf-switch-page-btn" data-page="cf-requirements-page">
+                        <i class="fas fa-clipboard-check"></i> Requirements
+                    </button>
+                </div>
+
+<?php
+// ADJUSTMENT: one requirement card, rendered by a closure so the SAME markup (ids, data attributes, input names, status
+// logic) can be used in the Requirements grid and for the MOA requirement on the Company Information page.
+$cfRenderReqCard = function ($reqKey, $reqLabel) use ($company_requirement_rows, $moa_existing_reqs) {
+                        $isMoaExistingItem = array_key_exists($reqKey, $moa_existing_reqs);
+
+                        // FIX (this update): $rowsForKey is now the FULL
+                        // ARRAY of every company_requirements row saved
+                        // under this requirement_type (see the fetch query
+                        // above), not just one. A requirement with 2+ saved
+                        // files renders as a single overlaying "stacked
+                        // card" entry further down, mirroring the same
+                        // visual already used for a fresh multi-file
+                        // selection in company_register.php's Step 3.
+                        $reqAllRows   = $company_requirement_rows[$reqKey] ?? [];
+                        // UPDATED (this adjustment): when the admin REJECTS a requirement its file(s) are removed but the
+                        // rows stay (status "Rejected" + the admin's remark), so that the company can see why. Only rows
+                        // that still hold a file are files — for the count, the stacked card and the preview — while the
+                        // status below is still worked out from EVERY row. Before, those emptied rows were counted as
+                        // files, so a rejected requirement kept showing "N files" / a broken "Preview unavailable" tile.
+                        $rowsForKey   = array_values(array_filter($reqAllRows, function ($rrf) { return !empty($rrf['file_name']); }));
+                        $reqFileCount = count($rowsForKey);
+                        $reqHasFile   = $reqFileCount > 0;
+
+                        // Aggregate status across every file saved for this
+                        // requirement: Denied takes priority (it needs the
+                        // company's attention), then Pending, and only
+                        // Verified when EVERY file for this requirement has
+                        // individually been verified.
+                        $reqStatus = null;
+                        $reqRemark = '';
+                        if (!empty($reqAllRows)) {
+                            $hasDenied = false; $hasNonVerified = false;
+                            foreach ($reqAllRows as $rr) {
+                                $st = $rr['status'] ?? 'Pending';
+                                if (cfIsRejectedStatus($st)) {
+                                    $hasDenied = true;
+                                    if (empty($reqRemark) && !empty($rr['remark'])) $reqRemark = $rr['remark'];
+                                }
+                                if ($st !== 'Verified') $hasNonVerified = true;
+                            }
+                            if ($hasDenied) $reqStatus = 'Rejected';
+                            elseif ($hasNonVerified) $reqStatus = 'Pending';
+                            else $reqStatus = 'Verified';
+                        }
+
+                        // Per-file metadata (id + whether it's a PDF) for
+                        // the overlaying card / preview modal below.
+                        $reqFileMetaList = [];
+                        foreach ($rowsForKey as $rr) {
+                            $isPdfRow = false;
+                            if (!empty($rr['file_name'])) {
+                                $finfo_rr = new finfo(FILEINFO_MIME_TYPE);
+                                $mime_rr  = $finfo_rr->buffer($rr['file_name']);
+                                $isPdfRow = (strpos($mime_rr, 'pdf') !== false || strpos($mime_rr, 'octet') !== false);
+                            }
+                            $reqFileMetaList[] = ['id' => (int) $rr['id'], 'isPdf' => $isPdfRow];
+                        }
+                        $reqFileMetaJson = htmlspecialchars(json_encode($reqFileMetaList), ENT_QUOTES);
+
+                        // The internal token stays 'denied' (the status-aware CSS and JS below key on it); only the LABEL shown to the company changed.
+                        $badgeClass = ($reqStatus === 'Rejected') ? 'denied' : ($reqStatus ? strtolower($reqStatus) : 'not-submitted');
+                        $badgeLabel = $reqStatus ?: 'Not Submitted';
+                        $cfCardSig  = cfLiveRowsSig($reqAllRows); // LIVE UPDATES: changes whenever this requirement's rows change
+                    ?>
+                    <!-- NEW (this revision) — STATUS DETECTION HOOKS.
+                         The card now carries the requirement's real,
+                         server-computed status (the very same $badgeClass /
+                         $badgeLabel values that already render the status
+                         pill inside it), plus whether it currently has any
+                         saved file and how many. The status-aware CSS above
+                         keys off data-req-status directly, so the card's
+                         appearance updates the moment the page renders —
+                         no click, no extra request. The script at the
+                         bottom reads the same attributes to apply the
+                         behavioural parts (drop-zone wording, the "Action
+                         required" flag, and the Denied-only staged-note
+                         rule). Purely additive attributes: no existing id,
+                         class, input name, PHP branch or logic changed. -->
+                    <div class="compliance-req-item"
+                         data-req-status="<?= htmlspecialchars($badgeClass, ENT_QUOTES) ?>"
+                         data-req-status-label="<?= htmlspecialchars($badgeLabel, ENT_QUOTES) ?>"
+                         data-req-key="<?= htmlspecialchars($reqKey, ENT_QUOTES) ?>"
+                         data-req-has-file="<?= $reqHasFile ? '1' : '0' ?>"
+                         data-req-file-count="<?= (int) $reqFileCount ?>"
+                         data-live-sig="<?= htmlspecialchars($cfCardSig, ENT_QUOTES) ?>">
+                        <div class="compliance-req-top">
+                            <!-- ADJUSTMENT (this revision): the requirement name is now the
+                                 FIRST element in the card, above the file preview. Same
+                                 markup, same .req-info class and same $reqLabel / MOA-tag
+                                 output as before — only its position in the card moved. -->
+                            <div class="req-info">
+                                <?= htmlspecialchars($reqLabel) ?>
+                                <?php if ($isMoaExistingItem): ?>
+                                    <span class="req-moa-tag">MOA Upload</span>
+                                <?php endif; ?>
+                            </div>
+
+                            <!-- NEW: every file-preview variant (single thumb/PDF tile, the
+                                 multi-file stack, or the empty placeholder) now lives inside
+                                 this single wrapper so JS can swap it out as one unit the
+                                 instant the company selects a new/replacement file. -->
+                            <?php
+                            // ADJUSTMENT (this revision): Pending / Rejected use the admin panel's display —
+                            // status pill on the preview's top-right corner (see .req-card-ribbon CSS).
+                            $reqUsesRibbon = true; // ADJUSTMENT: the status pill is now shown for every state (Verified / Pending / Rejected / Not Submitted), like AccomForm.php
+                            $reqRejPanel   = ($reqStatus === 'Rejected' && !$reqHasFile); // preview is the "Awaiting re-upload" placeholder
+                            ?>
+                            <div class="req-preview-wrap<?= $reqRejPanel ? ' req-preview-wrap--rejected' : '' ?>">
+                            <div class="req-preview-slot" id="reqPreviewSlot_<?= htmlspecialchars($reqKey) ?>" data-req-key="<?= htmlspecialchars($reqKey, ENT_QUOTES) ?>">
+                            <?php if ($reqHasFile && $reqFileCount === 1): ?>
+                                <!-- Single saved file — same plain thumbnail / PDF badge as before,
+                                     now enlarged (see .req-thumb-wrap / .req-thumb-img CSS) to match
+                                     the height of the upload/reupload button. -->
+                                <?php if ($reqFileMetaList[0]['isPdf']): ?>
+                                    <div class="req-thumb-wrap creq-preview-trigger" data-req-key="<?= htmlspecialchars($reqKey, ENT_QUOTES) ?>" data-req-files="<?= $reqFileMetaJson ?>" data-req-label="<?= htmlspecialchars($reqLabel, ENT_QUOTES) ?>" title="Preview <?= htmlspecialchars($reqLabel) ?>">
+                                        <i class="fas fa-file-pdf"></i>
+                                    </div>
+                                <?php else: ?>
+                                    <!-- ADJUSTMENT (this revision): if this file can no longer be streamed
+                                         back (e.g. the admin removed the blob when denying it, or the stored
+                                         bytes aren't a renderable image), the browser would otherwise show a
+                                         broken-image icon with the alt/title text spilling across the tile.
+                                         The inline onerror below swaps the <img> for the SAME neutral
+                                         placeholder tile used by a requirement with no file yet, so the card
+                                         keeps its shape. It is self-contained (no helper function, so it works
+                                         even if the error fires before the page's scripts run) and touches
+                                         nothing else — the status badge, denial reason and upload area are
+                                         all still rendered exactly as before. -->
+                                    <img class="req-thumb-img creq-preview-trigger" data-req-key="<?= htmlspecialchars($reqKey, ENT_QUOTES) ?>" data-req-files="<?= $reqFileMetaJson ?>" data-req-label="<?= htmlspecialchars($reqLabel, ENT_QUOTES) ?>"
+                                        src="CompanyForm.php?stream_own_requirement=<?= urlencode($reqKey) ?>&file_id=<?= (int) $reqFileMetaList[0]['id'] ?>"
+                                        alt=""
+                                        onerror="this.onerror=null;var d=document.createElement('div');d.className='req-thumb-empty';d.setAttribute('aria-hidden','true');var ic=document.createElement('i');ic.className='fas fa-file-circle-xmark';var sp=document.createElement('span');sp.textContent='Preview unavailable';d.appendChild(ic);d.appendChild(sp);if(this.parentNode){this.parentNode.replaceChild(d,this);}"
+                                        title="Preview <?= htmlspecialchars($reqLabel) ?>">
+                                <?php endif; ?>
+                            <?php elseif ($reqHasFile && $reqFileCount > 1): ?>
+                                <!-- FIX (this update): 2+ saved files for this requirement — show as one
+                                     overlaying "stacked card" entry instead of only ever displaying the
+                                     last-fetched row. Click opens the preview modal, which can page
+                                     through every file via prev/next (see the JS further down).
+                                     ADJUSTMENT (this revision): stack enlarged (see .req-file-stack CSS)
+                                     to match the enlarged single-file thumbnail / button height. -->
+                                <div class="req-file-stack-wrap creq-preview-trigger" data-req-key="<?= htmlspecialchars($reqKey, ENT_QUOTES) ?>" data-req-files="<?= $reqFileMetaJson ?>" data-req-label="<?= htmlspecialchars($reqLabel, ENT_QUOTES) ?>" title="Preview all <?= (int) $reqFileCount ?> files for <?= htmlspecialchars($reqLabel) ?>">
+                                    <div class="req-file-stack">
+                                        <?php
+                                        $layerCount = min(3, $reqFileCount);
+                                        for ($li = $layerCount - 1; $li >= 0; $li--):
+                                            $layerMeta = $reqFileMetaList[$li];
+                                        ?>
+                                        <?php if ($layerMeta['isPdf']): ?>
+                                            <div class="req-stack-layer req-stack-layer-pdf layer-<?= $li + 1 ?>"><i class="fas fa-file-pdf"></i></div>
+                                        <?php else: ?>
+                                            <div class="req-stack-layer layer-<?= $li + 1 ?>" style="background-image:url('CompanyForm.php?stream_own_requirement=<?= urlencode($reqKey) ?>&file_id=<?= (int) $layerMeta['id'] ?>');"></div>
+                                        <?php endif; ?>
+                                        <?php endfor; ?>
+                                        <span class="req-stack-count-badge"><?= (int) $reqFileCount ?></span>
+                                    </div>
+                                    <div class="req-file-stack-label"><?= (int) $reqFileCount ?> files</div>
+                                </div>
+                            <?php else: ?>
+                                <!-- ADJUSTMENT (this revision): nothing has been uploaded for this
+                                     requirement yet, so the preview slot shows a neutral placeholder
+                                     tile instead of collapsing. This keeps every card in the grid the
+                                     same shape, exactly as in the supplied design. It is decorative
+                                     only — no preview trigger, no data attributes, no inputs, and it
+                                     never renders once a file exists. -->
+                                <?php if ($reqStatus === 'Rejected'): ?>
+                                <!-- ADJUSTMENT (this revision): a rejected requirement's file was removed by the admin —
+                                     shown with the same pink dashed "Rejected / Awaiting re-upload" placeholder the
+                                     admin panel uses (company_validation.php's .cv-rej-placeholder). -->
+                                <div class="req-rej-placeholder" aria-hidden="true">
+                                    <i class="fas fa-file-circle-xmark"></i>
+                                    <span>Awaiting re-upload</span>
+                                </div>
+                                <?php else: ?>
+                                <div class="req-thumb-empty" aria-hidden="true">
+                                    <i class="fas fa-hourglass-half"></i>
+                                    <span>No file yet</span>
+                                </div>
+                                <?php endif; ?>
+                            <?php endif; ?>
+                            </div>
+                            <?php if ($reqUsesRibbon): ?>
+                            <!-- ADJUSTMENT (this revision): the status pill on the preview's top-right corner. It keeps the
+                                 same id (reqStatusBadge_<key>) and status class the staging JS below already targets. -->
+                            <div class="req-card-ribbon <?= htmlspecialchars($badgeClass) ?>" id="reqStatusBadge_<?= htmlspecialchars($reqKey) ?>">
+                                <?php if ($reqStatus === 'Rejected'): ?>
+                                    <span class="req-rb req-rb-rejected"><i class="fas fa-ban"></i> <?= htmlspecialchars($badgeLabel) ?></span>
+                                <?php elseif ($reqStatus === 'Verified'): ?>
+                                    <span class="req-rb req-rb-verified"><i class="fas fa-check"></i> <?= htmlspecialchars($badgeLabel) ?></span>
+                                <?php elseif ($reqStatus): ?>
+                                    <span class="req-rb req-rb-pending"><?= htmlspecialchars($badgeLabel) ?></span>
+                                <?php else: ?>
+                                    <span class="req-rb req-rb-awaiting"><?= htmlspecialchars($badgeLabel) ?></span>
+                                <?php endif; ?>
+                            </div>
+                            <?php endif; ?>
+                            </div><!-- /.req-preview-wrap -->
+
+                            <!-- ADJUSTMENT (this revision): wrapped in .compliance-req-info so the
+                                 name / status block is its own vertically-centered flex column
+                                 between the file display and the action button.
+
+                                 ── UPDATED (this adjustment): status, the denial remark, and the
+                                 "action required" reminder used to be three separate stacked
+                                 elements (a status-badge pill, a remark-badge, and a CSS-only
+                                 "req-action-required" flag) — they are now ONE combined info box
+                                 (.req-status-combined) built from the exact same $badgeClass /
+                                 $badgeLabel / $reqRemark values as before, just presented together.
+                                 It keeps the same id (reqStatusBadge_<key>) the staging JS below
+                                 already hides on file-select, so that behavior is unchanged; the
+                                 separate remark-badge id and the CSS-only "req-action-required"
+                                 flag are retired since everything now lives in this one element. -->
+                            <?php /* ADJUSTMENT (this revision): a Verified requirement no longer shows the green "Verified" status box above the
+                                      "Verified — no further action needed" lock — the info block is hidden entirely so it leaves no empty gap. */ ?>
+                            <?php /* ADJUSTMENT (this revision): a Pending requirement now shows only the corner pill above, so its info block is hidden too (no empty gap). A Rejected one keeps this block for the "Remark:" box below. */ ?>
+                            <div class="compliance-req-info"<?= ($reqStatus === 'Verified' || $reqStatus === 'Pending' || !$reqStatus) ? ' style="display:none;"' : '' ?>>
+                                <?php if ($reqStatus === 'Rejected'): ?>
+                                <!-- ADJUSTMENT (this revision): the admin's rejection remark in its own pink "Remark:" box
+                                     (company_validation.php's .cv-card-remark). Same $reqRemark value as before; hidden by JS
+                                     the moment a replacement file is staged, together with the pill. -->
+                                <div class="req-card-remark" id="reqRemarkBox_<?= htmlspecialchars($reqKey) ?>"><i class="fas fa-comment-dots"></i><span><b>Remark:</b> <span class="req-card-remark-text"><?= htmlspecialchars(((string) $reqRemark) !== '' ? (string) $reqRemark : '—') ?></span></span></div>
+                                <?php endif; ?>
+                                <?php if (!$reqUsesRibbon && $reqStatus !== 'Verified'): ?>
+                                <div class="req-status-combined <?= htmlspecialchars($badgeClass) ?>" id="reqStatusBadge_<?= htmlspecialchars($reqKey) ?>">
+                                    <div class="req-status-combined-top">
+                                        <?php if ($reqStatus === 'Verified'): ?>
+                                            <i class="fas fa-check-circle"></i>
+                                        <?php elseif ($reqStatus === 'Rejected'): ?>
+                                            <i class="fas fa-times-circle"></i>
+                                        <?php elseif ($reqStatus): ?>
+                                            <i class="fas fa-clock"></i>
+                                        <?php else: ?>
+                                            <i class="fas fa-minus-circle"></i>
+                                        <?php endif; ?>
+                                        <span><?= htmlspecialchars($badgeLabel) ?></span>
+                                    </div>
+                                    <?php if ($reqStatus === 'Rejected'): ?>
+                                        <?php if (!empty($reqRemark)): ?>
+                                        <div class="req-status-combined-detail">Reason: <?= htmlspecialchars($reqRemark) ?></div>
+                                        <?php endif; ?>
+                                        <div class="req-status-combined-detail">Please re-upload this document.</div>
+                                    <?php endif; ?>
+                                </div>
+                                <?php endif; ?>
+
+                                <!-- NEW: hidden-by-default note shown by JS in place of the combined
+                                     status box above the instant a replacement file is staged for
+                                     THIS item — but only when this item was originally Denied (see
+                                     the wasDenied check in the change handler in the script below). -->
+                                <div class="req-staged-note" id="reqStagedNote_<?= htmlspecialchars($reqKey) ?>" style="display:none;">
+                                    <i class="fas fa-rotate"></i> New file selected — ready to resubmit
+                                </div>
+                            </div>
+
+                            <!-- ADJUSTMENT (this revision): the verified-lock badge / upload button
+                                 is now its own .compliance-req-action flex column, vertically
+                                 centered beside the file display and info block above, instead of
+                                 being stacked underneath the status badge inside the info column. -->
+                            <div class="compliance-req-action">
+                                <?php if ($reqStatus === 'Verified'): ?>
+                                    <div class="verified-lock">
+                                        <i class="fas fa-check-circle"></i> Verified — no further action needed
+                                    </div>
+                                <?php else: ?>
+                                    <div class="req-file-drop" id="reqDrop_c_<?= htmlspecialchars($reqKey) ?>" onclick="document.getElementById('reqFileInput_<?= htmlspecialchars($reqKey) ?>').click()">
+                                        <span class="req-file-icon"><i class="fas fa-upload"></i></span>
+                                        <span class="req-file-text" id="reqFileText_<?= htmlspecialchars($reqKey) ?>">
+                                            <?= ($reqStatus === 'Rejected') ? 'Re-upload' : ($reqHasFile ? 'Click to replace file(s)' : 'Click to upload') ?>
+                                        </span>
+                                    </div>
+                                    <!-- FIX (this update): now accepts multiple files (name="req_<key>[]"),
+                                         matching company_register.php's Step 3 requirement uploads. A hidden
+                                         "_expected_count" field (kept in sync by JS below) lets the server
+                                         detect and report a request that silently loses files in transit. -->
+                                    <input type="file" id="reqFileInput_<?= htmlspecialchars($reqKey) ?>" name="req_<?= htmlspecialchars($reqKey) ?>[]" multiple
+                                        class="compliance-file-input" data-label="<?= htmlspecialchars($reqLabel) ?>" data-req-key="<?= htmlspecialchars($reqKey, ENT_QUOTES) ?>"
+                                        accept="image/*,.pdf,application/pdf" style="display:none;">
+                                    <input type="hidden" id="reqCount_c_<?= htmlspecialchars($reqKey) ?>" name="req_<?= htmlspecialchars($reqKey) ?>_expected_count" value="0">
+                                <?php endif; ?>
+                            </div>
+                        </div>
+                    </div>
+<?php };
+?>
+
+                <div id="cf-info-page" class="cf-page-content">
 
                 <?php
                 // ── NEW (this adjustment): computed once, used by every
@@ -4876,19 +5597,19 @@ $cfLiveState = [
                 <?php if ($cfExistingHasEmptyFields): ?>
                 <div class="moa-creation-banner">
                     <i class="fas fa-unlock"></i>
-                    <span>Some of your company profile fields are still blank. Any blank field below is now unlocked — please fill it in, then click <strong>Submit Requirements</strong> at the bottom of this page to save it.</span>
+                    <span>Some of your company profile fields are still blank. Any blank field below is now unlocked — please fill it in, then click <strong>Save Changes</strong> at the bottom of this page to save it.</span>
                 </div>
                 <?php elseif ($moa_is_existing_request): ?>
                 <?php // ADJUSTMENT (this update): every field is unlocked for "Existing" companies. ?>
                 <div class="moa-creation-banner">
                     <i class="fas fa-unlock"></i>
-                    <span>Your company profile fields are unlocked. You can update them below, then click <strong>Submit Requirement Documents</strong> at the bottom of this page to save your changes.</span>
+                    <span>Your company profile fields are unlocked. You can update them below, then click <strong>Save Changes</strong> at the bottom of this page to save your changes.</span>
                 </div>
                 <?php elseif (!$moa_needs_initial_creation): ?>
                 <?php // NEW (this adjustment): fields not printed on the MOA are editable — see $cfNonMoaFieldLock below. ?>
                 <div class="moa-creation-banner">
                     <i class="fas fa-unlock"></i>
-                    <span>Fields that appear on your MOA are locked. <strong>Telephone / Contact Number</strong> and <strong>Company Profile / Brief Description</strong> are not part of the MOA, so you can update them below, then click <strong>Submit Requirement Documents</strong> at the bottom of this page to save your changes.</span>
+                    <span>Fields that appear on your MOA are locked. <strong>Telephone / Contact Number</strong> and <strong>Company Profile / Brief Description</strong> are not part of the MOA, so you can update them below, then click <strong>Save Changes</strong> at the bottom of this page to save your changes.</span>
                 </div>
                 <?php endif; ?>
 
@@ -5242,6 +5963,33 @@ $cfLiveState = [
                 </div><!-- /#cfCompanyInfoRegion -->
                 <?php endif; ?>
 
+                <?php
+                // ADJUSTMENT: the MOA requirement (the "MOA Document (Existing Partnership)" upload, only present for
+                // "Existing" request-type companies) now sits here on the Company Information page, directly below
+                // Company Profile / Brief Description. It is the same card as before (same ids, input names, status
+                // pill, preview and upload behaviour) and is saved by this page's Save Changes button through the
+                // same submit_compliance_docs handler. "New" request-type companies are unaffected (no such item).
+                $cfInfoMoaKeys = array_values(array_filter(array_keys($reqDefsForType), function ($k) use ($moa_existing_reqs) {
+                    return array_key_exists($k, $moa_existing_reqs);
+                }));
+                ?>
+                <?php if (!empty($cfInfoMoaKeys)): ?>
+                <div class="cf-info-moa-section" id="cfInfoMoaSection">
+                    <h3 style="color: var(--neust-maroon); font-size: 16px; margin: 28px 0 4px;">
+                        <i class="fas fa-file-signature" style="margin-right: 10px;"></i>MOA Requirement
+                    </h3>
+                    <p style="font-size:12px;color:#718096;margin:0 0 16px;">
+                        Since your MOA request type is <strong>Existing</strong>, please upload your MOA document here, then click <strong>Save Changes</strong> below.
+                        Accepted: PDF or any picture format &middot; Max <?= (int) $reqMaxFileSizeMB ?> MB per file.
+                    </p>
+                    <div class="compliance-status-card">
+                        <div class="req-grid cf-info-moa-grid">
+                        <?php foreach ($cfInfoMoaKeys as $cfMoaKey) { $cfRenderReqCard($cfMoaKey, $reqDefsForType[$cfMoaKey]); } ?>
+                        </div>
+                    </div>
+                </div>
+                <?php endif; ?>
+
                 <?php if ($moa_needs_initial_creation): ?>
 
                 <!-- ═══════════════════════════════════════════════
@@ -5280,6 +6028,19 @@ $cfLiveState = [
                     </button>
                 </div>
                 <?php endif; ?>
+
+                <?php if (!$moa_needs_initial_creation): ?>
+                <?php // ADJUSTMENT: the info page's own submit button — saves the editable profile fields (same submit_compliance_docs handler as before). ?>
+                <div class="cf-info-save-row">
+                    <button type="submit" name="submit_compliance_docs" value="1" class="submit-all">
+                        <i class="fas fa-save" style="margin-right:8px;"></i>Save Changes
+                    </button>
+                </div>
+                <?php endif; ?>
+
+                </div><!-- /#cf-info-page -->
+
+                <div id="cf-requirements-page" class="cf-page-content">
 
                 <?php if ($showMoaSection): ?>
                 <!-- ═══════════════════════════════════════════════
@@ -5716,9 +6477,9 @@ $cfLiveState = [
                     <i class="fas fa-clipboard-check" style="margin-right: 10px;"></i>Compliance Requirements (<?= htmlspecialchars(ucfirst($current_type)) ?>)
                 </h3>
                 <p style="font-size:12px;color:#718096;margin:0 0 16px;">
-                    Accepted: PDF, JPG, or PNG &middot; Max <?= (int)$reqMaxFileSizeMB ?>MB each. Uploading a new file for an item resubmits it for review.
+                    Accepted: PDF or any picture format (JPG, PNG, GIF, WEBP, BMP, ...) &middot; picture uploads support selecting multiple files, but PDF uploads are limited to one file &middot; Max <?= (int)$reqMaxFileSizeMB ?>MB each. Uploading a new file for an item resubmits it for review.
                     <?php if ($moa_request_type_norm === 'existing'): ?>
-                        Since your MOA request type is <strong>Existing</strong>, please also upload your MOA document below.
+                        Since your MOA request type is <strong>Existing</strong>, your MOA document is uploaded under <strong>MOA Requirement</strong> on the <strong>Company Details &amp; MOA</strong> page.
                     <?php endif; ?>
                 </p>
 
@@ -5765,38 +6526,26 @@ $cfLiveState = [
                      pills on the cards below. Only the states that actually occur are
                      shown, and the "all verified" banner replaces the counts entirely
                      once every requirement is verified. -->
-                <div class="req-status-summary <?= ($reqStatusCounts['verified'] === $reqTotalCount) ? 'all-verified' : '' ?>">
+                <?php
+                // ADJUSTMENT: summary line + progress bar (same as AccomForm.php's requirement cards)
+                $cfSumPct = $reqTotalCount ? (int) round($reqStatusCounts['verified'] / $reqTotalCount * 100) : 0;
+                ?>
+                <div class="cf-req-summary">
+                    <span class="cf-req-summary-text">
                     <?php if ($reqStatusCounts['verified'] === $reqTotalCount): ?>
-                        <span class="req-summary-chip verified">
-                            <i class="fas fa-circle-check"></i>
-                            All <?= (int) $reqTotalCount ?> compliance documents verified — nothing further to submit.
-                        </span>
+                        All <b><?= (int) $reqTotalCount ?></b> compliance documents verified &mdash; nothing further to submit.
                     <?php else: ?>
-                        <?php if ($reqStatusCounts['denied'] > 0): ?>
-                            <span class="req-summary-chip denied">
-                                <i class="fas fa-circle-xmark"></i>
-                                <?= (int) $reqStatusCounts['denied'] ?> rejected — needs re-upload
-                            </span>
-                        <?php endif; ?>
-                        <?php if ($reqStatusCounts['not-submitted'] > 0): ?>
-                            <span class="req-summary-chip not-submitted">
-                                <i class="fas fa-circle-minus"></i>
-                                <?= (int) $reqStatusCounts['not-submitted'] ?> not yet submitted
-                            </span>
-                        <?php endif; ?>
-                        <?php if ($reqStatusCounts['pending'] > 0): ?>
-                            <span class="req-summary-chip pending">
-                                <i class="fas fa-clock"></i>
-                                <?= (int) $reqStatusCounts['pending'] ?> awaiting review
-                            </span>
-                        <?php endif; ?>
-                        <?php if ($reqStatusCounts['verified'] > 0): ?>
-                            <span class="req-summary-chip verified">
-                                <i class="fas fa-circle-check"></i>
-                                <?= (int) $reqStatusCounts['verified'] ?> verified
-                            </span>
-                        <?php endif; ?>
+                        <b><?= (int) $reqTotalCount ?></b> requirements &middot;
+                        <b><?= (int) $reqStatusCounts['verified'] ?></b> verified &middot;
+                        <b><?= (int) $reqStatusCounts['pending'] ?></b> pending
+                        <?php if ($reqStatusCounts['denied'] > 0): ?> &middot; <b><?= (int) $reqStatusCounts['denied'] ?></b> rejected &mdash; needs re-upload<?php endif; ?>
+                        &middot; <b><?= (int) $reqStatusCounts['not-submitted'] ?></b> awaiting your submission
                     <?php endif; ?>
+                    </span>
+                    <div class="cf-progress">
+                        <div class="cf-progress-bar"><div class="cf-progress-fill" style="width:<?= $cfSumPct ?>%;"></div></div>
+                        <span class="cf-progress-pct"><?= $cfSumPct ?>% verified</span>
+                    </div>
                 </div>
                 <?php endif; ?>
                 </div><!-- /#cfReqSummaryRegion -->
@@ -5806,282 +6555,14 @@ $cfLiveState = [
                     <?php
                     $anyComplianceItemShown = false;
                     foreach ($reqDefsForType as $reqKey => $reqLabel):
+                        // ADJUSTMENT: the "MOA Document (Existing Partnership)" requirement now lives on the Company
+                        // Information page (under Company Profile / Brief Description) — see $cfRenderReqCard above.
+                        // It is still part of $reqDefsForType, so it stays counted in the status summary and saved by
+                        // the same submit_compliance_docs handler; it is only skipped in this grid.
+                        if (array_key_exists($reqKey, $moa_existing_reqs)) { continue; }
                         $anyComplianceItemShown = true;
-                        $isMoaExistingItem = array_key_exists($reqKey, $moa_existing_reqs);
-
-                        // FIX (this update): $rowsForKey is now the FULL
-                        // ARRAY of every company_requirements row saved
-                        // under this requirement_type (see the fetch query
-                        // above), not just one. A requirement with 2+ saved
-                        // files renders as a single overlaying "stacked
-                        // card" entry further down, mirroring the same
-                        // visual already used for a fresh multi-file
-                        // selection in company_register.php's Step 3.
-                        $reqAllRows   = $company_requirement_rows[$reqKey] ?? [];
-                        // UPDATED (this adjustment): when the admin REJECTS a requirement its file(s) are removed but the
-                        // rows stay (status "Rejected" + the admin's remark), so that the company can see why. Only rows
-                        // that still hold a file are files — for the count, the stacked card and the preview — while the
-                        // status below is still worked out from EVERY row. Before, those emptied rows were counted as
-                        // files, so a rejected requirement kept showing "N files" / a broken "Preview unavailable" tile.
-                        $rowsForKey   = array_values(array_filter($reqAllRows, function ($rrf) { return !empty($rrf['file_name']); }));
-                        $reqFileCount = count($rowsForKey);
-                        $reqHasFile   = $reqFileCount > 0;
-
-                        // Aggregate status across every file saved for this
-                        // requirement: Denied takes priority (it needs the
-                        // company's attention), then Pending, and only
-                        // Verified when EVERY file for this requirement has
-                        // individually been verified.
-                        $reqStatus = null;
-                        $reqRemark = '';
-                        if (!empty($reqAllRows)) {
-                            $hasDenied = false; $hasNonVerified = false;
-                            foreach ($reqAllRows as $rr) {
-                                $st = $rr['status'] ?? 'Pending';
-                                if (cfIsRejectedStatus($st)) {
-                                    $hasDenied = true;
-                                    if (empty($reqRemark) && !empty($rr['remark'])) $reqRemark = $rr['remark'];
-                                }
-                                if ($st !== 'Verified') $hasNonVerified = true;
-                            }
-                            if ($hasDenied) $reqStatus = 'Rejected';
-                            elseif ($hasNonVerified) $reqStatus = 'Pending';
-                            else $reqStatus = 'Verified';
-                        }
-
-                        // Per-file metadata (id + whether it's a PDF) for
-                        // the overlaying card / preview modal below.
-                        $reqFileMetaList = [];
-                        foreach ($rowsForKey as $rr) {
-                            $isPdfRow = false;
-                            if (!empty($rr['file_name'])) {
-                                $finfo_rr = new finfo(FILEINFO_MIME_TYPE);
-                                $mime_rr  = $finfo_rr->buffer($rr['file_name']);
-                                $isPdfRow = (strpos($mime_rr, 'pdf') !== false || strpos($mime_rr, 'octet') !== false);
-                            }
-                            $reqFileMetaList[] = ['id' => (int) $rr['id'], 'isPdf' => $isPdfRow];
-                        }
-                        $reqFileMetaJson = htmlspecialchars(json_encode($reqFileMetaList), ENT_QUOTES);
-
-                        // The internal token stays 'denied' (the status-aware CSS and JS below key on it); only the LABEL shown to the company changed.
-                        $badgeClass = ($reqStatus === 'Rejected') ? 'denied' : ($reqStatus ? strtolower($reqStatus) : 'not-submitted');
-                        $badgeLabel = $reqStatus ?: 'Not Submitted';
-                        $cfCardSig  = cfLiveRowsSig($reqAllRows); // LIVE UPDATES: changes whenever this requirement's rows change
+                        $cfRenderReqCard($reqKey, $reqLabel);
                     ?>
-                    <!-- NEW (this revision) — STATUS DETECTION HOOKS.
-                         The card now carries the requirement's real,
-                         server-computed status (the very same $badgeClass /
-                         $badgeLabel values that already render the status
-                         pill inside it), plus whether it currently has any
-                         saved file and how many. The status-aware CSS above
-                         keys off data-req-status directly, so the card's
-                         appearance updates the moment the page renders —
-                         no click, no extra request. The script at the
-                         bottom reads the same attributes to apply the
-                         behavioural parts (drop-zone wording, the "Action
-                         required" flag, and the Denied-only staged-note
-                         rule). Purely additive attributes: no existing id,
-                         class, input name, PHP branch or logic changed. -->
-                    <div class="compliance-req-item"
-                         data-req-status="<?= htmlspecialchars($badgeClass, ENT_QUOTES) ?>"
-                         data-req-status-label="<?= htmlspecialchars($badgeLabel, ENT_QUOTES) ?>"
-                         data-req-key="<?= htmlspecialchars($reqKey, ENT_QUOTES) ?>"
-                         data-req-has-file="<?= $reqHasFile ? '1' : '0' ?>"
-                         data-req-file-count="<?= (int) $reqFileCount ?>"
-                         data-live-sig="<?= htmlspecialchars($cfCardSig, ENT_QUOTES) ?>">
-                        <div class="compliance-req-top">
-                            <!-- ADJUSTMENT (this revision): the requirement name is now the
-                                 FIRST element in the card, above the file preview. Same
-                                 markup, same .req-info class and same $reqLabel / MOA-tag
-                                 output as before — only its position in the card moved. -->
-                            <div class="req-info">
-                                <?= htmlspecialchars($reqLabel) ?>
-                                <?php if ($isMoaExistingItem): ?>
-                                    <span class="req-moa-tag">MOA Upload</span>
-                                <?php endif; ?>
-                            </div>
-
-                            <!-- NEW: every file-preview variant (single thumb/PDF tile, the
-                                 multi-file stack, or the empty placeholder) now lives inside
-                                 this single wrapper so JS can swap it out as one unit the
-                                 instant the company selects a new/replacement file. -->
-                            <?php
-                            // ADJUSTMENT (this revision): Pending / Rejected use the admin panel's display —
-                            // status pill on the preview's top-right corner (see .req-card-ribbon CSS).
-                            $reqUsesRibbon = ($reqStatus === 'Pending' || $reqStatus === 'Rejected');
-                            $reqRejPanel   = ($reqStatus === 'Rejected' && !$reqHasFile); // preview is the "Awaiting re-upload" placeholder
-                            ?>
-                            <div class="req-preview-wrap<?= $reqRejPanel ? ' req-preview-wrap--rejected' : '' ?>">
-                            <div class="req-preview-slot" id="reqPreviewSlot_<?= htmlspecialchars($reqKey) ?>" data-req-key="<?= htmlspecialchars($reqKey, ENT_QUOTES) ?>">
-                            <?php if ($reqHasFile && $reqFileCount === 1): ?>
-                                <!-- Single saved file — same plain thumbnail / PDF badge as before,
-                                     now enlarged (see .req-thumb-wrap / .req-thumb-img CSS) to match
-                                     the height of the upload/reupload button. -->
-                                <?php if ($reqFileMetaList[0]['isPdf']): ?>
-                                    <div class="req-thumb-wrap creq-preview-trigger" data-req-key="<?= htmlspecialchars($reqKey, ENT_QUOTES) ?>" data-req-files="<?= $reqFileMetaJson ?>" data-req-label="<?= htmlspecialchars($reqLabel, ENT_QUOTES) ?>" title="Preview <?= htmlspecialchars($reqLabel) ?>">
-                                        <i class="fas fa-file-pdf"></i>
-                                    </div>
-                                <?php else: ?>
-                                    <!-- ADJUSTMENT (this revision): if this file can no longer be streamed
-                                         back (e.g. the admin removed the blob when denying it, or the stored
-                                         bytes aren't a renderable image), the browser would otherwise show a
-                                         broken-image icon with the alt/title text spilling across the tile.
-                                         The inline onerror below swaps the <img> for the SAME neutral
-                                         placeholder tile used by a requirement with no file yet, so the card
-                                         keeps its shape. It is self-contained (no helper function, so it works
-                                         even if the error fires before the page's scripts run) and touches
-                                         nothing else — the status badge, denial reason and upload area are
-                                         all still rendered exactly as before. -->
-                                    <img class="req-thumb-img creq-preview-trigger" data-req-key="<?= htmlspecialchars($reqKey, ENT_QUOTES) ?>" data-req-files="<?= $reqFileMetaJson ?>" data-req-label="<?= htmlspecialchars($reqLabel, ENT_QUOTES) ?>"
-                                        src="CompanyForm.php?stream_own_requirement=<?= urlencode($reqKey) ?>&file_id=<?= (int) $reqFileMetaList[0]['id'] ?>"
-                                        alt=""
-                                        onerror="this.onerror=null;var d=document.createElement('div');d.className='req-thumb-empty';d.setAttribute('aria-hidden','true');var ic=document.createElement('i');ic.className='fas fa-file-circle-xmark';var sp=document.createElement('span');sp.textContent='Preview unavailable';d.appendChild(ic);d.appendChild(sp);if(this.parentNode){this.parentNode.replaceChild(d,this);}"
-                                        title="Preview <?= htmlspecialchars($reqLabel) ?>">
-                                <?php endif; ?>
-                            <?php elseif ($reqHasFile && $reqFileCount > 1): ?>
-                                <!-- FIX (this update): 2+ saved files for this requirement — show as one
-                                     overlaying "stacked card" entry instead of only ever displaying the
-                                     last-fetched row. Click opens the preview modal, which can page
-                                     through every file via prev/next (see the JS further down).
-                                     ADJUSTMENT (this revision): stack enlarged (see .req-file-stack CSS)
-                                     to match the enlarged single-file thumbnail / button height. -->
-                                <div class="req-file-stack-wrap creq-preview-trigger" data-req-key="<?= htmlspecialchars($reqKey, ENT_QUOTES) ?>" data-req-files="<?= $reqFileMetaJson ?>" data-req-label="<?= htmlspecialchars($reqLabel, ENT_QUOTES) ?>" title="Preview all <?= (int) $reqFileCount ?> files for <?= htmlspecialchars($reqLabel) ?>">
-                                    <div class="req-file-stack">
-                                        <?php
-                                        $layerCount = min(3, $reqFileCount);
-                                        for ($li = $layerCount - 1; $li >= 0; $li--):
-                                            $layerMeta = $reqFileMetaList[$li];
-                                        ?>
-                                        <?php if ($layerMeta['isPdf']): ?>
-                                            <div class="req-stack-layer req-stack-layer-pdf layer-<?= $li + 1 ?>"><i class="fas fa-file-pdf"></i></div>
-                                        <?php else: ?>
-                                            <div class="req-stack-layer layer-<?= $li + 1 ?>" style="background-image:url('CompanyForm.php?stream_own_requirement=<?= urlencode($reqKey) ?>&file_id=<?= (int) $layerMeta['id'] ?>');"></div>
-                                        <?php endif; ?>
-                                        <?php endfor; ?>
-                                        <span class="req-stack-count-badge"><?= (int) $reqFileCount ?></span>
-                                    </div>
-                                    <div class="req-file-stack-label"><?= (int) $reqFileCount ?> files</div>
-                                </div>
-                            <?php else: ?>
-                                <!-- ADJUSTMENT (this revision): nothing has been uploaded for this
-                                     requirement yet, so the preview slot shows a neutral placeholder
-                                     tile instead of collapsing. This keeps every card in the grid the
-                                     same shape, exactly as in the supplied design. It is decorative
-                                     only — no preview trigger, no data attributes, no inputs, and it
-                                     never renders once a file exists. -->
-                                <?php if ($reqStatus === 'Rejected'): ?>
-                                <!-- ADJUSTMENT (this revision): a rejected requirement's file was removed by the admin —
-                                     shown with the same pink dashed "Rejected / Awaiting re-upload" placeholder the
-                                     admin panel uses (company_validation.php's .cv-rej-placeholder). -->
-                                <div class="req-rej-placeholder" aria-hidden="true">
-                                    <i class="fas fa-file-circle-xmark"></i>
-                                    <span>Awaiting re-upload</span>
-                                </div>
-                                <?php else: ?>
-                                <div class="req-thumb-empty" aria-hidden="true">
-                                    <i class="fas fa-file-circle-plus"></i>
-                                    <span>No file yet</span>
-                                </div>
-                                <?php endif; ?>
-                            <?php endif; ?>
-                            </div>
-                            <?php if ($reqUsesRibbon): ?>
-                            <!-- ADJUSTMENT (this revision): the status pill on the preview's top-right corner. It keeps the
-                                 same id (reqStatusBadge_<key>) and status class the staging JS below already targets. -->
-                            <div class="req-card-ribbon <?= htmlspecialchars($badgeClass) ?>" id="reqStatusBadge_<?= htmlspecialchars($reqKey) ?>">
-                                <?php if ($reqStatus === 'Rejected'): ?>
-                                    <span class="req-rb req-rb-rejected"><i class="fas fa-ban"></i> <?= htmlspecialchars($badgeLabel) ?></span>
-                                <?php else: ?>
-                                    <span class="req-rb req-rb-pending"><?= htmlspecialchars($badgeLabel) ?></span>
-                                <?php endif; ?>
-                            </div>
-                            <?php endif; ?>
-                            </div><!-- /.req-preview-wrap -->
-
-                            <!-- ADJUSTMENT (this revision): wrapped in .compliance-req-info so the
-                                 name / status block is its own vertically-centered flex column
-                                 between the file display and the action button.
-
-                                 ── UPDATED (this adjustment): status, the denial remark, and the
-                                 "action required" reminder used to be three separate stacked
-                                 elements (a status-badge pill, a remark-badge, and a CSS-only
-                                 "req-action-required" flag) — they are now ONE combined info box
-                                 (.req-status-combined) built from the exact same $badgeClass /
-                                 $badgeLabel / $reqRemark values as before, just presented together.
-                                 It keeps the same id (reqStatusBadge_<key>) the staging JS below
-                                 already hides on file-select, so that behavior is unchanged; the
-                                 separate remark-badge id and the CSS-only "req-action-required"
-                                 flag are retired since everything now lives in this one element. -->
-                            <?php /* ADJUSTMENT (this revision): a Verified requirement no longer shows the green "Verified" status box above the
-                                      "Verified — no further action needed" lock — the info block is hidden entirely so it leaves no empty gap. */ ?>
-                            <?php /* ADJUSTMENT (this revision): a Pending requirement now shows only the corner pill above, so its info block is hidden too (no empty gap). A Rejected one keeps this block for the "Remark:" box below. */ ?>
-                            <div class="compliance-req-info"<?= ($reqStatus === 'Verified' || $reqStatus === 'Pending') ? ' style="display:none;"' : '' ?>>
-                                <?php if ($reqStatus === 'Rejected'): ?>
-                                <!-- ADJUSTMENT (this revision): the admin's rejection remark in its own pink "Remark:" box
-                                     (company_validation.php's .cv-card-remark). Same $reqRemark value as before; hidden by JS
-                                     the moment a replacement file is staged, together with the pill. -->
-                                <div class="req-card-remark" id="reqRemarkBox_<?= htmlspecialchars($reqKey) ?>"><i class="fas fa-comment-dots"></i><span><b>Remark:</b> <span class="req-card-remark-text"><?= htmlspecialchars(((string) $reqRemark) !== '' ? (string) $reqRemark : '—') ?></span></span></div>
-                                <?php endif; ?>
-                                <?php if (!$reqUsesRibbon && $reqStatus !== 'Verified'): ?>
-                                <div class="req-status-combined <?= htmlspecialchars($badgeClass) ?>" id="reqStatusBadge_<?= htmlspecialchars($reqKey) ?>">
-                                    <div class="req-status-combined-top">
-                                        <?php if ($reqStatus === 'Verified'): ?>
-                                            <i class="fas fa-check-circle"></i>
-                                        <?php elseif ($reqStatus === 'Rejected'): ?>
-                                            <i class="fas fa-times-circle"></i>
-                                        <?php elseif ($reqStatus): ?>
-                                            <i class="fas fa-clock"></i>
-                                        <?php else: ?>
-                                            <i class="fas fa-minus-circle"></i>
-                                        <?php endif; ?>
-                                        <span><?= htmlspecialchars($badgeLabel) ?></span>
-                                    </div>
-                                    <?php if ($reqStatus === 'Rejected'): ?>
-                                        <?php if (!empty($reqRemark)): ?>
-                                        <div class="req-status-combined-detail">Reason: <?= htmlspecialchars($reqRemark) ?></div>
-                                        <?php endif; ?>
-                                        <div class="req-status-combined-detail">Please re-upload this document.</div>
-                                    <?php endif; ?>
-                                </div>
-                                <?php endif; ?>
-
-                                <!-- NEW: hidden-by-default note shown by JS in place of the combined
-                                     status box above the instant a replacement file is staged for
-                                     THIS item — but only when this item was originally Denied (see
-                                     the wasDenied check in the change handler in the script below). -->
-                                <div class="req-staged-note" id="reqStagedNote_<?= htmlspecialchars($reqKey) ?>" style="display:none;">
-                                    <i class="fas fa-rotate"></i> New file selected — ready to resubmit
-                                </div>
-                            </div>
-
-                            <!-- ADJUSTMENT (this revision): the verified-lock badge / upload button
-                                 is now its own .compliance-req-action flex column, vertically
-                                 centered beside the file display and info block above, instead of
-                                 being stacked underneath the status badge inside the info column. -->
-                            <div class="compliance-req-action">
-                                <?php if ($reqStatus === 'Verified'): ?>
-                                    <div class="verified-lock">
-                                        <i class="fas fa-check-circle"></i> Verified — no further action needed
-                                    </div>
-                                <?php else: ?>
-                                    <div class="req-file-drop" id="reqDrop_c_<?= htmlspecialchars($reqKey) ?>" onclick="document.getElementById('reqFileInput_<?= htmlspecialchars($reqKey) ?>').click()">
-                                        <span class="req-file-icon"><i class="fas fa-upload"></i></span>
-                                        <span class="req-file-text" id="reqFileText_<?= htmlspecialchars($reqKey) ?>">
-                                            <?= $reqHasFile ? 'Click to replace file(s)' : 'Click to upload' ?>
-                                        </span>
-                                    </div>
-                                    <!-- FIX (this update): now accepts multiple files (name="req_<key>[]"),
-                                         matching company_register.php's Step 3 requirement uploads. A hidden
-                                         "_expected_count" field (kept in sync by JS below) lets the server
-                                         detect and report a request that silently loses files in transit. -->
-                                    <input type="file" id="reqFileInput_<?= htmlspecialchars($reqKey) ?>" name="req_<?= htmlspecialchars($reqKey) ?>[]" multiple
-                                        class="compliance-file-input" data-label="<?= htmlspecialchars($reqLabel) ?>" data-req-key="<?= htmlspecialchars($reqKey, ENT_QUOTES) ?>"
-                                        accept=".pdf,.jpg,.jpeg,.png,application/pdf,image/jpeg,image/png" style="display:none;">
-                                    <input type="hidden" id="reqCount_c_<?= htmlspecialchars($reqKey) ?>" name="req_<?= htmlspecialchars($reqKey) ?>_expected_count" value="0">
-                                <?php endif; ?>
-                            </div>
-                        </div>
-                    </div>
                     <?php endforeach; ?>
                     </div>
 
@@ -6094,19 +6575,45 @@ $cfLiveState = [
                             <i class="fas fa-info-circle"></i>
                             No compliance documents are currently required for your classification.
                         </div>
-                        <?php if (!$moa_needs_initial_creation): ?>
-                        <?php // NEW (this adjustment): the editable non-MOA fields above still need a way to be saved. ?>
-                        <button type="submit" name="submit_compliance_docs" value="1" class="submit-all">
-                            <i class="fas fa-save" style="margin-right:8px;"></i>Save Changes
-                        </button>
-                        <?php endif; ?>
+                        <?php // ADJUSTMENT: the "Save Changes" button for the editable profile fields now lives on the Company Information page. ?>
                     <?php endif; ?>
                 </div>
+
+                </div><!-- /#cf-requirements-page -->
 
             </form>
         </div>
     </div>
 </div>
+
+<script>
+/* ADJUSTMENT: page switcher (Company Information / Requirements) — same behaviour as AccomForm.php */
+(function () {
+    var KEY = 'companyFormActiveTab';
+    var initial = <?= json_encode($cfInitialPage) ?>;
+    var params = new URLSearchParams(window.location.search);
+    var saved = null;
+    try { saved = sessionStorage.getItem(KEY); } catch (e) {}
+    /* an upload error belongs to the Requirements page; a revision flag opens it too */
+    var target = (params.get('msg') === 'upload_error') ? 'cf-requirements-page'
+               : (initial === 'cf-requirements-page' ? initial : (saved || initial));
+    function switchPage(id) {
+        if (!document.getElementById(id)) id = 'cf-info-page';
+        document.querySelectorAll('.cf-page-content').forEach(function (p) { p.classList.remove('cf-active-page'); });
+        document.querySelectorAll('.cf-switch-page-btn').forEach(function (b) { b.classList.remove('active'); });
+        var pg = document.getElementById(id); if (pg) pg.classList.add('cf-active-page');
+        var bt = document.querySelector('.cf-switch-page-btn[data-page="' + id + '"]'); if (bt) bt.classList.add('active');
+    }
+    document.querySelectorAll('.cf-switch-page-btn').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+            var id = this.getAttribute('data-page');
+            switchPage(id);
+            try { sessionStorage.setItem(KEY, id); } catch (e) {}
+        });
+    });
+    switchPage(target);
+})();
+</script>
 
 <!-- LIVE UPDATES: baseline state for the auto-refresh script at the bottom of this file (not executed — JSON only). -->
 <script type="application/json" id="cfLiveState"><?= json_encode($cfLiveState, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?></script>
@@ -6129,7 +6636,10 @@ $cfLiveState = [
     function showGlobalLoading(label) {
         globalLoadingActiveCount++;
         if (globalLoadingLabel) globalLoadingLabel.textContent = label || 'Loading';
-        if (globalLoadingOverlay) globalLoadingOverlay.classList.remove('hidden');
+        if (globalLoadingOverlay) {
+            globalLoadingOverlay.classList.remove('success-state');   // ADJUSTMENT (action loading page): a new action starts as a spinner again
+            globalLoadingOverlay.classList.remove('hidden');
+        }
     }
 
     function hideGlobalLoading() {
@@ -6139,21 +6649,95 @@ $cfLiveState = [
         }
     }
 
+    /* ADJUSTMENT (action loading page): success state of the same full-page loader (check + message + the areas
+       that were updated), plus a safe JSON reader. See the .gls-* styles above. */
+    let globalSuccessTimer = null;   // ADJUSTMENT (action loading page)
+    function setGlobalLoadingLabel(label) {
+        if (globalLoadingLabel) globalLoadingLabel.textContent = label || 'Loading';
+    }
+
+    /* opts: areas [{title, fields[]}] – what was updated · warnings [text] · sub – small line under the message
+             button (false hides "Continue") · autoCloseMs · keepOpen (leave the screen up, the page is about to reload)
+             onDone() – called once when the screen is closed (or, with keepOpen, when the time is up) */
+    function showGlobalSuccess(title, message, opts) {
+        opts = opts || {};
+        var byId = function (id) { return document.getElementById(id); };
+        var t = byId('globalLoadingSuccessTitle'), m = byId('globalLoadingSuccessMsg'), list = byId('globalLoadingSuccessAreas'),
+            warn = byId('globalLoadingSuccessWarn'), sub = byId('globalLoadingSuccessSub'), btn = byId('globalLoadingContinueBtn');
+        if (!globalLoadingOverlay || !t || !m || !list || !warn || !sub || !btn) {   /* markup missing: never leave an action unreported */
+            if (globalLoadingActiveCount > 0) hideGlobalLoading();
+            window.alert((title || 'Done') + (message ? '\n\n' + message : ''));
+            if (opts.onDone) opts.onDone();
+            return;
+        }
+        if (globalLoadingActiveCount === 0) globalLoadingActiveCount = 1;
+        if (globalSuccessTimer) { clearTimeout(globalSuccessTimer); globalSuccessTimer = null; }
+
+        t.textContent = title || 'Success';
+        m.textContent = message || '';
+        list.textContent = '';
+        (opts.areas || []).forEach(function (a) {
+            var box = document.createElement('div');  box.className = 'gls-area';
+            var h   = document.createElement('div');  h.className   = 'gls-area-title';  h.textContent = a.title || '';
+            var f   = document.createElement('div');  f.className   = 'gls-area-fields';
+            (a.fields || []).forEach(function (x) {
+                var c = document.createElement('span'); c.className = 'gls-chip'; c.textContent = x; f.appendChild(c);
+            });
+            box.appendChild(h); box.appendChild(f); list.appendChild(box);
+        });
+        warn.textContent = (opts.warnings || []).join(' ');
+        sub.textContent = '';
+        if (opts.sub) {
+            var ic = document.createElement('i'); ic.className = 'fas fa-sync-alt fa-spin';
+            sub.appendChild(ic); sub.appendChild(document.createTextNode(' ' + opts.sub));
+        }
+        btn.style.display = (opts.button === false) ? 'none' : '';
+
+        globalLoadingOverlay.classList.add('success-state');
+        globalLoadingOverlay.classList.remove('hidden');
+
+        var finished = false;
+        function finish() {
+            if (finished) return;
+            finished = true;
+            if (globalSuccessTimer) { clearTimeout(globalSuccessTimer); globalSuccessTimer = null; }
+            if (!opts.keepOpen) {
+                hideGlobalLoading();
+                setTimeout(function () {
+                    if (globalLoadingOverlay.classList.contains('hidden')) globalLoadingOverlay.classList.remove('success-state');
+                }, 400);
+            }
+            if (opts.onDone) opts.onDone();
+        }
+        btn.onclick = finish;
+        globalSuccessTimer = setTimeout(finish, opts.autoCloseMs || 4500);
+        if (btn.style.display !== 'none') { try { btn.focus(); } catch (e) {} }
+    }
+
+    /* Reads a fetch() response as JSON without throwing on a PHP warning / error page (then returns null). */
+    function parseJsonSafe(text) {
+        try { return JSON.parse(text); } catch (e) { return null; }
+    }
+
+
     /* The overlay is visible by default (see CSS) so it covers the very
        first paint while page assets are still loading. As soon as the
        window has fully finished loading, it fades away on its own. */
-    window.addEventListener('load', function() {
-        globalLoadingActiveCount = 0;
-        if (globalLoadingOverlay) globalLoadingOverlay.classList.add('hidden');
-    });
+    /* ADJUSTMENT (action loading page): only the INITIAL page-load cover is finished here. The 'load' event and the
+       4-second safety net below used to force the counter to 0 and hide the overlay unconditionally, which would hide
+       an action's loading page (Saving / Creating MOA / Submitting) that had been started in the meantime. */
+    let initialPageLoadPending = true;
+    function finishInitialPageLoad() {
+        if (!initialPageLoadPending) return;
+        initialPageLoadPending = false;
+        if (globalLoadingActiveCount === 0 && globalLoadingOverlay) globalLoadingOverlay.classList.add('hidden');
+    }
+    window.addEventListener('load', finishInitialPageLoad);
     /* Safety net: if for any reason the 'load' event is delayed (slow
        third-party assets like the Font Awesome CDN), don't leave the
        company staring at the popup forever — hide it after a short
        ceiling too. */
-    setTimeout(function() {
-        globalLoadingActiveCount = 0;
-        if (globalLoadingOverlay) globalLoadingOverlay.classList.add('hidden');
-    }, 4000);
+    setTimeout(finishInitialPageLoad, 4000);
 
     // Sidebar Toggle Script
     const sidebar = document.getElementById('sidebar');
@@ -6360,8 +6944,11 @@ $cfLiveState = [
         showGlobalLoading('Updating MOA');
 
         fetch('CompanyForm.php', { method: 'POST', body: fd })
-            .then(function(r) { return r.json(); })
-            .then(function(data) {
+            .then(function(r) { return r.text(); })
+            .then(function(text) {
+                // ADJUSTMENT (action loading page): a PHP warning / error page instead of JSON is reported, not swallowed
+                const data = parseJsonSafe(text);
+                if (!data) throw new Error('bad response');
                 if (!data.success) {
                     hideGlobalLoading();
                     if (btn) btn.disabled = false;
@@ -6372,7 +6959,27 @@ $cfLiveState = [
                 }
                 feedback.textContent = data.message || 'Your MOA has been updated and resubmitted for review.';
                 feedback.classList.add('show', 'success');
-                setTimeout(function() { window.location.href = 'CompanyForm.php'; }, 1400);
+                // ADJUSTMENT (action loading page): confirmation naming the corrected fields
+                const keyMap = { company_name: 'company', company_profile: 'company_profile', company_address: 'company_address', position: 'position',
+                                 contact_first_name: 'contact_first_name', contact_middle_name: 'contact_middle_initial', contact_last_name: 'contact_last_name', telephone: 'telephone' };
+                const sent = [];
+                document.querySelectorAll('#moaRevisionPanel .moa-revision-input').forEach(function(el) {
+                    const k = (el.id || '').replace(/^moaRev_/, '');
+                    if (keyMap[k]) sent.push(keyMap[k]);
+                });
+                const areas = cfAreasFromFields(sent);
+                const regenerated = data.regenerated !== false;
+                if (regenerated) areas.push({ title: 'MOA Document', fields: ['Regenerated and resubmitted for review'] });
+                showGlobalSuccess(
+                    'MOA Updated',
+                    regenerated ? 'Your MOA has been updated and resubmitted for review.' : 'Your corrections were saved and resubmitted for review.',
+                    {
+                        areas: areas,
+                        warnings: regenerated ? [] : [data.message || 'The MOA document could not be regenerated automatically — the administrator will follow up if needed.'],
+                        sub: 'Refreshing the page...', button: false, keepOpen: true, autoCloseMs: regenerated ? 2800 : 4500,
+                        onDone: function() { window.location.replace('CompanyForm.php'); }
+                    }
+                );
             })
             .catch(function(err) {
                 hideGlobalLoading();
@@ -6392,6 +6999,22 @@ $cfLiveState = [
         'company', 'company_address', 'contact_first_name', 'contact_last_name',
         'contact_middle_initial', 'position', 'telephone', 'company_profile'
     ];
+
+    /* ADJUSTMENT (action loading page): turns saved Company Information field keys into the AREAS shown on the
+       success loading page — same grouping as the server's cfDiffInfoAreas(). */
+    const CF_AREA_FIELDS = {
+        'Contact Person':  { contact_first_name: 'Contact First Name', contact_middle_initial: 'Contact Middle Name', contact_last_name: 'Contact Last Name', position: 'Position', telephone: 'Telephone / Contact Number' },
+        'Company Details': { company: 'Company Name', company_address: 'Complete Office Address', company_profile: 'Company Profile' }
+    };
+    function cfAreasFromFields(keys) {
+        const areas = [];
+        Object.keys(CF_AREA_FIELDS).forEach(function(title) {
+            const fields = [];
+            Object.keys(CF_AREA_FIELDS[title]).forEach(function(k) { if (keys.indexOf(k) !== -1) fields.push(CF_AREA_FIELDS[title][k]); });
+            if (fields.length) areas.push({ title: title, fields: fields });
+        });
+        return areas;
+    }
 
     function submitMoaCreation() {
         const btn = document.getElementById('moaCreationSubmitBtn');
@@ -6426,8 +7049,11 @@ $cfLiveState = [
         showGlobalLoading('Creating MOA');
 
         fetch('CompanyForm.php', { method: 'POST', body: fd })
-            .then(function(r) { return r.json(); })
-            .then(function(data) {
+            .then(function(r) { return r.text(); })
+            .then(function(text) {
+                // ADJUSTMENT (action loading page): a PHP warning / error page instead of JSON is reported, not swallowed
+                const data = parseJsonSafe(text);
+                if (!data) throw new Error('bad response');
                 if (!data.success) {
                     hideGlobalLoading();
                     if (btn) btn.disabled = false;
@@ -6438,7 +7064,23 @@ $cfLiveState = [
                 }
                 feedback.textContent = data.message || 'Your MOA has been created and submitted for review.';
                 feedback.classList.add('show', 'success');
-                setTimeout(function() { window.location.href = 'CompanyForm.php'; }, 1400);
+                // ADJUSTMENT (action loading page): the loading screen turns into the confirmation, naming what was saved
+                const created = data.created !== false;
+                const areas = cfAreasFromFields(MOA_CREATION_FIELD_IDS.map(function(key) {
+                    const el = document.getElementById('cfField_' + key);
+                    return (el && (el.value.trim() !== '' || key === 'contact_middle_initial')) ? key : null;
+                }).filter(Boolean));
+                if (created) areas.push({ title: 'MOA Document', fields: ['Generated and submitted for review'] });
+                showGlobalSuccess(
+                    created ? 'MOA Created' : 'Information Saved',
+                    created ? 'Your MOA has been created and submitted for review.' : '',
+                    {
+                        areas: areas,
+                        warnings: created ? [] : [data.message || 'The MOA document could not be generated automatically. Please try again in a moment.'],
+                        sub: 'Refreshing the page...', button: false, keepOpen: true, autoCloseMs: created ? 2800 : 4500,
+                        onDone: function() { window.location.replace('CompanyForm.php'); }
+                    }
+                );
             })
             .catch(function(err) {
                 hideGlobalLoading();
@@ -6946,7 +7588,7 @@ $cfLiveState = [
 
         var label, title;
         if (status === 'denied') {
-            label = 'Re-upload required — click to replace';
+            label = 'Re-upload';
             title = 'This document was rejected. Please upload a replacement.';
         } else if (status === 'pending') {
             label = hasFile
@@ -7000,8 +7642,111 @@ $cfLiveState = [
     // refreshed in place (see the "LIVE UPDATES" script at the bottom) can re-bind its new file input.
     // The handler body itself is unchanged; it still runs for every input on page load (see the
     // forEach call right after the function).
+    // ADJUSTMENT: PDF upload limit (same rule and popup wording as company_register.php) —
+    // a requirement accepts ONE PDF at most, and a PDF cannot be mixed with pictures.
+    // Shown in the page's existing #complianceErrorModal popup; a rejected selection is cleared.
+    function cfShowUploadPopup(title, message) {
+        var modal = document.getElementById('complianceErrorModal');
+        if (!modal) { window.alert(message); return; }
+        var ttl = modal.querySelector('.notif-modal-title');
+        if (ttl) ttl.textContent = title;
+        var msgEl = document.getElementById('complianceErrorMsg');
+        if (msgEl) msgEl.textContent = message;
+        modal.style.display = 'flex';
+    }
+    function cfShowPdfLimitPopup(title, message, label) {
+        var modal = document.getElementById('cfPdfLimitModal');
+        if (!modal) { window.alert(message); return; }
+        document.getElementById('cfPdfLimitTitle').textContent = title;
+        document.getElementById('cfPdfLimitMsg').textContent = message;
+        var okBtn = document.getElementById('closeCfPdfLimit');
+        if (okBtn) okBtn.textContent = 'OK, Fix It'; // default label — the file-size popup below overrides it
+        var list = document.getElementById('cfPdfLimitList');
+        list.innerHTML = '';
+        if (label) { var li = document.createElement('li'); li.textContent = '"' + label + '"'; list.appendChild(li); }
+        list.style.display = label ? 'block' : 'none';
+        modal.style.display = 'flex';
+    }
+
+    // ADJUSTMENT: FILE-SIZE POPUP — same wording and design as AccomForm.php's "Almost There!" popup, shown in the
+    // page's neutral .cf-pdf-* popup. The limit comes from PHP ($reqMaxFileSizeMB) so the message always matches the
+    // server-side check in cfValidateRequirementUploadsMulti().
+    var CF_MAX_FILE_MB = <?= max(1, (int) $reqMaxFileSizeMB) ?>;
+    function cfFormatMB(bytes) {
+        var n = Number(bytes);
+        return (isFinite(n) && n >= 0) ? ((n / (1024 * 1024)).toFixed(2) + ' MB') : 'over the limit';
+    }
+    // oversized: [{name, size}] — size may be null/undefined when only the server reported the problem
+    function cfShowFileSizePopup(label, oversized) {
+        var modal = document.getElementById('cfPdfLimitModal');
+        var limit = CF_MAX_FILE_MB;
+        var many  = oversized.length > 1;
+        var msg   = (many ? 'Some files for "' : 'Your file for "') + label + '" ' + (many ? 'are' : 'is') + ' a little larger than the ' + limit + ' MB upload limit. '
+                  + 'A quick compress or a lower-resolution photo will do the trick — try again with a smaller file and you\'ll be all set!';
+        if (!modal) { window.alert(msg); return; }
+        try {
+            document.getElementById('cfPdfLimitTitle').textContent = 'Almost There!';
+            document.getElementById('cfPdfLimitMsg').textContent = msg;
+            var okBtn = document.getElementById('closeCfPdfLimit');
+            if (okBtn) okBtn.textContent = 'OK, I\'ll Try Again';
+            var list = document.getElementById('cfPdfLimitList');
+            list.innerHTML = '';
+            oversized.slice(0, 5).forEach(function (f) {
+                var li = document.createElement('li');
+                var b = document.createElement('strong');
+                b.textContent = f.name || 'File';
+                li.appendChild(b);
+                li.appendChild(document.createTextNode(' — ' + (f.size != null ? cfFormatMB(f.size) + ' ' : '') + '(limit: ' + limit + ' MB)'));
+                list.appendChild(li);
+            });
+            if (oversized.length > 5) {
+                var more = document.createElement('li');
+                more.textContent = '…and ' + (oversized.length - 5) + ' more';
+                list.appendChild(more);
+            }
+            var tip = document.createElement('li');
+            tip.className = 'cf-pdf-tip';
+            tip.textContent = 'Tip: take the picture in a lower quality setting, or use any free image compressor.';
+            list.appendChild(tip);
+            list.style.display = 'block';
+            modal.style.display = 'flex';
+        } catch (e) {
+            window.alert('Each file must be ' + limit + ' MB or smaller.'); // last-resort fallback — an oversized file is never silently accepted
+        }
+    }
+    function cfSelectionExceedsSize(input) {
+        var files = input.files ? Array.prototype.slice.call(input.files) : [];
+        var maxBytes = CF_MAX_FILE_MB * 1024 * 1024;
+        var big = files.filter(function (f) { return f && f.size > maxBytes; });
+        if (!big.length) return false;
+        cfShowFileSizePopup(input.getAttribute('data-label') || 'this document', big);
+        return true;
+    }
+    (function () {
+        var m = document.getElementById('cfPdfLimitModal');
+        var b = document.getElementById('closeCfPdfLimit');
+        if (b) b.addEventListener('click', function () { m.style.display = 'none'; });
+        if (m) m.addEventListener('click', function (e) { if (e.target === m) m.style.display = 'none'; });
+        document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && m) m.style.display = 'none'; });
+    })();
+    function cfSelectionBreaksPdfLimit(input) {
+        var files = input.files ? Array.prototype.slice.call(input.files) : [];
+        var pdfs = files.filter(function(f){ return f.type === 'application/pdf' || /\.pdf$/i.test(f.name || ''); }).length;
+        if (pdfs > 1) {
+            cfShowPdfLimitPopup('Only One PDF Allowed', 'Only one PDF file can be selected for this document. Please choose a single PDF file, or switch to picture files if you need to upload multiple files.', input.getAttribute('data-label'));
+            return true;
+        }
+        if (pdfs === 1 && files.length > 1) {
+            cfShowPdfLimitPopup('Mixed File Formats Not Allowed', 'Please select files of the same format only — either all pictures or a single PDF, not a mix of both, for this document.', input.getAttribute('data-label'));
+            return true;
+        }
+        return false;
+    }
+
     function bindComplianceFileInput(input){
         input.addEventListener('change', function(){
+            // ADJUSTMENT: the file-size check runs right after the PDF-limit check (only one popup is ever shown at a time)
+            if (cfSelectionBreaksPdfLimit(input) || cfSelectionExceedsSize(input)) { input.value = ''; } // rejected selection is cleared; the handler below then restores the card
             const wrap      = input.closest('.compliance-req-item');
             const textEl    = wrap ? wrap.querySelector('.req-file-text') : null;
             const dropEl    = wrap ? wrap.querySelector('.req-file-drop') : null;
@@ -7095,6 +7840,139 @@ $cfLiveState = [
     }
     document.querySelectorAll('.compliance-file-input').forEach(bindComplianceFileInput);
 
+    /* ══════════════════════════════════════════════════════════
+       ADJUSTMENT (action loading page) — SAVE CHANGES / SUBMIT REQUIREMENT DOCUMENTS
+       The page's one big form is sent in the background (same URL, same fields) so the
+       full-page loading screen can show upload progress, then name the AREAS that were
+       updated and the requirements that were submitted, then refresh the page. The server
+       answers JSON only to this background request (see submit_compliance_docs) — a normal
+       browser post, if this script cannot run, keeps working exactly as before.
+       Problems close the loading screen and use the page's own popups; the selected files
+       stay selected so the company can simply try again.
+       ══════════════════════════════════════════════════════════ */
+    function cfReportUploadErrors(errs) {
+        errs = Array.isArray(errs) ? errs : [];
+        try {
+            const sizeRe = /^"(.*)" \((.*)\) exceeds the \d+MB limit\.$/;
+            if (errs.length && typeof cfShowFileSizePopup === 'function' && errs.every(e => sizeRe.test(String(e)))) {
+                const parsed = errs.map(e => sizeRe.exec(String(e)));
+                const sameLabel = parsed.every(m => m[1] === parsed[0][1]);
+                cfShowFileSizePopup(sameLabel ? parsed[0][1] : 'some requirements',
+                    parsed.map(m => ({ name: sameLabel ? m[2] : (m[1] + ' — ' + m[2]), size: null })));
+                return;
+            }
+        } catch (ex) { /* fall through to the general popup */ }
+        const errTitle = document.querySelector('#complianceErrorModal .notif-modal-title');
+        if (errTitle) errTitle.textContent = 'Upload Problem';
+        const msgEl = document.getElementById('complianceErrorMsg');
+        if (msgEl) {
+            msgEl.textContent = '';
+            const lines = errs.length ? errs : ['Some documents could not be uploaded. Please check the file type and size and try again.'];
+            lines.forEach(function(line, i) {
+                if (i) msgEl.appendChild(document.createElement('br'));
+                msgEl.appendChild(document.createTextNode('\u2022 ' + line));
+            });
+        }
+        const modal = document.getElementById('complianceErrorModal');
+        if (modal) modal.style.display = 'flex'; else window.alert(errs.join('\n'));
+    }
+
+    (function() {
+        const mainForm = document.getElementById('cfMainForm');
+        if (!mainForm || !window.FormData || !window.XMLHttpRequest) return;   // old browser: the normal submit still works
+        let busy = false;
+
+        mainForm.addEventListener('submit', function(e) {
+            if (e.defaultPrevented) return;
+            const sb = e.submitter;
+            if (!sb || sb.name !== 'submit_compliance_docs') return;   // only the page's own Save / Submit buttons
+            e.preventDefault();
+            if (busy) return;
+
+            const isInfoSave = !!sb.closest('.cf-info-save-row');
+            const fd = new FormData(mainForm);
+            fd.append(sb.name, sb.value);   // a script-built FormData leaves the clicked button out; the server looks for it
+
+            let fileCount = 0;
+            mainForm.querySelectorAll('input.compliance-file-input').forEach(function(i) { if (i.files && i.files.length) fileCount++; });
+
+            function fail(errs, areas) {
+                busy = false;
+                sb.disabled = false;
+                hideGlobalLoading();
+                cfReportUploadErrors(errs);
+                if (areas && areas.length) {
+                    // the information part was saved before the upload problem — say so, never silently
+                    const msgEl = document.getElementById('complianceErrorMsg');
+                    if (msgEl) {
+                        msgEl.appendChild(document.createElement('br'));
+                        msgEl.appendChild(document.createTextNode('Your company information changes were saved (' +
+                            areas.map(function(a) { return a.title; }).join(', ') + ').'));
+                    }
+                }
+            }
+
+            busy = true;
+            sb.disabled = true;
+            showGlobalLoading(isInfoSave && !fileCount ? 'Saving changes' : (fileCount ? 'Submitting requirements' : 'Saving changes'));
+
+            const xhr = new XMLHttpRequest();
+            xhr.open('POST', mainForm.getAttribute('action') || window.location.pathname);
+            xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
+            xhr.timeout = 10 * 60 * 1000;
+            xhr.upload.onprogress = function(ev) {
+                if (!ev.lengthComputable || !fileCount) return;
+                const pct = Math.round(ev.loaded / ev.total * 100);
+                setGlobalLoadingLabel(pct < 100 ? 'Uploading requirements ' + pct + '%' : 'Saving requirements');
+            };
+            xhr.onload = function() {
+                const data = parseJsonSafe(xhr.responseText);
+                if (xhr.status === 200 && data && data.success) {
+                    const areas = Array.isArray(data.areas) ? data.areas.slice() : [];
+                    const uploaded = Array.isArray(data.uploaded) ? data.uploaded : [];
+                    if (uploaded.length) {
+                        areas.push({ title: 'Compliance Requirements', fields: uploaded.map(function(u) {
+                            return u.count > 1 ? u.label + ' (' + u.count + ' files)' : u.label;
+                        }) });
+                    }
+                    if (!areas.length) {
+                        // nothing was changed and nothing selected — same quiet outcome as before, now explained
+                        showGlobalSuccess('No Changes', 'Nothing was changed — your information and documents are already up to date.', { autoCloseMs: 3500 });
+                        busy = false; sb.disabled = false;
+                        return;
+                    }
+                    const title = (uploaded.length && data.areas && data.areas.length) ? 'Changes Saved'
+                                : (uploaded.length ? 'Requirements Submitted' : 'Information Updated');
+                    const msg = uploaded.length
+                        ? (uploaded.length + (uploaded.length === 1 ? ' requirement was' : ' requirements were') + ' sent for review' + (data.areas && data.areas.length ? ' and your information was updated:' : ':'))
+                        : 'The following areas were updated:';
+                    showGlobalSuccess(title, msg, {
+                        areas: areas, sub: 'Refreshing the page...', button: false, keepOpen: true, autoCloseMs: 2800,
+                        onDone: function() { window.location.replace('CompanyForm.php'); }
+                    });
+                    return;
+                }
+                if (data && Array.isArray(data.errors)) { fail(data.errors, data.areas); return; }
+                if (xhr.status === 401 || /login\.php/i.test(xhr.responseURL || '')) { fail(['Your session has expired. Please log in again, then submit.']); return; }
+                fail(['The server could not save your changes. Please try again in a moment.']);
+            };
+            xhr.onerror   = function() { fail(['Could not reach the server. Please check your connection and try again.']); };
+            xhr.ontimeout = function() { fail(['Submitting took too long. Please check your connection and try again, or choose smaller files.']); };
+            xhr.send(fd);
+        });
+    })();
+
+    // A page restored from the browser's back/forward cache keeps its old state — never show a left-over loading screen.
+    window.addEventListener('pageshow', function(e) {
+        if (!e.persisted) return;
+        globalLoadingActiveCount = 0;
+        if (globalLoadingOverlay) { globalLoadingOverlay.classList.add('hidden'); globalLoadingOverlay.classList.remove('success-state'); }
+        mainFormReenable();
+    });
+    function mainFormReenable() {
+        document.querySelectorAll('#cfMainForm button[name="submit_compliance_docs"]').forEach(function(b) { b.disabled = false; });
+    }
+
     // PROFILE FORM SUBMISSION
     const profileForm = document.getElementById("profileForm");
     if(profileForm){
@@ -7115,22 +7993,39 @@ $cfLiveState = [
             }
             document.getElementById("google_map_link").value = src;
 
+            // ADJUSTMENT (action loading page): loading screen while the profile is saved, then the areas that were saved
+            const profileFields = [['email', 'Contact Email'], ['telephone', 'Telephone'], ['facebook_link', 'Facebook Page'], ['google_map_link', 'Google Maps Location']];
+            const savedFields = profileFields.filter(function(f) { return this.elements[f[0]] && String(this.elements[f[0]].value || '').trim() !== ''; }, this).map(function(f) { return f[1]; });
+            showGlobalLoading('Saving profile');
+
             fetch("CompanyForm.php", { method:"POST", body:new FormData(this) })
-                .then(res=>res.json())
-                .then(data=>{
+                .then(res=>res.text())
+                .then(text=>{
+                    const data = parseJsonSafe(text) || {};
                     if(data.status==="success"){
-                        document.getElementById('profileModal').style.display = 'none';
-                        document.getElementById('profileSavedModal').style.display = 'flex';
-                        // Auto-redirect after 3s, or on button click
-                        const goBtn = document.getElementById('profileSavedGoBtn');
-                        let redirectTimer = setTimeout(() => { window.location = 'Profile.php'; }, 3000);
-                        goBtn.addEventListener('click', () => {
-                            clearTimeout(redirectTimer);
-                            window.location = 'Profile.php';
+                        showGlobalSuccess('Profile Saved', 'Your company contact profile was saved:', {
+                            areas: [{ title: 'Company Contact Profile', fields: savedFields }],
+                            autoCloseMs: 2600,
+                            onDone: function() {
+                                document.getElementById('profileModal').style.display = 'none';
+                                document.getElementById('profileSavedModal').style.display = 'flex';
+                                // Auto-redirect after 3s, or on button click
+                                const goBtn = document.getElementById('profileSavedGoBtn');
+                                let redirectTimer = setTimeout(() => { window.location = 'Profile.php'; }, 3000);
+                                goBtn.addEventListener('click', () => {
+                                    clearTimeout(redirectTimer);
+                                    window.location = 'Profile.php';
+                                });
+                            }
                         });
                     } else {
+                        hideGlobalLoading();
                         alert("Failed to save profile. Please try again.");
                     }
+                })
+                .catch(function() {
+                    hideGlobalLoading();
+                    alert("Could not reach the server while saving your profile. Please check your connection and try again.");
                 });
         });
     }
@@ -7231,6 +8126,21 @@ $cfLiveState = [
     <?php if (isset($_GET['msg']) && $_GET['msg'] === 'upload_error'): ?>
     document.addEventListener('DOMContentLoaded', () => {
         const errs = <?= json_encode(array_values($compliance_upload_errors)) ?>;
+        // ADJUSTMENT: when EVERY reported problem is a file-size one (the server-side backstop for the client check),
+        // show the same friendly size popup as the live check. Anything else keeps the original "Upload Problem" popup.
+        try {
+            const sizeRe = /^"(.*)" \((.*)\) exceeds the \d+MB limit\.$/;
+            if (errs.length && typeof cfShowFileSizePopup === 'function' && errs.every(e => sizeRe.test(String(e)))) {
+                const parsed = errs.map(e => sizeRe.exec(String(e)));
+                const sameLabel = parsed.every(m => m[1] === parsed[0][1]);
+                cfShowFileSizePopup(sameLabel ? parsed[0][1] : 'some requirements',
+                    parsed.map(m => ({ name: sameLabel ? m[2] : (m[1] + ' — ' + m[2]), size: null })));
+                if (window.history.replaceState) window.history.replaceState({}, document.title, window.location.pathname);
+                return;
+            }
+        } catch (ex) { /* fall through to the original popup below */ }
+        const errTitle = document.querySelector('#complianceErrorModal .notif-modal-title');
+        if (errTitle) errTitle.textContent = 'Upload Problem';
         const msgEl = document.getElementById('complianceErrorMsg');
         if (msgEl) {
             msgEl.innerHTML = errs.length
@@ -7454,6 +8364,92 @@ $cfLiveState = [
         } catch (e) { /* the card is still correct server-rendered markup */ }
     }
 
+    /* ADJUSTMENT: REQUIREMENT-STATUS POPUP — same design and wording as AccomForm.php's status popup. When the live refresh
+       swaps in a requirement card whose status the administrator changed, a popup explains it. Several changes in one
+       refresh are queued and shown one after another. Every lookup is guarded so a missing element can never break the
+       live updates. */
+    var statusQueue = [];
+    var statusShowing = false;
+
+    function cardLabel(card) {
+        try {
+            var info = card.querySelector('.req-info');
+            if (info) {
+                var c = info.cloneNode(true);
+                var tag = c.querySelector('.req-moa-tag');
+                if (tag) tag.remove();
+                var t = (c.textContent || '').replace(/\s+/g, ' ').trim();
+                if (t) return t;
+            }
+        } catch (e) {}
+        return card.getAttribute('data-req-key') || 'requirement';
+    }
+
+    function statusPopupContent(label, newStatus, remark) {
+        if (newStatus === 'verified') {
+            return { title: 'Great Job!',
+                     msg: 'Your "' + label + '" has been verified by the administrator. One step closer to completing your requirements!',
+                     btn: 'Great, Thanks!' };
+        }
+        if (newStatus === 'denied') {
+            return { title: "Let's Fix This Together",
+                     msg: 'Your "' + label + '" needs a quick update before it can be verified. '
+                        + (remark ? 'Administrator\'s note: "' + remark + '". ' : 'Please check the remark on the card. ')
+                        + 'Re-upload the corrected file and you\'ll be back on track!',
+                     btn: 'Got It, I\'ll Re-upload' };
+        }
+        return { title: 'Under Review',
+                 msg: 'Your "' + label + '" is now back in the review queue. The administrator will check it soon — no action is needed from you right now.',
+                 btn: 'OK, Got It' };
+    }
+
+    function showNextStatusPopup() {
+        var modal = document.getElementById('cfStatusChangedModal');
+        if (!modal) { statusQueue = []; statusShowing = false; return; }
+        var item = statusQueue.shift();
+        if (!item) { statusShowing = false; modal.style.display = 'none'; return; }
+        statusShowing = true;
+        var c = statusPopupContent(item.label, item.status, item.remark);
+        var t = document.getElementById('cfStatusChangedTitle');
+        var m = document.getElementById('cfStatusChangedMsg');
+        var b = document.getElementById('closeCfStatusChanged');
+        if (t) t.textContent = c.title;
+        if (m) m.textContent = c.msg;
+        if (b) b.textContent = c.btn;
+        modal.style.display = 'flex';
+    }
+
+    (function bindStatusPopupClose() {
+        var modal = document.getElementById('cfStatusChangedModal');
+        var btn   = document.getElementById('closeCfStatusChanged');
+        if (btn) btn.addEventListener('click', showNextStatusPopup);
+        if (modal) modal.addEventListener('click', function (e) { if (e.target === modal) showNextStatusPopup(); });
+        document.addEventListener('keydown', function (e) {
+            if (e.key === 'Escape' && modal && window.getComputedStyle(modal).display !== 'none') showNextStatusPopup();
+        });
+    })();
+
+    // Only changes that matter to the company are announced: verified, rejected, or sent back to review by the administrator.
+    // (Nothing-on-file -> Pending is the company's own upload from another tab/device, so it is not announced.)
+    function queueStatusChange(oldCard, newCard) {
+        try {
+            var oldSt = oldCard.getAttribute('data-req-status') || 'not-submitted';
+            var newSt = newCard.getAttribute('data-req-status') || 'not-submitted';
+            if (oldSt === newSt) return;
+            var announce = (newSt === 'verified') || (newSt === 'denied') ||
+                           (newSt === 'pending' && (oldSt === 'verified' || oldSt === 'denied'));
+            if (!announce) return;
+            var remarkEl = newCard.querySelector('.req-card-remark-text');
+            var remark = remarkEl ? (remarkEl.textContent || '').trim() : '';
+            if (remark === '—') remark = '';
+            statusQueue.push({ label: cardLabel(newCard), status: newSt, remark: remark });
+        } catch (e) { /* never block the live refresh */ }
+    }
+
+    function flushStatusPopups() {
+        if (statusQueue.length && !statusShowing) showNextStatusPopup();
+    }
+
     function showVerifiedPopup() {
         var vm = document.getElementById('verifiedModal');
         if (!vm || anyModalOpen()) return;
@@ -7481,6 +8477,7 @@ $cfLiveState = [
         if (m === 'swapped') did.moa = true;
         else if (m === 'deferred') deferred = true;
 
+        var becameAllVerified = !!(fresh.all_verified && !state.all_verified); // the "All Requirements Verified!" popup covers that moment
         document.querySelectorAll('.compliance-req-item[data-req-key]').forEach(function (oldCard) {
             var key = oldCard.getAttribute('data-req-key');
             var newCard = doc.querySelector('.compliance-req-item[data-req-key="' + key + '"]');
@@ -7489,6 +8486,7 @@ $cfLiveState = [
             // their selection alone; it is refreshed on a later pass once they are done.
             if (cardIsStaged(oldCard)) { deferred = true; return; }
             bustImages(newCard);
+            if (!becameAllVerified) queueStatusChange(oldCard, newCard);
             var inserted = document.importNode(newCard, true);
             oldCard.replaceWith(inserted);
             rewireCard(inserted, key);
@@ -7498,6 +8496,12 @@ $cfLiveState = [
 
         swapRegion(doc, 'cfReqSummaryRegion');
 
+        if (becameAllVerified) { // a status popup still open from earlier gives way to the "All Requirements Verified!" popup
+            statusQueue = []; statusShowing = false;
+            var sm = document.getElementById('cfStatusChangedModal');
+            if (sm) sm.style.display = 'none';
+        }
+        flushStatusPopups();
         if (fresh.all_verified && !state.all_verified) showVerifiedPopup();
         state.all_verified = !!fresh.all_verified;
 
