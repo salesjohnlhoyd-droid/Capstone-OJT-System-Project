@@ -6468,39 +6468,65 @@ if (!$courseOfferingsLoaded) {
             .then(function (data) {
                 if (!data.success || !data.file) return;
                 var src = 'data:image/jpeg;base64,' + data.file;
-                var isPhoto = (type === 'photo');
-                var host = isPhoto
-                    ? ((document.getElementById('student-row-' + userId) || document).querySelector('.profile-card'))
-                    : document.getElementById('req-item-' + userId + '-' + type);
-                if (!host) return;
-                var pv = host.querySelector('.cv-card-preview') || host;
-                // whatever currently fills the preview: an image, a PDF tile, or the "No file yet" tile
-                var cur = pv.querySelector('img.cv-thumb-img, img.profile-img-large') || pv.querySelector('.cv-pdf-tile') || pv.querySelector('.cv-no-file') || (isPhoto ? null : host.querySelector('div[style*="background:#eee"]'));
 
+                // NEW (this adjustment): a PDF was submitted — show the PDF tile that opens the document preview modal
                 if (data.isPdf) {
-                    // NEW (this adjustment): a PDF was submitted — show the PDF tile that opens the preview modal
+                    var pdfHost = (type === 'photo')
+                        ? ((document.getElementById('student-row-' + userId) || document).querySelector('.profile-card'))
+                        : document.getElementById('req-item-' + userId + '-' + type);
+                    var pdfPv = pdfHost ? pdfHost.querySelector('.cv-card-preview') : null;
+                    if (!pdfPv) return;
+                    var pdfOld = pdfPv.querySelector('img, .cv-pdf-tile, .cv-no-file');
                     var tile = document.createElement('div');
                     tile.className = 'cv-pdf-tile cv-preview-trigger';
                     tile.setAttribute('data-uid', userId);
                     tile.setAttribute('data-req-key', type);
-                    var lbl = isPhoto ? 'Profile Photo (ID)' : String((host.querySelector('.cv-card-content > div') || {}).textContent || '').replace(/✓\s*VERIFIED/g, '').replace(/\bNEW\s+SUBMISSION\b/gi, '').replace(/\s+/g, ' ').trim() || 'Document';
+                    var lbl = (type === 'photo') ? 'Profile Photo (ID)' : String((pdfHost.querySelector('.cv-card-content > div') || {}).textContent || '').replace(/✓\s*VERIFIED/g, '').replace(/\bNEW\s+SUBMISSION\b/gi, '').replace(/\s+/g, ' ').trim();
+                    lbl = lbl || 'Document';
                     tile.setAttribute('data-req-label', lbl);
                     tile.title = 'Preview ' + lbl;
                     tile.innerHTML = '<i class="fas fa-file-pdf"></i><span>PDF document</span>';
-                    if (cur) cur.replaceWith(tile); else pv.insertBefore(tile, pv.firstChild);
+                    if (pdfOld) pdfOld.replaceWith(tile); else pdfPv.insertBefore(tile, pdfPv.firstChild);
                     return;
                 }
 
-                if (cur && cur.tagName === 'IMG') {
-                    cur.src = src;
-                    cur.onclick = function () { openPreview(src); };   // keep the click-to-enlarge pointing at the new file
+                if (type === 'photo') {
+                    var row = document.getElementById('student-row-' + userId);
+                    if (!row) return;
+                    var imgEl = row.querySelector('.profile-img-large');
+                    if (imgEl) {
+                        imgEl.src = src;
+                    } else {
+                        var card = row.querySelector('.profile-card');
+                        // UPDATED (this adjustment): the empty photo slot is now the card's "No file yet" tile
+                        var ph = card ? (card.querySelector('.cv-card-preview .cv-no-file, .cv-card-preview .cv-pdf-tile') || card.querySelector('div[style*="background:#eee"]')) : null;
+                        if (ph) {
+                            var newImg = document.createElement('img');
+                            newImg.src = src;
+                            newImg.className = 'profile-img-large cv-thumb-img';
+                            newImg.style.cursor = 'pointer';
+                            newImg.onclick = function () { openPreview(src); };
+                            ph.replaceWith(newImg);
+                        }
+                    }
                 } else {
-                    var newImg = document.createElement('img');
-                    newImg.src = src;
-                    newImg.className = (isPhoto ? 'profile-img-large ' : '') + 'cv-thumb-img';
-                    newImg.style.cursor = 'pointer';
-                    newImg.onclick = function () { openPreview(src); };
-                    if (cur) cur.replaceWith(newImg); else pv.insertBefore(newImg, pv.firstChild);
+                    var itemEl = document.getElementById('req-item-' + userId + '-' + type);
+                    if (!itemEl) return;
+                    var imgEl2 = itemEl.querySelector('img');
+                    if (imgEl2) {
+                        imgEl2.src = src;
+                    } else {
+                        // UPDATED (this adjustment): the empty slot is now the card's "No file yet" tile
+                        var ph2 = itemEl.querySelector('.cv-card-preview .cv-no-file, .cv-card-preview .cv-pdf-tile') || itemEl.querySelector('div[style*="background:#eee"]');
+                        if (ph2) {
+                            var newImg2 = document.createElement('img');
+                            newImg2.src = src;
+                            newImg2.className = 'cv-thumb-img';
+                            newImg2.style.cursor = 'pointer';
+                            newImg2.onclick = function () { openPreview(src); };
+                            ph2.replaceWith(newImg2);
+                        }
+                    }
                 }
             })
             .catch(function () {});
