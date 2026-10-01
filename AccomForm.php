@@ -5122,7 +5122,10 @@ function hideNotifModal(modalId) { document.getElementById(modalId).style.displa
    several pictures per requirement — see isPictureFile() and
    submit_requirements.php, which saves each picture as its own `requirements` row.
    ============================================================ */
-var MAX_FILE_SIZE = 5 * 1024 * 1024;
+var MAX_FILE_SIZE = 5 * 1024 * 1024;               /* the 2x2 photo */
+/* ADJUSTMENT: requirement files (picture / PDF) may be up to 8 MB, the same limit as the signed endorsement letter in
+   company_list.php. Keep in step with $maxFileSize in submit_requirements.php. The 2x2 photo stays at MAX_FILE_SIZE. */
+var MAX_REQUIREMENT_FILE_SIZE = 8 * 1024 * 1024;
 var ALLOWED_TYPES = ['image/jpeg'];
 var ALLOWED_PHOTO_TYPES = ['image/jpeg'];
 
@@ -5469,10 +5472,10 @@ function formatFileSizeMB(bytes) {
     if (!isFinite(n) || n < 0) return 'unknown size';
     return (n / (1024 * 1024)).toFixed(2) + ' MB';
 }
-function fileSizeLimitMB() { return Math.round(MAX_FILE_SIZE / (1024 * 1024)); }
-function showFileSizePopup(label, oversized) {
+function fileSizeLimitMB(limitBytes) { return Math.round((limitBytes || MAX_FILE_SIZE) / (1024 * 1024)); }
+function showFileSizePopup(label, oversized, limitBytes) {
     try {
-        var limit = fileSizeLimitMB();
+        var limit = fileSizeLimitMB(limitBytes);
         var many  = oversized.length > 1;
         var items = oversized.slice(0, 5).map(function(f) {
             return '<strong>' + escapeFileHtml(f.name || 'File') + '</strong> — ' + formatFileSizeMB(f.size) + ' (limit: ' + limit + ' MB)';
@@ -5490,7 +5493,7 @@ function showFileSizePopup(label, oversized) {
         if (vbtn) vbtn.textContent = 'OK, I\'ll Try Again';
     } catch (e) {
         /* last-resort fallback so an oversized file is never silently accepted */
-        showValidationError('File Too Large', 'Each file must be ' + fileSizeLimitMB() + ' MB or smaller.', []);
+        showValidationError('File Too Large', 'Each file must be ' + fileSizeLimitMB(limitBytes) + ' MB or smaller.', []);
     }
 }
 
@@ -5521,8 +5524,9 @@ function validateFileInput(input) {
             input.value = '';
             return false;
         }
-        if (file.size > MAX_FILE_SIZE) {
-            showFileSizePopup(label, files.filter(function(f) { return f.size > MAX_FILE_SIZE; }));
+        var sizeLimit = isPhoto ? MAX_FILE_SIZE : MAX_REQUIREMENT_FILE_SIZE;   /* ADJUSTMENT: requirements allow 8 MB, the photo 5 MB */
+        if (file.size > sizeLimit) {
+            showFileSizePopup(label, files.filter(function(f) { return f.size > sizeLimit; }), sizeLimit);
             input.value = '';
             return false;
         }
@@ -5559,7 +5563,7 @@ document.addEventListener('DOMContentLoaded', function() {
             files.forEach(function(file) {
                 if (!isPictureFile(file) && !isPdfFile(file)) {
                     errors.push('"' + label + '" — "' + file.name + '" is not a picture file (' + (file.type || 'unknown') + ').');
-                } else if (file.size > MAX_FILE_SIZE) {
+                } else if (file.size > MAX_REQUIREMENT_FILE_SIZE) {
                     oversizedList.push({ label: label, name: file.name, size: file.size });
                 }
             });
@@ -5578,7 +5582,7 @@ document.addEventListener('DOMContentLoaded', function() {
             var oLabel = oversizedList.every(function(o) { return o.label === oversizedList[0].label; }) ? oversizedList[0].label : 'some requirements';
             showFileSizePopup(oLabel, oversizedList.map(function(o) {
                 return { name: (oLabel === o.label ? '' : o.label + ' — ') + o.name, size: o.size };
-            }));
+            }), MAX_REQUIREMENT_FILE_SIZE);
         }
     });
 
