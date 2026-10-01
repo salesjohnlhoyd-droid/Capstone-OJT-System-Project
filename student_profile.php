@@ -3363,10 +3363,36 @@ document.addEventListener('DOMContentLoaded', function () {
     if (/[?&]debug=/.test(window.location.search)) return;              /* debug panel: keep the native post */
     var busy = false;
 
+    /* "Saved with no changes": the entries as the server would store them (line endings normalised, trimmed, empty rows
+       dropped, order kept) are compared with how they looked when the page opened. */
+    function entriesSignature() {
+        var pick = function (name) {
+            return Array.prototype.map.call(document.querySelectorAll('textarea[name="' + name + '"]'), function (t) {
+                return String(t.value || '').replace(/\r\n|\r/g, '\n').trim();
+            }).filter(function (v) { return v !== ''; });
+        };
+        try { return JSON.stringify({ s: pick('skill_entry[]'), e: pick('exp_entry[]') }); } catch (err) { return null; }
+    }
+    var initialSignature = entriesSignature();
+
     form.addEventListener('submit', function (e) {
         if (e.defaultPrevented) return;                                  /* the "enter at least one skill" check already stopped it */
         e.preventDefault();
         if (busy) return;
+
+        /* Nothing was changed: same loading screen, then the "Information Saved" confirmation — no request, no refresh. */
+        if (initialSignature !== null && entriesSignature() === initialSignature) {
+            busy = true;
+            showGlobalLoading('Saving resume');
+            setTimeout(function () {
+                showGlobalSuccess(
+                    'Information Saved',
+                    'No changes were made \u2014 your information is already up to date.',
+                    { autoCloseMs: 5000, onDone: function () { busy = false; } }
+                );
+            }, 450);
+            return;
+        }
 
         var fd = new FormData(form);
         var sb = e.submitter || document.querySelector('button.dr-save-btn');
