@@ -3214,11 +3214,11 @@ if (isset($_GET['msg']) && ($_GET['msg'] === 'profile_saved' || $_GET['msg'] ===
         .gls-message:empty { display: none; }
         .gls-areas { display: flex; flex-direction: column; gap: 8px; width: 100%; max-height: 34vh; overflow-y: auto; text-align: left; margin-top: 2px; }
         .gls-areas:empty { display: none; }
-        .gls-area { background: #fff; border: 1px solid var(--grid-border-soft, #DCE1EC); border-left: 3px solid var(--grid-green, #2C5A2C); padding: 8px 12px; }
+        .gls-area { background: #fff; border: 1px solid var(--grid-border-soft, #DCE1EC); padding: 8px 12px; }
         .gls-area-title { font-size: 11px; font-weight: 700; color: var(--grid-navy, #1B2A4A); text-transform: uppercase; letter-spacing: 0.5px; }
         .gls-area-fields { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
         .gls-chip { font-size: 11px; font-weight: 600; color: var(--grid-green, #2C5A2C); background: var(--grid-green-bg, #EAF3EA); padding: 2px 8px; border-radius: 2px; }
-        .gls-warn { width: 100%; box-sizing: border-box; text-align: left; font-size: 12px; line-height: 1.45; color: var(--grid-amber, #A0850A); background: var(--grid-amber-bg, #FAF3DC); border-left: 3px solid var(--grid-amber, #A0850A); padding: 8px 12px; }
+        .gls-warn { width: 100%; box-sizing: border-box; text-align: left; font-size: 12px; line-height: 1.45; color: var(--grid-amber, #A0850A); background: var(--grid-amber-bg, #FAF3DC); border: 1px solid var(--grid-amber, #A0850A); padding: 8px 12px; }
         .gls-warn:empty { display: none; }
         .gls-sub { font-size: 11px; color: var(--grid-muted, #5B6478); opacity: .8; display: flex; align-items: center; gap: 6px; }
         .gls-sub:empty { display: none; }

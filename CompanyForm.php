@@ -4517,11 +4517,11 @@ $cfLiveState = [
         .gls-message:empty { display: none; }
         .gls-areas { display: flex; flex-direction: column; gap: 8px; width: 100%; max-height: 34vh; overflow-y: auto; text-align: left; margin-top: 2px; }
         .gls-areas:empty { display: none; }
-        .gls-area { background: #fff; border: 1px solid var(--grid-border-soft, #DCE1EC); border-left: 3px solid var(--grid-green, #2C5A2C); padding: 8px 12px; }
+        .gls-area { background: #fff; border: 1px solid var(--grid-border-soft, #DCE1EC); padding: 8px 12px; }
         .gls-area-title { font-size: 11px; font-weight: 700; color: var(--grid-navy, #1B2A4A); text-transform: uppercase; letter-spacing: 0.5px; }
         .gls-area-fields { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
         .gls-chip { font-size: 11px; font-weight: 600; color: var(--grid-green, #2C5A2C); background: var(--grid-green-bg, #EAF3EA); padding: 2px 8px; border-radius: 2px; }
-        .gls-warn { width: 100%; box-sizing: border-box; text-align: left; font-size: 12px; line-height: 1.45; color: var(--grid-amber, #A0850A); background: var(--grid-amber-bg, #FAF3DC); border-left: 3px solid var(--grid-amber, #A0850A); padding: 8px 12px; }
+        .gls-warn { width: 100%; box-sizing: border-box; text-align: left; font-size: 12px; line-height: 1.45; color: var(--grid-amber, #A0850A); background: var(--grid-amber-bg, #FAF3DC); border: 1px solid var(--grid-amber, #A0850A); padding: 8px 12px; }
         .gls-warn:empty { display: none; }
         .gls-sub { font-size: 11px; color: var(--grid-muted, #5B6478); opacity: .8; display: flex; align-items: center; gap: 6px; }
         .gls-sub:empty { display: none; }
@@ -4738,6 +4738,22 @@ $cfLiveState = [
         }
         .cf-pdf-btn:hover { opacity: 0.88; }
         .cf-pdf-btn:focus-visible { outline: 2px solid var(--neust-maroon); outline-offset: 2px; }
+        /* ADJUSTMENT (action loading page): the "Upload Problem" popup now has the same square look as the page's other
+           popups (.cf-pdf-*, same as AccomForm.php): square box, uppercase dark title, the problems in a boxed list and a
+           square button. Scoped CSS only, so every place that opens it (page reload, background submit) matches. */
+        #complianceErrorModal .modal-content {
+            background: #ffffff; padding: 32px; border-radius: 0; border: 1px solid #dcdfe6;
+            width: 420px; max-width: 92%; text-align: center; box-shadow: none;
+        }
+        #complianceErrorModal .notif-modal-title { font-size: 18px; color: #1e293b; text-transform: uppercase; letter-spacing: 0.3px; }
+        #complianceErrorModal .notif-modal-msg {
+            text-align: left; background: #EEF1F6; border: 1px solid #C3CADA; border-radius: 0;
+            padding: 12px 16px; margin: 0 0 18px; font-size: 13px; color: #1B2A4A; line-height: 1.8; word-break: break-word;
+        }
+        #complianceErrorModal .notif-modal-btn {
+            background: var(--neust-maroon); color: #ffffff; border: 1px solid var(--neust-maroon); border-radius: 0;
+            padding: 10px 28px; font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: 0.4px; font-family: inherit;
+        }
         /* ADJUSTMENT: small helper line under the file list of the file-size popup */
         .cf-pdf-list li.cf-pdf-tip { list-style: none; margin-left: -16px; margin-top: 4px; font-size: 12px; color: #5A6272; line-height: 1.5; }
 
