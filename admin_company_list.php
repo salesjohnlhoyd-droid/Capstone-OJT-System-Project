@@ -5794,6 +5794,27 @@ input[type="file"] { display:none; }
             }).observe(ovw, { attributes: true, attributeFilter: ['class'] });
         } catch (e) { /* never affects the page */ }
     });
+    /* NEW (loader sync fix — same behaviour as administrator.php's "navigating" flag): once this page is on its way
+       to another page (link click, form submit, reload), nothing may hide the loading page again until the next page
+       has taken over. Before this, this page's own load handler / 4-second safety timer (and the "minimum time"
+       logic) could hide it in the middle of a navigation started in the first seconds after opening the page, so the
+       loading page vanished for a moment and then came back with the next page ("pauses, then continues"). A hide
+       that happens while navigating is undone before the browser paints it. The flag releases itself after 7.5 s
+       (navigation cancelled / a download), a moment before the existing 8 s release below. */
+    var navActive = false, navTimer = null, navObs = null;
+    function navAttach() {
+        if (navObs || !window.MutationObserver) return;
+        var ovn = overlay(); if (!ovn) return;
+        navObs = new MutationObserver(function () {
+            if (navActive && ovn.classList.contains('hidden')) { ovn.classList.add('gl-instant'); ovn.classList.remove('hidden'); }
+        });
+        navObs.observe(ovn, { attributes: true, attributeFilter: ['class'] });
+    }
+    function navStart() { try { navActive = true; navAttach(); clearTimeout(navTimer); navTimer = setTimeout(navEnd, 7500); } catch (e) {} }
+    function navEnd() { navActive = false; clearTimeout(navTimer); }
+    window.cvNavGate = { start: navStart, end: navEnd, active: function () { return navActive; } };
+    window.addEventListener('pageshow', function (e) { if (e.persisted) navEnd(); });
+
     // ── 3) leaving by script (reload / redirect after an action) ──
     var lastFileClick = 0;
     var FILE_RE = /[?&][^=&]*(export|download|print|stream|pdf|preview|blob|file|csv)[^=&]*=|\.(pdf|xlsx?|csv|docx?|zip)(\?|$)/i;
@@ -5808,6 +5829,7 @@ input[type="file"] { display:none; }
     }, true);
     window.addEventListener('beforeunload', function () {
         if (Date.now() - lastFileClick < 2000) return;                             // most likely a file download
+        navStart();                                                                 // NEW (loader sync fix): leaving — keep the loading page up
         var ov = overlay(); if (!ov || !ov.classList.contains('hidden')) return;
         var l = label(); if (l) l.textContent = 'Loading';
         ov.classList.add('gl-instant');   // NEW (loader sync fix): appears on the very next paint, like administrator.php
@@ -5950,6 +5972,7 @@ input[type="file"] { display:none; }
     function navShow() {
         if (navShown) return;
         navShown = true;
+        if (window.cvNavGate) window.cvNavGate.start();   // NEW (loader sync fix): nothing may hide the loading page while leaving
         navWasHidden = ov.classList.contains('hidden');
         if (navWasHidden) {
             if (label) { navPrevLabel = label.textContent; label.textContent = 'Loading'; }
@@ -5963,6 +5986,7 @@ input[type="file"] { display:none; }
         clearTimeout(navTimer);
         if (!navShown) return;
         navShown = false;
+        if (window.cvNavGate) window.cvNavGate.end();
         if (navWasHidden) {
             setHidden(true);
             if (label && navPrevLabel !== null) label.textContent = navPrevLabel;
