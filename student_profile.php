@@ -9,6 +9,23 @@ if (!isset($_SESSION['user_id']) || $_SESSION['role'] != "student") {
 }
 
 $user_id = $_SESSION['user_id'];
+
+/* ADJUSTMENT: Company List sidebar indicator — initial count of endorsement letters that need the
+   student's attention (same rule as company_list.php). Fails open to 0 (e.g. table not created yet). */
+$endo_attention_count = 0;
+try {
+    $_endo_q = $conn->prepare("SELECT validation_status, student_viewed FROM endorsement_letters WHERE student_id = ?");
+    if ($_endo_q) {
+        $_endo_q->bind_param("i", $user_id);
+        $_endo_q->execute();
+        $_endo_r = $_endo_q->get_result();
+        while ($_endo_row = $_endo_r->fetch_assoc()) {
+            $_endo_st = $_endo_row['validation_status'] ?: 'Awaiting Upload';
+            if (!$_endo_row['student_viewed'] || in_array($_endo_st, ['Awaiting Upload', 'Rejected'], true)) $endo_attention_count++;
+        }
+        $_endo_q->close();
+    }
+} catch (\Throwable $e) { $endo_attention_count = 0; }
 date_default_timezone_set("Asia/Manila");
 
 /* ============================================================
@@ -570,39 +587,52 @@ if ($student['deploy_status'] === "Deployed") {
     <style>
         /* ── Design tokens ── */
         :root {
-            --maroon:       #07145f;
+            /* Field Ops Grid palette (same values as AccomForm.php) */
+            --grid-bg: #EEF1F6;
+            --grid-navy: #1B2A4A;
+            --grid-border: #C3CADA;
+            --grid-border-soft: #DCE1EC;
+            --grid-green: #2C5A2C;
+            --grid-green-bg: #EAF3EA;
+            --grid-red: #A02A2A;
+            --grid-red-bg: #F7E9E9;
+            --grid-amber: #A0850A;
+            --grid-amber-bg: #FAF3DC;
+            --grid-muted: #5A6272;
+
+            --maroon:       #1B2A4A;
             --gold:         #FFD700;
-            --active-nav:   #1a237e;
-            --ink:          #1a1a2e;
-            --ink-muted:    #4a4a6a;
-            --ink-faint:    #8888aa;
+            --active-nav:   #1B2A4A;
+            --ink:          #2d3748;
+            --ink-muted:    #5A6272;
+            --ink-faint:    #8A93A6;
             --surface:      #ffffff;
-            --surface-soft: #f7f6f3;
-            --surface-warm: #f0efe9;
-            --border:       #e4e2da;
-            --border-light: #eeede8;
-            --teal:         #0d8c6a;
-            --teal-light:   #e1f5ee;
-            --teal-dark:    #085041;
-            --blue:         #185fa5;
-            --blue-light:   #e6f1fb;
-            --amber:        #b45309;
-            --amber-light:  #fef3c7;
-            --red:          #991b1b;
-            --red-light:    #fee2e2;
-            --radius-sm:    6px;
-            --radius-md:    10px;
-            --radius-lg:    16px;
-            --shadow-card:  0 1px 3px rgba(0,0,0,.06), 0 4px 16px rgba(0,0,0,.04);
-            --shadow-lift:  0 4px 20px rgba(0,0,0,.10);
+            --surface-soft: #F3F5F9;
+            --surface-warm: #EEF1F6;
+            --border:       #C3CADA;
+            --border-light: #DCE1EC;
+            --teal:         #2C5A2C;
+            --teal-light:   #EAF3EA;
+            --teal-dark:    #2C5A2C;
+            --blue:         #1B2A4A;
+            --blue-light:   #E7ECF7;
+            --amber:        #A0850A;
+            --amber-light:  #FAF3DC;
+            --red:          #A02A2A;
+            --red-light:    #F7E9E9;
+            --radius-sm:    0;
+            --radius-md:    0;
+            --radius-lg:    0;
+            --shadow-card:  none;
+            --shadow-lift:  none;
 
             /* Legacy aliases */
             --neust-maroon: #07145fe5;
             --neust-gold:   #FFD700;
-            --neust-active: #1a237e;
-            --bg:           #f0efe9;
+            --neust-active: #1B2A4A;
+            --bg:           #EEF1F6;
             --white:        #ffffff;
-            --text:         #1a1a2e;
+            --text:         #2d3748;
 
             /* Digital Resume pagination rule color */
             --dr-rule:      #c8cfe8;
@@ -611,7 +641,7 @@ if ($student['deploy_status'] === "Deployed") {
         *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
         body {
-            font-family: 'DM Sans', 'Segoe UI', sans-serif;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             background: var(--surface-warm);
             color: var(--ink);
             display: flex;
@@ -627,18 +657,18 @@ if ($student['deploy_status'] === "Deployed") {
             background: var(--neust-maroon);
             height: 100vh;
             position: fixed;
-            top: 0; left: 0;
             display: flex;
             flex-direction: column;
             transition: width 0.3s ease;
             z-index: 1000;
             box-shadow: 4px 0 10px rgba(0,0,0,0.1);
+            top: 0; left: 0;
         }
         .sidebar.collapsed { width: 80px; }
 
         /* Header — name + role label */
         .sidebar-header {
-            padding: 16px 20px;
+            padding: 20px;
             display: flex;
             align-items: center;
             justify-content: space-between;
@@ -653,26 +683,34 @@ if ($student['deploy_status'] === "Deployed") {
             overflow: hidden;
             transition: opacity 0.2s, width 0.3s;
             max-width: 180px;
+            min-width: 0;
         }
         .sidebar-user-name {
             color: var(--neust-gold);
-            font-size: 14px;
-            font-weight: 700;
+            font-size: 18px;
+            font-weight: bold;
             white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
             line-height: 1.3;
-            font-family: 'DM Sans', sans-serif;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
         }
         .sidebar-user-role {
             color: rgba(255,255,255,0.55);
-            font-size: 10px;
-            font-weight: 500;
+            font-size: 11px;
+            font-weight: 700;
             text-transform: uppercase;
-            letter-spacing: 0.08em;
+            letter-spacing: 0.8px;
+            margin-top: 3px;
             white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
         }
-        .sidebar.collapsed .sidebar-user-info { opacity: 0; width: 0; overflow: hidden; }
+        .sidebar.collapsed .sidebar-user-info {
+            opacity: 0;
+            width: 0;
+            overflow: hidden;
+        }
 
         /* ── Sidebar lock notice (not all requirements verified yet) —
            ADJUSTMENT: synced with company_list.php / AccomForm.php so
@@ -683,20 +721,14 @@ if ($student['deploy_status'] === "Deployed") {
         }
         .sidebar-lock-notice-inner {
             display: flex; align-items: flex-start; gap: 10px;
-            background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1);
-            border-radius: 8px; padding: 10px 12px;
+            background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.14);
+            border-radius: 0; padding: 10px 12px;
         }
-        .sidebar-lock-notice i { font-size: 15px; color: var(--neust-gold); margin-top: 1px; flex-shrink: 0; }
+        .sidebar-lock-notice i { font-size: 14px; color: var(--neust-gold); margin-top: 1px; flex-shrink: 0; }
         .sidebar-lock-notice p { font-size: 11px; color: rgba(255,255,255,0.65); line-height: 1.5; margin: 0; }
         .sidebar.collapsed .sidebar-lock-notice { display: none; }
 
-        .sidebar-links {
-            flex: 1;
-            display: flex;
-            flex-direction: column;
-            padding: 10px 0;
-            overflow: hidden;
-        }
+        .sidebar-links { flex: 1; display: flex; flex-direction: column; padding: 10px 0; overflow: hidden; }
 
         .sidebar a {
             padding: 15px 25px;
@@ -730,37 +762,20 @@ if ($student['deploy_status'] === "Deployed") {
         }
 
         /* ── Locked sidebar links ── */
-        .sidebar a.nav-locked {
-            cursor: not-allowed;
-            opacity: 0.55;
-        }
-        .sidebar a.nav-locked:hover {
-            background: rgba(255,255,255,0.04);
-            color: #cbd5e0;
-        }
+        .sidebar a.nav-locked { cursor: not-allowed; opacity: 0.55; }
+        .sidebar a.nav-locked:hover { background: rgba(255,255,255,0.04); color: #cbd5e0; }
         .nav-lock-icon {
-            font-size: 11px;
-            color: #fbbf24;
-            position: absolute;
-            right: 22px;
-            top: 50%;
-            transform: translateY(-50%);
-            opacity: 0.85;
+            font-size: 11px; color: var(--neust-gold); position: absolute;
+            right: 22px; top: 50%; transform: translateY(-50%); opacity: 0.85;
         }
         .sidebar.collapsed .nav-lock-icon { display: none; }
 
         /* ── Attendance sidebar badge ── */
         .sidebar-badge-att {
-            background: #d97706;
-            color: white;
-            border-radius: 50%;
-            width: 18px; height: 18px;
-            font-size: 10px; font-weight: 700;
-            display: inline-flex;
-            align-items: center; justify-content: center;
-            position: absolute;
-            right: 18px; top: 50%;
-            transform: translateY(-50%);
+            background: #d97706; color: white; border-radius: 50%;
+            width: 18px; height: 18px; font-size: 10px; font-weight: 700;
+            display: inline-flex; align-items: center; justify-content: center;
+            position: absolute; right: 18px; top: 50%; transform: translateY(-50%);
             animation: badge-pulse-att 2s ease-in-out infinite;
         }
         @keyframes badge-pulse-att {
@@ -770,51 +785,71 @@ if ($student['deploy_status'] === "Deployed") {
 
         /* ── Journal badge ── */
         .sidebar-badge-journal {
-            background: #f59e0b;
-            color: #1c1917;
-            border-radius: 50%;
-            min-width: 18px; height: 18px;
-            font-size: 10px; font-weight: 800;
-            display: inline-flex;
-            align-items: center; justify-content: center;
-            position: absolute;
-            right: 18px; top: 50%;
-            transform: translateY(-50%);
-            padding: 0 3px;
-            animation: badge-pulse-journal 2.4s ease-in-out infinite;
+            background: #f59e0b; color: #1c1917; border-radius: 50%;
+            min-width: 18px; height: 18px; font-size: 10px; font-weight: 800;
+            display: inline-flex; align-items: center; justify-content: center;
+            position: absolute; right: 18px; top: 50%; transform: translateY(-50%);
+            padding: 0 3px; animation: badge-pulse-journal 2.4s ease-in-out infinite;
         }
         @keyframes badge-pulse-journal {
             0%, 100% { box-shadow: 0 0 0 0 rgba(245,158,11,0.5); }
             50%       { box-shadow: 0 0 0 5px rgba(245,158,11,0); }
         }
 
-        .logout-link {
-            margin-top: auto;
-            padding: 20px;
-            border-top: 1px solid rgba(255,255,255,0.1);
+
+        /* ══════════════════════════════════════════════════════════════════
+           ADJUSTMENT: Company List live indicator + popup — ported from
+           company_list.php so every student page behaves the same.
+           • .sidebar-badge-endo : RED count on the "Company List" link
+             (endorsement letters that need the student's attention).
+           • .cv-top-toast       : the popup shown when an application moves
+             stage (administrator.php's navy popup bar).
+           ══════════════════════════════════════════════════════════════════ */
+        .sidebar-badge-endo {
+            background: #dc2626; color: #ffffff; border-radius: 50%;
+            min-width: 18px; height: 18px; font-size: 10px; font-weight: 800;
+            display: none; align-items: center; justify-content: center;
+            position: absolute; right: 18px; top: 50%; transform: translateY(-50%);
+            padding: 0 3px; animation: badge-pulse-endo 2s ease-in-out infinite;
         }
+        .sidebar-badge-endo.is-on { display: inline-flex; }
+        @keyframes badge-pulse-endo {
+            0%, 100% { box-shadow: 0 0 0 0 rgba(220,38,38,0.55); }
+            50%       { box-shadow: 0 0 0 6px rgba(220,38,38,0); }
+        }
+        .sidebar.collapsed .sidebar-badge-endo { right: 14px; top: 10px; transform: none; }
+        @media (prefers-reduced-motion: reduce) { .sidebar-badge-endo { animation: none; } }
+
+        .cv-top-toast {
+            position: fixed; top: 30px; left: 50%; transform: translateX(-50%);
+            background: #1B2A4A; color: #E3E8F1;
+            border: 1px solid #55668C; border-radius: 0;
+            padding: 14px 20px;
+            box-shadow: 0 8px 24px rgba(27,42,74,0.30);
+            display: flex; align-items: center; gap: 12px;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            font-size: 12.5px; line-height: 1.45;
+            z-index: 10020; max-width: 440px;
+            opacity: 0; transition: opacity 0.35s, top 0.3s ease;
+            pointer-events: none;
+        }
+        .cv-top-toast.show { opacity: 1; }
+        .cv-top-toast i { color: #8FD18F; font-size: 18px; flex-shrink: 0; }
+        .cv-top-toast strong { color: #ffffff; font-weight: 700; }
+        .cv-top-toast.is-error i { color: #f87171; }
+
+        .logout-link { margin-top: auto; padding: 20px; border-top: 1px solid rgba(255,255,255,0.1); }
         .logout-link a {
-            border: 1px solid var(--neust-gold);
-            color: var(--neust-gold);
-            border-radius: 6px;
-            justify-content: center;
-            padding: 10px;
-            display: flex;
-            align-items: center;
-            text-decoration: none;
-            font-size: 14px;
-            transition: background 0.2s;
+            border: 1px solid var(--neust-gold); color: var(--neust-gold);
+            border-radius: 6px; justify-content: center; padding: 10px;
+            display: flex; align-items: center; text-decoration: none;
+            font-size: 14px; transition: background 0.2s;
         }
         .logout-link a:hover { background: rgba(255,215,0,0.08); }
 
         .toggle-btn {
-            background: transparent;
-            border: none;
-            color: white;
-            cursor: pointer;
-            font-size: 20px;
-            outline: none;
-            flex-shrink: 0;
+            background: transparent; border: none; color: white;
+            cursor: pointer; font-size: 20px; outline: none; flex-shrink: 0;
         }
 
         /* ══════════════════════════════════════════
@@ -832,10 +867,11 @@ if ($student['deploy_status'] === "Deployed") {
             opacity: 0;
             width: calc(100% - 300px);
             max-width: 820px;
-            background: #07145f;
-            border-radius: 0 0 12px 12px;
-            border: 1px solid rgba(255,255,255,.12);
+            background: var(--grid-navy);
+            border-radius: 0;
+            border: 1px solid #55668C;
             border-top: none;
+            box-shadow: 0 8px 24px rgba(27,42,74,0.30);
             padding: 10px 16px;
             display: flex;
             align-items: center;
@@ -845,7 +881,7 @@ if ($student['deploy_status'] === "Deployed") {
                         visibility 0s linear .4s;
             z-index: 2000;
             pointer-events: none;
-            overflow: hidden;  /* keeps progress bar inside rounded corners */
+            overflow: hidden;
         }
         #att-notif-bar.anb-visible {
             transform: translateX(-50%) translateY(0);
@@ -860,19 +896,16 @@ if ($student['deploy_status'] === "Deployed") {
 
         /* ── ANB inner pieces ── */
         .anb-icon {
-            width: 34px; height: 34px;
-            border-radius: 8px;
-            background: #FAEEDA;
+            width: 34px; height: 34px; border-radius: 0;
+            background: var(--grid-amber-bg);
             display: flex; align-items: center; justify-content: center;
             flex-shrink: 0;
         }
-        .anb-icon i { font-size: 16px; color: #854F0B; }
+        .anb-icon i { font-size: 16px; color: var(--grid-amber); }
 
         .anb-pulse {
-            width: 8px; height: 8px;
-            border-radius: 50%;
-            background: #EF9F27;
-            flex-shrink: 0;
+            width: 8px; height: 8px; border-radius: 50%;
+            background: #F7C600; flex-shrink: 0;
             animation: anb-blink 1.4s ease-in-out infinite;
         }
         @keyframes anb-blink { 0%,100%{opacity:1} 50%{opacity:.2} }
@@ -884,7 +917,7 @@ if ($student['deploy_status'] === "Deployed") {
             display: flex;
             align-items: center;
             gap: 14px;
-            flex-wrap: nowrap; /* keep single line on normal widths */
+            flex-wrap: nowrap;
             overflow: hidden;
         }
         .anb-text-group {
@@ -895,75 +928,60 @@ if ($student['deploy_status'] === "Deployed") {
         .anb-label {
             font-size: 12px;
             font-weight: 700;
-            color: #FAEEDA;
+            color: #ffffff;
+            text-transform: uppercase;
+            letter-spacing: 0.4px;
             white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
         }
         .anb-window {
             font-size: 11px;
-            color: rgba(250,238,218,.65);
+            color: #E3E8F1;
+            opacity: .75;
             margin-top: 1px;
             white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
         }
-        .anb-divider {
-            width: 1px; height: 26px;
-            background: rgba(255,255,255,.18);
-            flex-shrink: 0;
-        }
+        .anb-divider { width: 1px; height: 26px; background: rgba(255,255,255,.18); flex-shrink: 0; }
         /* Countdown pill — fixed width so it never causes layout shift */
         .anb-countdown {
             font-size: 11px;
-            color: #FAC775;
+            font-weight: 700;
+            color: #F7C600;
             white-space: nowrap;
-            background: rgba(250,199,117,.14);
-            border-radius: 99px;
+            background: rgba(247,198,0,.10);
+            border-radius: 0;
             padding: 3px 11px;
-            border: 1px solid rgba(250,199,117,.28);
-            font-family: 'DM Mono', monospace;
+            border: 1px solid rgba(247,198,0,.35);
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             font-variant-numeric: tabular-nums;
             flex-shrink: 0;
-            min-width: 100px;       /* ← prevents width jitter as digits change */
+            min-width: 100px;
             text-align: center;
         }
         .anb-btn {
-            background: #EF9F27;
-            color: #412402;
-            border: none;
-            border-radius: 7px;
-            padding: 7px 15px;
-            font-size: 11px;
-            font-weight: 700;
-            font-family: inherit;
-            white-space: nowrap;
-            flex-shrink: 0;
-            transition: background .15s;
-            cursor: pointer;
+            background: #F7C600; color: var(--grid-navy); border: 1px solid #F7C600;
+            border-radius: 0; padding: 7px 15px; font-size: 11px; font-weight: 700;
+            text-transform: uppercase; letter-spacing: 0.4px;
+            font-family: inherit; white-space: nowrap; flex-shrink: 0;
+            transition: opacity .15s; cursor: pointer;
         }
-        .anb-btn:hover { background: #FAC775; }
+        .anb-btn:hover { opacity: .88; }
         .anb-close {
-            background: rgba(255,255,255,.12);
-            border: none;
-            color: rgba(250,238,218,.75);
-            width: 26px; height: 26px;
-            border-radius: 50%;
-            font-size: 13px;
+            background: rgba(255,255,255,.10); border: 1px solid rgba(255,255,255,.18);
+            color: #E3E8F1; width: 26px; height: 26px;
+            border-radius: 0; font-size: 13px;
             display: flex; align-items: center; justify-content: center;
-            flex-shrink: 0;
-            transition: background .15s;
-            cursor: pointer;
+            flex-shrink: 0; transition: background .15s; cursor: pointer;
         }
-        .anb-close:hover { background: rgba(255,255,255,.24); color: #FAEEDA; }
+        .anb-close:hover { background: rgba(255,255,255,.22); color: #ffffff; }
 
         /* Progress bar — absolutely positioned at bottom of bar */
         .anb-progress {
-            position: absolute;
-            bottom: 0; left: 0;
-            height: 2px;
-            background: #EF9F27;
-            border-radius: 0 0 0 12px;
+            position: absolute; bottom: 0; left: 0;
+            height: 2px; background: #F7C600; border-radius: 0;
             pointer-events: none;
         }
 
@@ -986,7 +1004,7 @@ if ($student['deploy_status'] === "Deployed") {
             color: white;
             height: 60px;
             flex-shrink: 0;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+            box-shadow: none;
             position: relative;
             z-index: 99;
         }
@@ -1004,7 +1022,7 @@ if ($student['deploy_status'] === "Deployed") {
         .card {
             background: var(--surface);
             padding: 24px 28px;
-            border-radius: var(--radius-lg);
+            border-radius: 0;
             margin-bottom: 20px;
             box-shadow: var(--shadow-card);
             border: 1px solid var(--border);
@@ -1013,7 +1031,7 @@ if ($student['deploy_status'] === "Deployed") {
             margin-top: 0;
             color: var(--maroon);
             font-size: 18px;
-            font-family: 'Lora', serif;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             border-bottom: 2px solid var(--gold);
             padding-bottom: 10px;
             margin-bottom: 18px;
@@ -1022,7 +1040,7 @@ if ($student['deploy_status'] === "Deployed") {
             color: var(--maroon);
             font-size: 15px;
             margin: 18px 0 10px;
-            font-family: 'Lora', serif;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             font-style: italic;
         }
         .card p { margin-bottom: 8px; font-size: 14px; line-height: 1.6; }
@@ -1039,7 +1057,7 @@ if ($student['deploy_status'] === "Deployed") {
 
         .map iframe {
             width: 100%; height: 300px;
-            border: 0; border-radius: var(--radius-md);
+            border: 0; border-radius: 0;
             margin-top: 12px;
         }
 
@@ -1050,10 +1068,10 @@ if ($student['deploy_status'] === "Deployed") {
             width: 100%;
             padding: 10px 12px;
             margin: 5px 0 12px;
-            border-radius: var(--radius-md);
+            border-radius: 0;
             border: 1.5px solid var(--border);
             font-size: 14px;
-            font-family: 'DM Sans', inherit;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             background: var(--surface-soft);
             color: var(--ink);
             transition: border-color 0.2s, background 0.2s;
@@ -1063,82 +1081,75 @@ if ($student['deploy_status'] === "Deployed") {
             outline: none;
             border-color: var(--teal);
             background: var(--surface);
-            box-shadow: 0 0 0 3px rgba(13,140,106,0.10);
+            box-shadow: 0 0 0 3px rgba(27,42,74,0.10);
         }
         textarea { resize: vertical; min-height: 72px; }
 
         button[type="submit"] {
-            background: linear-gradient(135deg, var(--teal), var(--blue));
+            background: var(--grid-navy);
             color: white;
             padding: 11px 24px;
             border: none;
-            border-radius: var(--radius-md);
+            border-radius: 0;
             cursor: pointer;
             font-size: 14px;
             font-weight: 600;
-            font-family: 'DM Sans', inherit;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             transition: opacity 0.2s, transform 0.15s;
         }
-        button[type="submit"]:hover { opacity: 0.88; transform: translateY(-1px); }
+        button[type="submit"]:hover { opacity: 0.88; transform: none; }
 
         /* ══ NOT-DEPLOYED MODAL ══ */
         #not-deployed-modal {
-            display: none;
-            position: fixed;
-            inset: 0;
-            z-index: 99999;
-            background: rgba(7, 20, 95, 0.55);
-            backdrop-filter: blur(3px);
-            align-items: center;
-            justify-content: center;
+            display: none; position: fixed; inset: 0; z-index: 99999;
+            background: rgba(0,0,0,0.5);
+            align-items: center; justify-content: center;
         }
         #not-deployed-modal.show { display: flex; }
         .ndm-box {
-            background: #fff;
-            border-radius: 18px;
-            padding: 36px 32px 28px;
-            max-width: 400px;
-            width: calc(100% - 40px);
-            box-shadow: 0 20px 60px rgba(7,20,95,0.22), 0 4px 16px rgba(0,0,0,0.10);
+            background: #fff; border-radius: 0; border: 1px solid var(--grid-border);
+            padding: 32px; max-width: 420px; width: calc(100% - 40px);
             text-align: center;
-            animation: ndm-pop 0.32s cubic-bezier(.34,1.56,.64,1) both;
+            animation: ndm-pop 0.3s ease both;
         }
         @keyframes ndm-pop {
             from { opacity: 0; transform: scale(0.88) translateY(18px); }
             to   { opacity: 1; transform: scale(1)    translateY(0); }
         }
         .ndm-icon {
-            width: 68px; height: 68px;
-            border-radius: 50%;
-            background: linear-gradient(135deg, #fef3c7, #fde68a);
-            border: 3px solid #f59e0b;
+            width: auto; height: auto; border-radius: 0;
+            background: none; border: none;
             display: flex; align-items: center; justify-content: center;
-            font-size: 30px;
-            margin: 0 auto 18px;
+            font-size: 48px; color: var(--grid-amber); margin: 0 auto 16px;
         }
-        .ndm-title { font-size: 18px; font-weight: 800; color: var(--maroon); margin-bottom: 10px; font-family: 'Lora', serif; }
-        .ndm-message { font-size: 13.5px; color: #4b5563; line-height: 1.65; margin-bottom: 22px; }
+        .ndm-title {
+            font-size: 18px; font-weight: 700; color: #1e293b; margin-bottom: 12px;
+            text-transform: uppercase; letter-spacing: 0.3px;
+        }
+        .ndm-message { font-size: 14px; color: var(--grid-muted); line-height: 1.6; margin-bottom: 24px; }
         .ndm-page-name {
-            display: inline-block;
-            background: #f0f4f8; border: 1.5px solid #e2e8f0;
-            border-radius: 8px; padding: 3px 12px;
-            font-weight: 700; color: var(--maroon); font-size: 13px; margin-bottom: 18px;
+            display: inline-block; background: var(--grid-bg); border: 1px solid var(--grid-border);
+            border-radius: 0; padding: 4px 12px; font-weight: 700;
+            color: var(--grid-navy); font-size: 12px; margin-bottom: 14px;
+            text-transform: uppercase; letter-spacing: 0.4px;
         }
         .ndm-status-badge {
-            display: inline-flex; align-items: center; gap: 6px;
-            background: #fff7ed; border: 1.5px solid #fed7aa;
-            border-radius: 20px; padding: 5px 14px;
-            font-size: 12px; font-weight: 700; color: #c2410c; margin-bottom: 22px;
+            display: flex; align-items: center; justify-content: center; gap: 6px;
+            width: fit-content; margin-left: auto; margin-right: auto;
+            background: var(--grid-amber-bg); border: 1px solid #E6D9A8;
+            border-radius: 0; padding: 5px 14px;
+            font-size: 11px; font-weight: 700; color: var(--grid-amber); margin-bottom: 20px;
+            text-transform: uppercase; letter-spacing: 0.4px;
         }
-        .ndm-status-dot { width: 8px; height: 8px; border-radius: 50%; background: #f97316; flex-shrink: 0; }
+        .ndm-status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--grid-amber); flex-shrink: 0; }
         .ndm-close-btn {
-            background: var(--maroon); color: white; border: none;
-            border-radius: 10px; padding: 11px 32px;
-            font-size: 14px; font-weight: 700; font-family: 'DM Sans', sans-serif;
-            cursor: pointer; transition: opacity 0.2s; width: 100%;
+            background: var(--grid-navy); color: white; border: 1px solid var(--grid-navy);
+            border-radius: 0; padding: 10px 24px; font-size: 12px; font-weight: 600;
+            text-transform: uppercase; letter-spacing: 0.4px;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; cursor: pointer; transition: opacity 0.2s; width: 100%;
         }
         .ndm-close-btn:hover { opacity: 0.88; }
-        .ndm-hint { font-size: 11.5px; color: #9ca3af; margin-top: 12px; }
+        .ndm-hint { font-size: 11.5px; color: var(--grid-muted); margin-top: 12px; }
 
         /* ══════════════════════════════════════════════
            SECTION TAB SWITCHER (static bar)
@@ -1173,9 +1184,9 @@ if ($student['deploy_status'] === "Deployed") {
             font-weight: 600;
             color: var(--ink-muted);
             cursor: pointer;
-            border-radius: 30px;
+            border-radius: 0;
             transition: background 0.2s, color 0.2s, transform 0.15s;
-            font-family: 'DM Sans', sans-serif;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             white-space: nowrap;
             display: inline-flex;
             align-items: center;
@@ -1186,14 +1197,14 @@ if ($student['deploy_status'] === "Deployed") {
         .switch-page-btn.active {
             background: var(--maroon);
             color: #fff;
-            box-shadow: 0 2px 8px rgba(7,20,95,0.28);
+            box-shadow: none;
         }
         .switch-page-btn.active i { color: var(--gold); }
-        .switch-page-btn:active { transform: translateY(1px); }
+        .switch-page-btn:active { transform: none; }
         .switch-page-btn .tab-dot {
             width: 7px; height: 7px;
             border-radius: 50%;
-            background: #d97706;
+            background: #A0850A;
             margin-left: 2px;
             flex-shrink: 0;
         }
@@ -1215,7 +1226,7 @@ if ($student['deploy_status'] === "Deployed") {
             color: var(--ink-faint);
         }
         .tab-empty i { font-size: 2.4rem; margin-bottom: 14px; display: block; opacity: 0.45; }
-        .tab-empty h3 { font-size: 15px; color: var(--ink-muted); margin-bottom: 6px; font-family: 'Lora', serif; }
+        .tab-empty h3 { font-size: 15px; color: var(--ink-muted); margin-bottom: 6px; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
         .tab-empty p { font-size: 13px; color: var(--ink-faint); }
 
         /* ══════════════════════════════════════════════
@@ -1232,7 +1243,7 @@ if ($student['deploy_status'] === "Deployed") {
         }
         .fg-stat-box {
             flex: 1 1 150px;
-            border-radius: 12px;
+            border-radius: 0;
             border: 1.5px solid;
             padding: 14px 16px;
             text-align: center;
@@ -1247,7 +1258,7 @@ if ($student['deploy_status'] === "Deployed") {
         .fg-stat-value {
             font-size: 1.6rem;
             font-weight: 900;
-            font-family: 'DM Sans', monospace;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             line-height: 1;
         }
         .fg-stat-max {
@@ -1329,14 +1340,14 @@ if ($student['deploy_status'] === "Deployed") {
             cursor: pointer;
             transition: background 0.15s, color 0.15s, transform 0.15s;
         }
-        .dr-nav-arrow:hover:not(:disabled) { background: var(--maroon); color: #fff; transform: translateY(-1px); }
+        .dr-nav-arrow:hover:not(:disabled) { background: var(--maroon); color: #fff; transform: none; }
         .dr-nav-arrow:active:not(:disabled) { transform: translateY(0); }
         .dr-nav-arrow:disabled { opacity: 0.35; cursor: not-allowed; }
         .dr-page-indicator {
             font-size: 12.5px;
             font-weight: 700;
             color: var(--ink-muted);
-            font-family: 'DM Mono', monospace;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             min-width: 92px;
             text-align: center;
         }
@@ -1347,7 +1358,7 @@ if ($student['deploy_status'] === "Deployed") {
             margin: 0 0 10px;
             padding: 20px 14px;
             background: #d8dde8;
-            border-radius: 12px;
+            border-radius: 0;
             position: relative;
         }
         .dr-paper {
@@ -1355,8 +1366,8 @@ if ($student['deploy_status'] === "Deployed") {
             width: 794px;
             max-width: 100%;
             height: 1123px;
-            border: 1px solid #b0b8cc;
-            box-shadow: 0 4px 24px rgba(0,0,0,.14);
+            border: 1px solid #C3CADA;
+            box-shadow: none;
             font-family: "Times New Roman","Crimson Pro",Times,serif;
             color: #1a1a1a;
             display: flex;
@@ -1398,7 +1409,7 @@ if ($student['deploy_status'] === "Deployed") {
         .dr-lh-line4 { font-size: 9px; color: #d9c98a; margin-top: 1px; }
 
         .dr-title-band { background: #f4f5fb; border-bottom: 1.5px solid var(--dr-rule); padding: 8px 24px 7px; text-align: center; flex-shrink: 0; }
-        .dr-title-band h1 { font-family: 'Segoe UI', sans-serif; font-size: 16px; font-weight: 700; color: var(--maroon); letter-spacing: .035em; text-transform: uppercase; }
+        .dr-title-band h1 { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; font-size: 16px; font-weight: 700; color: var(--maroon); letter-spacing: .035em; text-transform: uppercase; }
         .dr-form-meta { margin-top: 3px; font-family: 'Courier New', monospace; font-size: 7.5px; color: #999; }
 
         .dr-form-body { padding: 18px 28px 20px; flex: 1; min-height: 0; overflow: hidden; }
@@ -1409,7 +1420,7 @@ if ($student['deploy_status'] === "Deployed") {
             gap: 18px;
             margin-bottom: 6px;
             padding-bottom: 16px;
-            border-bottom: 1px solid #eee;
+            border-bottom: 1px solid #DCE1EC;
         }
         .dr-applicant-strip .photo { margin: 0; flex-shrink: 0; }
         .dr-avatar {
@@ -1425,17 +1436,17 @@ if ($student['deploy_status'] === "Deployed") {
         }
         .dr-avatar img { width: 100%; height: 100%; object-fit: cover; display: block; }
         .dr-resume-mirror-info p {
-            font-family: 'Segoe UI', sans-serif;
-            font-size: 12.5px; color: #4b5563;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            font-size: 12.5px; color: #5A6272;
             margin: 0 0 3px; line-height: 1.5;
         }
-        .dr-resume-mirror-info p b { color: #1a1a2e; font-weight: 700; margin-right: 4px; }
+        .dr-resume-mirror-info p b { color: #2d3748; font-weight: 700; margin-right: 4px; }
 
         .dr-section-title {
-            font-family: 'Segoe UI', sans-serif;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             font-size: 13px; font-weight: 700; color: #1a1a1a;
             margin: 16px 0 8px;
-            border-bottom: 1px solid #e5e7eb;
+            border-bottom: 1px solid #DCE1EC;
             padding-bottom: 4px;
         }
         .dr-section-title:first-of-type { margin-top: 0; }
@@ -1463,18 +1474,18 @@ if ($student['deploy_status'] === "Deployed") {
             background: var(--teal);
             color: #fff;
             border: 1.5px solid var(--teal);
-            border-radius: var(--radius-md);
+            border-radius: 0;
             padding: 9px 18px;
             font-size: 13px;
             font-weight: 600;
-            font-family: 'DM Sans', inherit;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             cursor: pointer;
             display: inline-flex;
             align-items: center;
             gap: 8px;
             transition: opacity 0.15s, transform 0.15s;
         }
-        .add-field-btn-labeled:hover { opacity: 0.88; transform: translateY(-1px); }
+        .add-field-btn-labeled:hover { opacity: 0.88; transform: none; }
         .add-field-btn-labeled:active { transform: translateY(0); }
         .add-field-btn-labeled.exp-btn { background: var(--blue); border-color: var(--blue); }
 
@@ -1482,23 +1493,23 @@ if ($student['deploy_status'] === "Deployed") {
             background: #f4f5fb;
             border: 1.5px solid var(--dr-rule);
             border-top: 1.5px solid var(--maroon);
-            border-radius: 12px;
+            border-radius: 0;
             padding: 14px 24px;
             display: flex; align-items: center; justify-content: space-between;
             gap: 10px; flex-wrap: wrap;
             max-width: 794px;
             margin: 0 auto;
         }
-        .dr-submit-bar-note { font-family: 'Courier New', monospace; font-size: 7.5px; color: #9ca3af; }
+        .dr-submit-bar-note { font-family: 'Courier New', monospace; font-size: 7.5px; color: #8A93A6; }
         .dr-save-btn {
-            background: linear-gradient(135deg, var(--teal), var(--blue));
+            background: var(--grid-navy);
             color: #fff; border: none;
-            padding: 10px 22px; border-radius: 8px;
-            font-family: 'Segoe UI', sans-serif; font-size: 13px; font-weight: 700;
+            padding: 10px 22px; border-radius: 0;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; font-size: 13px; font-weight: 700;
             cursor: pointer; display: flex; align-items: center; gap: 7px;
             transition: opacity 0.2s, transform 0.15s;
         }
-        .dr-save-btn:hover { opacity: 0.88; transform: translateY(-1px); }
+        .dr-save-btn:hover { opacity: 0.88; transform: none; }
 
         @media (max-width: 840px) {
             .dr-paper { width: 100%; }
@@ -1539,10 +1550,10 @@ if ($student['deploy_status'] === "Deployed") {
         }
 
         .dr-field-label {
-            font-family: 'DM Sans', sans-serif;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             font-size: 10.5px;
             font-weight: 700;
-            color: #6b7280;
+            color: #5A6272;
             text-transform: uppercase;
             letter-spacing: 0.04em;
         }
@@ -1558,7 +1569,7 @@ if ($student['deploy_status'] === "Deployed") {
             flex-shrink: 0;
             width: 26px;
             height: 26px;
-            border-radius: var(--radius-sm);
+            border-radius: 0;
             font-size: 11px;
             display: inline-flex;
             align-items: center;
@@ -1571,7 +1582,7 @@ if ($student['deploy_status'] === "Deployed") {
             background: var(--blue-light);
             color: var(--blue);
         }
-        .field-edit-btn:hover { background: #d3e6f7; transform: translateY(-1px); }
+        .field-edit-btn:hover { background: #E7ECF7; transform: none; }
         .field-edit-btn:active { transform: translateY(0); }
 
         .field-remove-btn {
@@ -1579,7 +1590,7 @@ if ($student['deploy_status'] === "Deployed") {
             background: var(--red-light);
             color: var(--red);
         }
-        .field-remove-btn:hover { background: #fecaca; transform: translateY(-1px); }
+        .field-remove-btn:hover { background: #E3BCBC; transform: none; }
         .field-remove-btn:active { transform: translateY(0); }
         .field-remove-btn:disabled {
             opacity: 0.35;
@@ -1598,10 +1609,10 @@ if ($student['deploy_status'] === "Deployed") {
             font-family: "Times New Roman","Crimson Pro",Times,serif;
             font-size: 12.5px;
             line-height: 1.6;
-            color: #374151;
+            color: #2d3748;
             background: #f4f5fb;
             border: 1.5px solid var(--dr-rule);
-            border-radius: 10px;
+            border-radius: 0;
             padding: 10px 14px;
             margin: 0;
         }
@@ -1609,11 +1620,11 @@ if ($student['deploy_status'] === "Deployed") {
             outline: none;
             border-color: var(--teal);
             background: #fff;
-            box-shadow: 0 0 0 3px rgba(13,140,106,0.10);
+            box-shadow: 0 0 0 3px rgba(27,42,74,0.10);
         }
         .dr-paper .autogrow-textarea.field-locked {
             background: #f4f5fb;
-            color: #374151;
+            color: #2d3748;
             cursor: default;
         }
 
@@ -1624,6 +1635,82 @@ if ($student['deploy_status'] === "Deployed") {
             }
             .switch-page-btn { flex: 1; min-width: 45%; justify-content: center; }
         }
+        /* ══ Field Ops Grid (AccomForm.php) — shared additions ══
+           Responsive attendance bar + visible keyboard focus + reduced
+           motion, exactly as AccomForm.php defines them. */
+        @media (max-width: 768px) {
+            #att-notif-bar,
+            #att-notif-bar.sidebar-collapsed {
+                left: 50% !important;
+                width: calc(100% - 20px) !important;
+                max-width: none !important;
+            }
+        }
+        .sidebar.collapsed .logout-link a { border-color: transparent; }
+        .anb-btn:focus-visible, .anb-close:focus-visible, .ndm-close-btn:focus-visible,
+        .toggle-btn:focus-visible { outline: 2px solid #F7C600; outline-offset: 2px; }
+        @media (prefers-reduced-motion: reduce) {
+            .ndm-box, .anb-pulse, .sidebar-badge-att, .sidebar-badge-journal { animation: none; }
+        }
+        /* ══ Field Ops Grid (AccomForm.php) — page typography ══
+           Square corners, thin slate borders, navy actions, small
+           uppercase labels. Only the look changes; every class, id and
+           tab/pagination hook used by the scripts is kept as it was. */
+        body { background: var(--grid-bg); color: #2d3748; }
+        .card { border: 1px solid var(--grid-border); padding: 28px 32px; }
+        .card h2 {
+            color: var(--grid-navy); font-size: 18px;
+            border-bottom: 1px solid var(--grid-border);
+            text-transform: uppercase; letter-spacing: 0.6px;
+        }
+        .card h3 {
+            color: var(--grid-navy); font-size: 13px; font-style: normal;
+            text-transform: uppercase; letter-spacing: 0.4px;
+        }
+        .card p b { color: var(--grid-navy); }
+        .photo { border: 1px solid var(--grid-border); }
+        input[type="text"], textarea { border: 1px solid var(--grid-border); background: #fff; }
+        input[type="text"]:focus, textarea:focus,
+        .dr-paper .autogrow-textarea:focus {
+            border-color: var(--grid-navy); box-shadow: 0 0 0 3px rgba(27,42,74,0.08);
+        }
+        button[type="submit"], .dr-save-btn, .add-field-btn-labeled {
+            background: var(--grid-navy); border: 1px solid var(--grid-navy); color: #fff;
+            font-size: 12px; text-transform: uppercase; letter-spacing: 0.4px;
+        }
+        .add-field-btn-labeled.exp-btn { background: #fff; color: var(--grid-navy); border-color: var(--grid-border); }
+        .add-field-btn-labeled.exp-btn:hover { background: #f3f4f7; }
+        button[type="submit"]:focus-visible, .dr-save-btn:focus-visible,
+        .add-field-btn-labeled:focus-visible, .switch-page-btn:focus-visible,
+        .dr-nav-arrow:focus-visible { outline: 2px solid var(--grid-navy); outline-offset: 2px; }
+        .field-edit-btn  { border: 1px solid var(--grid-border); background: #fff; color: var(--grid-navy); }
+        .field-edit-btn:hover { background: var(--grid-navy); color: #fff; }
+        .field-remove-btn { border: 1px solid #E3BCBC; }
+        .field-remove-btn:hover { background: var(--grid-red); color: #fff; }
+        .field-remove-btn:disabled:hover { color: var(--red); }
+
+        /* Section switcher — same square tabs as AccomForm.php */
+        .page-switcher { gap: 8px; border-bottom: 1px solid var(--grid-border); padding-bottom: 14px; }
+        .switch-page-btn {
+            background: #fff; border: 1px solid var(--grid-border);
+            padding: 10px 18px; font-size: 12px; color: var(--grid-navy);
+            text-transform: uppercase; letter-spacing: 0.4px;
+        }
+        .switch-page-btn:hover:not(.active) { background: #f3f4f7; color: var(--grid-navy); }
+        .switch-page-btn.active { background: var(--grid-navy); border-color: var(--grid-navy); color: #fff; box-shadow: none; }
+        .switch-page-btn.active i { color: #F7C600; }
+        .switch-page-btn:active { transform: none; }
+        .switch-page-btn .tab-dot { background: var(--grid-amber); }
+
+        .tab-empty h3 { color: var(--grid-navy); text-transform: uppercase; letter-spacing: 0.4px; font-size: 13px; }
+        .fg-stat-box { border-width: 1px; }
+        .fg-stat-label { letter-spacing: 0.5px; }
+        .dr-nav-arrow { border: 1px solid var(--grid-navy); border-radius: 0; }
+        .dr-nav-arrow:hover:not(:disabled) { transform: none; }
+        .dr-page-indicator { color: var(--grid-navy); font-variant-numeric: tabular-nums; }
+        .dr-submit-bar { border: 1px solid var(--grid-border); background: #fff; }
+        .ndm-icon i { color: var(--grid-amber); }
+        @media (prefers-reduced-motion: reduce) { .tab-pane.active { animation: none; } }
     </style>
 </head>
 <body>
@@ -1665,6 +1752,10 @@ if ($student['deploy_status'] === "Deployed") {
         <a href="company_list.php">
             <i class="fas fa-building"></i>
             <span class="link-text">Company List</span>
+            <!-- ADJUSTMENT: endorsement-letter indicator (same count as company_list.php's Inbox bell), kept live by the script before </body> -->
+            <span class="sidebar-badge-endo<?= $endo_attention_count > 0 ? ' is-on' : '' ?>" id="endoSidebarBadge" role="status" aria-live="polite"
+                  title="<?= $endo_attention_count > 0 ? 'You have endorsement letter(s) in your Inbox' : '' ?>"
+                  aria-label="<?= $endo_attention_count > 0 ? (int)$endo_attention_count . ' endorsement letter notification(s)' : '' ?>"><?= $endo_attention_count > 0 ? (int)$endo_attention_count : '' ?></span>
         </a>
         <a href="AccomForm.php">
             <i class="fas fa-file-contract"></i>
@@ -1721,7 +1812,7 @@ if ($student['deploy_status'] === "Deployed") {
 <!-- ══ NOT-DEPLOYED MODAL ══ -->
 <div id="not-deployed-modal">
     <div class="ndm-box">
-        <div class="ndm-icon">🔒</div>
+        <div class="ndm-icon"><i class="fas fa-lock"></i></div>
         <div class="ndm-title">Page Not Accessible</div>
         <div class="ndm-page-name" id="ndm-page-label">—</div>
         <div class="ndm-status-badge">
@@ -1801,19 +1892,15 @@ if ($student['deploy_status'] === "Deployed") {
             elseif ($fg_val <= 3.0)   $fg_label = 'Passed';
             else                      $fg_label = 'Failed';
 
-            if ($fg_val <= 2.0)      $fg_color = '#065f46'; // Excellent / Very Satisfactory
-            elseif ($fg_val <= 2.75) $fg_color = '#1e40af'; // Satisfactory
-            elseif ($fg_val <= 3.0)  $fg_color = '#854d0e'; // Passed
-            else                      $fg_color = '#991b1b'; // Failed
+            if ($fg_val <= 2.0)      $fg_color = '#2C5A2C'; // Excellent / Very Satisfactory
+            elseif ($fg_val <= 2.75) $fg_color = '#1B2A4A'; // Satisfactory
+            elseif ($fg_val <= 3.0)  $fg_color = '#A0850A'; // Passed
+            else                      $fg_color = '#A02A2A'; // Failed
         ?>
         <div class="card" id="final-grade-card" style="
-            border: 2px solid <?= $fg_color ?>;
-            background: linear-gradient(135deg, #f0fdf4 0%, #fff 100%);
+            border: 1px solid <?= $fg_color ?>;
+            background: #ffffff;
             position: relative; overflow: hidden;">
-            <div style="
-                position:absolute; top:0; right:0; width:120px; height:120px;
-                background: radial-gradient(circle at top right, <?= $fg_color ?>18, transparent 70%);
-                pointer-events:none;"></div>
 
             <h2 style="color:<?= $fg_color ?>; border-bottom-color:<?= $fg_color ?>;">
                 <i class="fas fa-graduation-cap" style="margin-right:8px;"></i>Final OJT Grade
@@ -1829,27 +1916,27 @@ if ($student['deploy_status'] === "Deployed") {
                 </div>
 
                 <?php if ($final_grade['general_competency_rating'] !== null): ?>
-                <div class="fg-stat-box" style="background:#f3e8ff; border-color:#ddd6fe;">
-                    <div class="fg-stat-label" style="color:#6d28d9;"><i class="fas fa-tasks"></i> General Competency</div>
-                    <div class="fg-stat-value" style="color:#6d28d9;">
+                <div class="fg-stat-box" style="background:#EFEBF7; border-color:#D5CCE8;">
+                    <div class="fg-stat-label" style="color:#5B4A8A;"><i class="fas fa-tasks"></i> General Competency</div>
+                    <div class="fg-stat-value" style="color:#5B4A8A;">
                         <?= number_format($final_grade['general_competency_rating'], 2) ?>
                     </div>
-                    <div class="fg-stat-caption" style="color:#7c3aed;">Weight: 40%</div>
+                    <div class="fg-stat-caption" style="color:#5B4A8A;">Weight: 40%</div>
                 </div>
                 <?php endif; ?>
 
                 <?php if ($final_grade['specific_competency_rating'] !== null): ?>
-                <div class="fg-stat-box" style="background:#dbeafe; border-color:#bfdbfe;">
-                    <div class="fg-stat-label" style="color:#1e40af;"><i class="fas fa-star"></i> Specific Competency</div>
-                    <div class="fg-stat-value" style="color:#1e40af;">
+                <div class="fg-stat-box" style="background:#E7ECF7; border-color:#C3CADA;">
+                    <div class="fg-stat-label" style="color:#1B2A4A;"><i class="fas fa-star"></i> Specific Competency</div>
+                    <div class="fg-stat-value" style="color:#1B2A4A;">
                         <?= number_format($final_grade['specific_competency_rating'], 2) ?>
                     </div>
-                    <div class="fg-stat-caption" style="color:#1e40af;">Weight: 60%</div>
+                    <div class="fg-stat-caption" style="color:#1B2A4A;">Weight: 60%</div>
                 </div>
                 <?php endif; ?>
             </div>
 
-            <div style="font-size:0.75rem; color:#9ca3af; display:flex; align-items:center; gap:6px;">
+            <div style="font-size:0.75rem; color:#8A93A6; display:flex; align-items:center; gap:6px;">
                 <i class="fas fa-check-circle" style="color:<?= $fg_color ?>;"></i>
                 Released on <?= date('F d, Y', strtotime($final_grade['published_at'])) ?>
                 <?php if (!empty($final_grade['company_name'])): ?>
@@ -2777,7 +2864,7 @@ function _anbShow(info) {
         const m = Math.floor(rem / 60);
         const s = rem % 60;
         document.getElementById('anb-countdown').textContent =
-            '\u23F3 ' + m + 'm ' + String(s).padStart(2, '0') + 's left';
+            m + 'm ' + String(s).padStart(2, '0') + 's left';
     }
     tick();
     _anb.tickInterval = setInterval(tick, 1000);
@@ -2871,5 +2958,143 @@ function _anbWatch() {
 
 setInterval(_anbWatch, 30000);
 </script>
+<script>
+/* ══════════════════════════════════════════════════════════════════════
+   ADJUSTMENT: LIVE APPLICATION POPUPS + COMPANY LIST SIDEBAR INDICATOR
+   ------------------------------------------------------------
+   Ported from company_list.php. Every 5 s this page asks
+   company_list.php?poll_application=1 (the same endpoint company_list.php
+   uses) where the student's application is ("admin" / "company" /
+   registered) and how many endorsement letters need attention. When
+   something changed, the same navy popup (.cv-top-toast) explains it, and
+   the RED badge on the "Company List" link is updated.
+   The last snapshot is shared between the student pages through
+   localStorage, so a change is announced once, on whichever page the
+   student happens to be on. Every failure is silent and retried next tick.
+   ══════════════════════════════════════════════════════════════════════ */
+(function () {
+    var UID      = <?= json_encode((int)$user_id) ?>;
+    var KEY      = 'cl_live_state_' + UID;
+    var TTL_MS   = 12 * 60 * 60 * 1000;   // an older snapshot is only used as a new baseline
+    var POLL_MS  = 5000;
+    var badge    = document.getElementById('endoSidebarBadge');
+    var mem      = null;                  // last snapshot seen by this page
+    var names    = {};
+    var busy     = false;
+
+    function esc(s) {
+        return String(s == null ? '' : s)
+            .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+    function nameOf(id) { return names[String(id)] || 'The company'; }
+
+    function layoutToasts() {
+        var top = 30;
+        document.querySelectorAll('.cv-top-toast').forEach(function (el) {
+            el.style.top = top + 'px';
+            top += el.offsetHeight + 12;
+        });
+    }
+    function showToast(name, text, icon) {
+        var div = document.createElement('div');
+        div.className = 'cv-top-toast';
+        div.setAttribute('role', 'status');
+        div.innerHTML = '<i class="fas ' + esc(icon || 'fa-circle-info') + '"></i><span>' +
+            (name ? '<strong>' + esc(name) + '</strong> ' : '') + esc(text) + '</span>';
+        document.body.appendChild(div);
+        layoutToasts();
+        requestAnimationFrame(function () { div.classList.add('show'); });
+        setTimeout(function () {
+            div.classList.remove('show');
+            setTimeout(function () { div.remove(); layoutToasts(); }, 400);
+        }, 7000);
+    }
+
+    function setBadge(n) {
+        if (!badge) return;
+        n = parseInt(n, 10) || 0;
+        badge.textContent = n > 0 ? String(n) : '';
+        badge.classList.toggle('is-on', n > 0);
+        badge.title = n > 0 ? 'You have endorsement letter(s) in your Inbox' : '';
+        badge.setAttribute('aria-label', n > 0 ? n + ' endorsement letter notification(s)' : '');
+    }
+
+    function loadSaved() {
+        try {
+            var o = JSON.parse(localStorage.getItem(KEY) || 'null');
+            if (o && o.s && o.s.pending && typeof o.t === 'number' && (Date.now() - o.t) < TTL_MS) return o;
+        } catch (e) {}
+        return null;
+    }
+    function save(state) {
+        try { localStorage.setItem(KEY, JSON.stringify({ t: Date.now(), s: state, n: names })); } catch (e) {}
+    }
+
+    // What changed between two snapshots -> list of popups (same wording as company_list.php).
+    function describe(prev, next) {
+        var out = [];
+        var prevReg = prev.registered ? String(prev.registered) : null;
+        var nextReg = next.registered ? String(next.registered) : null;
+        if (nextReg && nextReg !== prevReg) {
+            out.push({ name: nameOf(nextReg), text: 'accepted your application — you are now registered as their OJT trainee.', icon: 'fa-circle-check' });
+        }
+        if (prevReg && prevReg !== nextReg) {
+            out.push({ name: nameOf(prevReg), text: 'no longer has you registered as their OJT trainee.', icon: 'fa-circle-info' });
+        }
+        var pp = prev.pending || {}, np = next.pending || {};
+        Object.keys(pp).forEach(function (id) {
+            if (np[id] === pp[id]) return;
+            if (!np[id]) {
+                if (id === nextReg) return; // accepted — already announced above
+                if (pp[id] === 'hold') { out.push({ name: nameOf(id), text: '— your on-hold application was cancelled.', icon: 'fa-circle-xmark' }); return; }
+                out.push(pp[id] === 'admin'
+                    ? { name: nameOf(id), text: '— your application was not approved by the administrator.', icon: 'fa-circle-xmark' }
+                    : { name: nameOf(id), text: 'did not accept your application.', icon: 'fa-circle-xmark' });
+            } else if (pp[id] === 'hold' && np[id] === 'admin') {
+                out.push({ name: nameOf(id), text: '— your requirements are verified again, so your application was sent automatically and is Waiting for the Approval.', icon: 'fa-paper-plane' });
+            } else if (pp[id] === 'admin' && np[id] === 'company') {
+                out.push({ name: nameOf(id), text: '— the administrator approved your application. It is now Under Company Validation; your endorsement letter is in your Inbox (Company List).', icon: 'fa-envelope-circle-check' });
+            }
+        });
+        Object.keys(np).forEach(function (id) {
+            if (!pp[id]) out.push(np[id] === 'hold'
+                ? { name: nameOf(id), text: '— your application is On Hold until your new Application SIT is verified.', icon: 'fa-pause-circle' }
+                : np[id] === 'company'
+                ? { name: nameOf(id), text: '— the administrator applied you to this company. It is now Under Company Validation; your endorsement letter is in your Inbox (Company List).', icon: 'fa-envelope-circle-check' }
+                : { name: nameOf(id), text: '— your application was sent and is Waiting for the Approval.', icon: 'fa-paper-plane' });
+        });
+        return out;
+    }
+
+    function poll() {
+        if (busy || document.hidden) return;
+        busy = true;
+        fetch('company_list.php?poll_application=1', { credentials: 'same-origin', cache: 'no-store' })
+            .then(function (r) { return r.ok ? r.json() : null; })
+            .then(function (next) {
+                if (!next || typeof next !== 'object' || !next.pending) return;
+                var saved = loadSaved();
+                if (saved && saved.n) Object.assign(names, saved.n);
+                Object.assign(names, next.names || {});
+                var prev = saved ? saved.s : mem;   // the newest snapshot any page has seen
+                mem = next;
+                save(next);
+                if (next.endo) setBadge(next.endo.attention);
+                if (!prev) return;                 // first look: just a baseline
+                describe(prev, next).forEach(function (ev) { showToast(ev.name, ev.text, ev.icon); });
+            })
+            .catch(function () { /* silent — retried on the next tick */ })
+            .finally(function () { busy = false; });
+    }
+
+    setTimeout(function () {
+        poll();
+        setInterval(poll, POLL_MS);
+    }, 1500);
+    document.addEventListener('visibilitychange', function () { if (!document.hidden) poll(); });
+})();
+</script>
+
 </body>
 </html>

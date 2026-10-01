@@ -1654,10 +1654,10 @@ $companies = $conn->query("
         }
 
         /* ── ADJUSTMENT: Endorsement-letter sidebar badge (Company List link) ──
-           Same shape/position as the other sidebar badges; gold so it reads on the navy sidebar and
+           Same shape/position as the other sidebar badges; RED so it stands out on the navy sidebar and
            stays distinct from the amber Attendance / Reports badges. Shown/hidden by updateEndoBadge(). ── */
         .sidebar-badge-endo {
-            background: var(--neust-gold); color: #1B2A4A; border-radius: 50%;
+            background: #dc2626; color: #ffffff; border-radius: 50%;
             min-width: 18px; height: 18px; font-size: 10px; font-weight: 800;
             display: none; align-items: center; justify-content: center;
             position: absolute; right: 18px; top: 50%; transform: translateY(-50%);
@@ -1665,8 +1665,8 @@ $companies = $conn->query("
         }
         .sidebar-badge-endo.is-on { display: inline-flex; }
         @keyframes badge-pulse-endo {
-            0%, 100% { box-shadow: 0 0 0 0 rgba(255,215,0,0.55); }
-            50%       { box-shadow: 0 0 0 6px rgba(255,215,0,0); }
+            0%, 100% { box-shadow: 0 0 0 0 rgba(220,38,38,0.55); }
+            50%       { box-shadow: 0 0 0 6px rgba(220,38,38,0); }
         }
         /* collapsed sidebar: tuck the badge onto the icon's corner so it never overlaps it */
         .sidebar.collapsed .sidebar-badge-endo { right: 14px; top: 10px; transform: none; }
@@ -5340,6 +5340,14 @@ function clShowTopToast(name, messageText, iconClass, isError) {
     var clNames = Object.assign({}, clState.names || {});
     var clBusy  = false;
 
+    /* ADJUSTMENT: share the last snapshot with student_profile.php / AccomForm.php (same key, localStorage) so a
+       change is announced once, on whichever student page is open. Failure to store is harmless. */
+    var CL_SNAP_KEY = 'cl_live_state_' + <?= json_encode((int)$user_id) ?>;
+    function clSaveSnapshot() {
+        try { localStorage.setItem(CL_SNAP_KEY, JSON.stringify({ t: Date.now(), s: clState, n: clNames })); } catch (e) {}
+    }
+    clSaveSnapshot();
+
     function nameOf(id) { return clNames[String(id)] || 'The company'; }
 
     // What changed between two snapshots → list of popups.
@@ -5423,6 +5431,7 @@ function clShowTopToast(name, messageText, iconClass, isError) {
                 var regChanged = String(clState.registered || '') !== String(next.registered || '');
                 var endoChanged = !!(next.endo && (!clState.endo || clState.endo.sig !== next.endo.sig));
                 clState = next;
+                clSaveSnapshot();
                 if (!events.length) {
                     // No popup, but the letters changed (e.g. verified / rejected) → refresh badges now, not in up to 20 s.
                     if (endoChanged) return endoFetchInbox().then(function (res) { endoApplyInbox(res, false); });
