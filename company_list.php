@@ -2998,6 +2998,19 @@ $companies = $conn->query("
         .cv-card-preview .cv-thumb-img, .cv-card-preview .cv-no-file.is-file { cursor: zoom-in; }
         button.cv-no-file { background: transparent; font-family: inherit; cursor: zoom-in; }
         button.cv-no-file:hover { background: #d7dfec; }
+        /* ADJUSTMENT: an uploaded PDF is shown the way AccomForm.php shows an uploaded PDF requirement — the same 90 x 90
+           red-tinted tile with the red PDF icon and a "PDF" label (.rce-pdf-thumb). The file name stays in the line under the
+           card; the tile and the eye button still open the in-page viewer. */
+        .cv-pdf-tile {
+            width: 90px; height: 90px; box-sizing: border-box; padding: 0; margin: 0;
+            background: var(--grid-red-bg); border: 1px solid #e3bcbc; border-radius: 0;
+            display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
+            font-family: inherit; cursor: zoom-in;
+        }
+        .cv-pdf-tile:hover { background: #f1dada; }
+        .cv-pdf-tile:focus-visible { outline: 2px solid var(--grid-red); outline-offset: 2px; }
+        .cv-pdf-tile i { font-size: 26px; color: var(--grid-red); }
+        .cv-pdf-tile span { font-size: 10px; color: var(--grid-red); font-weight: 700; letter-spacing: 0.4px; }
 
         /* ADJUSTMENT: in-page full-screen viewer body */
         #endoFileModal { z-index: 10000; }
@@ -4984,7 +4997,7 @@ function renderEndoInbox() {
             ? '<div class="cv-no-file"><i class="fas fa-hourglass-half"></i><span>No file yet</span></div>'
             : (isImage
                 ? '<img src="' + fileUrl + '" class="cv-thumb-img" alt="" title="View the uploaded letter" onclick="' + openFile + '">'
-                : '<button type="button" class="cv-no-file is-file" title="View the uploaded letter" onclick="' + openFile + '"><i class="fas fa-file-pdf"></i><span>' + endoEsc(l.uploaded_name || 'Uploaded letter') + '</span></button>')
+                : '<button type="button" class="cv-pdf-tile" title="View the uploaded letter" aria-label="View the uploaded ' + (/pdf/i.test(l.uploaded_mime || '') ? 'PDF' : 'file') + '" onclick="' + openFile + '"><i class="fas fa-file-pdf"></i><span>' + (/pdf/i.test(l.uploaded_mime || '') ? 'PDF' : 'FILE') + '</span></button>')   /* ADJUSTMENT: AccomForm.php-style PDF tile */
               + '<button type="button" class="cv-view-btn" title="View the uploaded letter" aria-label="View the uploaded letter" onclick="' + openFile + '"><i class="fas fa-eye"></i></button>';
         var state = !l.has_upload ? 'awaiting' : (l.status === 'Verified' ? 'verified' : 'pending');
         return '<div class="req-item cv-req-card' + (l.viewed ? '' : ' unread') + '" id="endoCard' + l.id + '" data-state="' + state + '" data-rejected="' + (l.status === 'Rejected' ? '1' : '0') + '">' +
