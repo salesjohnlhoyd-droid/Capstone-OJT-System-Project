@@ -4998,7 +4998,10 @@ function renderEndoInbox() {
             : (isImage
                 ? '<img src="' + fileUrl + '" class="cv-thumb-img" alt="" title="View the uploaded letter" onclick="' + openFile + '">'
                 : '<button type="button" class="cv-pdf-tile" title="View the uploaded letter" aria-label="View the uploaded ' + (/pdf/i.test(l.uploaded_mime || '') ? 'PDF' : 'file') + '" onclick="' + openFile + '"><i class="fas fa-file-pdf"></i><span>' + (/pdf/i.test(l.uploaded_mime || '') ? 'PDF' : 'FILE') + '</span></button>')   /* ADJUSTMENT: AccomForm.php-style PDF tile */
-              + '<button type="button" class="cv-view-btn" title="View the uploaded letter" aria-label="View the uploaded letter" onclick="' + openFile + '"><i class="fas fa-eye"></i></button>';
+              + '';
+        /* ADJUSTMENT: the eye icon on the card opens the LETTER itself (always available, like "Open Letter" used to be);
+           the card's button below previews the student's UPLOADED copy. The thumbnail / PDF tile still opens the upload. */
+        preview += '<button type="button" class="cv-view-btn" title="Open the endorsement letter" aria-label="Open the endorsement letter" onclick="openEndoLetter(' + l.id + ')"><i class="fas fa-eye"></i></button>';
         var state = !l.has_upload ? 'awaiting' : (l.status === 'Verified' ? 'verified' : 'pending');
         return '<div class="req-item cv-req-card' + (l.viewed ? '' : ' unread') + '" id="endoCard' + l.id + '" data-state="' + state + '" data-rejected="' + (l.status === 'Rejected' ? '1' : '0') + '">' +
             '<div class="cv-card-preview">' +
@@ -5015,7 +5018,7 @@ function renderEndoInbox() {
                 (l.has_upload ? '<div class="endo-upload-line"><i class="fas fa-paperclip"></i> ' + endoEsc(l.uploaded_name || 'Uploaded file') +
                     (l.uploaded_at ? ' &middot; ' + endoEsc(l.uploaded_at) : '') + '</div>' : '') + // ADJUSTMENT: "View" link → eye button on the preview
                 '<div class="endo-card-actions">' +
-                    '<button type="button" class="endo-act primary" onclick="openEndoLetter(' + l.id + ')"><i class="fas fa-expand"></i> Open Letter</button>' +
+                    '<button type="button" class="endo-act primary" onclick="' + openFile + '"' + (l.has_upload ? ' title="Preview the uploaded letter"' : ' disabled title="No file uploaded yet"') + '><i class="fas fa-expand"></i> Preview Uploaded Letter</button>' +
                     (canUpload ? '<button type="button" class="endo-act upload" id="endoUpBtn' + l.id + '" onclick="endoPickUpload(' + l.id + ')"><i class="fas fa-upload"></i> ' + uploadLabel + '</button>' : '') +
                 '</div>' +
                 (canUpload ? '<div class="endo-upload-hint">Accepted: JPG, PNG, WEBP or PDF &middot; max 8 MB</div>' : '') +
