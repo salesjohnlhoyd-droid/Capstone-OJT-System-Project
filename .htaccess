@@ -1,7 +1,7 @@
 # Larger uploads for the OJT system (Documentary Requirements / 2x2 photo).
 # Only applied when PHP runs as an Apache module; each block is skipped otherwise,
 # so this file can never cause a server error. .user.ini covers PHP-FPM / CGI.
-# upload_limits.php reads the values that are really in effect, so the pages
+# submit_requirements.php reads the values that are really in effect, so the pages
 # always show the true limit.
 <IfModule mod_php.c>
     php_value upload_max_filesize 15M
