@@ -52,6 +52,70 @@ function cv_vt_ensure($conn) {
     } catch (\Throwable $e) { error_log('verify_toast_gate ensure: ' . $e->getMessage()); return false; }
     return $done;
 }
+function cv_vt_table_exists($conn, $table) {
+    $r = $conn->query("SHOW TABLES LIKE '" . $conn->real_escape_string($table) . "'");
+    return ($r && $r->num_rows > 0);
+}
+function cv_vt_shared_cols($conn, $from, $to) {   // the columns both tables have (so a later schema change cannot break the move)
+    $cols = [];
+    foreach ([$from, $to] as $i => $t) {
+        $c = [];
+        $r = $conn->query("SHOW COLUMNS FROM `" . $t . "`");
+        if ($r) while ($x = $r->fetch_assoc()) $c[] = $x['Field'];
+        $cols[$i] = $c;
+    }
+    $shared = array_values(array_intersect($cols[0], $cols[1]));
+    return (in_array('student_id', $shared, true) && in_array('company_id', $shared, true)) ? '`' . implode('`,`', $shared) . '`' : '';
+}
+// moves a student's row(s) between the hold table and its stash; the source row is only deleted once the copy is confirmed
+function cv_vt_move_rows($conn, $from, $to, $student_id) {
+    $sid = (int)$student_id;
+    if ($sid <= 0 || !cv_vt_table_exists($conn, $from) || !cv_vt_table_exists($conn, $to)) return false;
+    $r = $conn->query("SELECT 1 FROM `" . $from . "` WHERE student_id = " . $sid . " LIMIT 1");
+    if (!$r || $r->num_rows === 0) return true;   // nothing to move
+    $cols = cv_vt_shared_cols($conn, $from, $to);
+    if ($cols === '') return false;
+    $conn->query("INSERT IGNORE INTO `" . $to . "` (" . $cols . ") SELECT " . $cols . " FROM `" . $from . "` WHERE student_id = " . $sid);
+    $chk = $conn->query("SELECT 1 FROM `" . $to . "` WHERE student_id = " . $sid . " LIMIT 1");
+    if (!$chk || $chk->num_rows === 0) return false;
+    $conn->query("DELETE FROM `" . $from . "` WHERE student_id = " . $sid);
+    return true;
+}
+function cv_vt_live_count($conn, $student_id, $exclude = '') {   // live toasts of this student (fails open: 0)
+    try {
+        if (!cv_vt_ensure($conn)) return 0;
+        $since = time() - (int)CV_VT_WINDOW_SECONDS; $sid = (int)$student_id; $ex = (string)$exclude;
+        $st = $conn->prepare("SELECT COUNT(*) FROM verify_toast_gate WHERE student_id = ? AND created_ts >= ? AND undo_token <> ?");
+        $st->bind_param('iis', $sid, $since, $ex);
+        $st->execute(); $n = (int)($st->get_result()->fetch_row()[0] ?? 0); $st->close();
+        return $n;
+    } catch (\Throwable $e) { return 0; }
+}
+// puts the student's held application back once NO toast of theirs is live any more (ended / undone / expired)
+function cv_vt_restore_if_idle($conn, $student_id, $exclude = '') {
+    try {
+        if (!cv_vt_table_exists($conn, 'verify_toast_hold_stash')) return;
+        if (cv_vt_live_count($conn, $student_id, $exclude) > 0) return;
+        cv_vt_move_rows($conn, 'verify_toast_hold_stash', 'placement_hold_applications', $student_id);
+    } catch (\Throwable $e) { error_log('verify_toast_gate restore: ' . $e->getMessage()); }
+}
+function cv_vt_stash_hold($conn, $student_id) {   // takes the student's held application out of sight while the toast is active
+    try {
+        if (!cv_vt_table_exists($conn, 'placement_hold_applications')) return;
+        $r = $conn->query("SELECT 1 FROM placement_hold_applications WHERE student_id = " . (int)$student_id . " LIMIT 1");
+        if (!$r || $r->num_rows === 0) return;   // not on hold: nothing to do
+        $conn->query("CREATE TABLE IF NOT EXISTS verify_toast_hold_stash LIKE placement_hold_applications");
+        cv_vt_move_rows($conn, 'placement_hold_applications', 'verify_toast_hold_stash', $student_id);
+    } catch (\Throwable $e) { error_log('verify_toast_gate stash: ' . $e->getMessage()); }
+}
+function cv_vt_restore_expired($conn) {   // toasts that were never ended (tab closed): after the undo window the hold is back
+    try {
+        if (!cv_vt_table_exists($conn, 'verify_toast_hold_stash')) return;
+        $r = $conn->query("SELECT DISTINCT student_id FROM verify_toast_hold_stash");
+        $ids = []; if ($r) while ($x = $r->fetch_assoc()) $ids[] = (int)$x['student_id'];
+        foreach ($ids as $sid) cv_vt_restore_if_idle($conn, $sid);
+    } catch (\Throwable $e) { error_log('verify_toast_gate restore_expired: ' . $e->getMessage()); }
+}
 function cv_vt_mark($conn, $student_id, $token) {
     try {
         $student_id = (int)$student_id; $token = (string)$token;
@@ -68,13 +132,19 @@ function cv_vt_mark($conn, $student_id, $token) {
 function cv_vt_reserve($conn, $student_id) {   // returns the temporary token (or '' when it could not be recorded)
     try {
         $tmp = 'tmp_' . bin2hex(random_bytes(8));
-        return cv_vt_mark($conn, $student_id, $tmp) ? $tmp : '';
+        if (!cv_vt_mark($conn, $student_id, $tmp)) return '';
+        cv_vt_stash_hold($conn, $student_id);   // a held application cannot be released by anything while the toast is active
+        return $tmp;
     } catch (\Throwable $e) { return ''; }
 }
 function cv_vt_clear($conn, $token) {
     try {
         $token = (string)$token;
         if ($token === '' || !cv_vt_ensure($conn)) return;
+        $sq = $conn->prepare("SELECT student_id FROM verify_toast_gate WHERE undo_token = ?");
+        $sq->bind_param('s', $token); $sq->execute();
+        $sr = $sq->get_result()->fetch_assoc(); $sq->close();
+        if ($sr) cv_vt_restore_if_idle($conn, (int)$sr['student_id'], $token);   // toast over / undone: the held application is back (and, if still Verified, is released by the student's page)
         $st = $conn->prepare("DELETE FROM verify_toast_gate WHERE undo_token = ?");
         $st->bind_param('s', $token);
         $st->execute(); $st->close();
@@ -1365,6 +1435,7 @@ if (isset($_POST['ajax_confirm_send'])) {
 /* ================= AJAX: FLUSH EXPIRED PENDING EMAILS ================= */
 if (isset($_POST['ajax_flush_emails'])) {
     header('Content-Type: application/json');
+    cv_vt_restore_expired($conn);   // ADJUSTMENT: held applications whose Verified toast was never ended (tab closed) come back after the undo window
     /* FIX (this adjustment): the email is taken out of the session and the session lock is released BEFORE the
        mail server is contacted. PHP lets only one request per session run at a time, so while an email was being
        sent (seconds — or until the mail server timed out) every other request from this admin waited, e.g. the

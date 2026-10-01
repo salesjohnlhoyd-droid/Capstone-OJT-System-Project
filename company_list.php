@@ -14,15 +14,94 @@ require_once __DIR__ . "/placement_hold.php"; // ADJUSTMENT: preferred-placement
    points below call cv_vt_release_if_ready(), which waits until
    the student has no live entry and then runs the original
    ph_release_if_ready(). Entries expire by themselves after the
-   5-minute undo window. Any error here falls back to the old
-   behaviour (the release simply runs).
+   5-minute undo window. While the toast is active administrator.php
+   also moves the held row out of placement_hold_applications into
+   verify_toast_hold_stash, so NOTHING can release it; it is put back
+   when the toast ends / is undone / expires, and this page keeps
+   showing it as "On hold" meanwhile. Any error here falls back to
+   the old behaviour (the release simply runs).
    ============================================================ */
 if (!defined('CV_VT_WINDOW_SECONDS')) define('CV_VT_WINDOW_SECONDS', 305);
+function cv_vt_gate_ensure($conn) {
+    static $done = false;
+    if ($done) return true;
+    try {
+        $conn->query("CREATE TABLE IF NOT EXISTS verify_toast_gate ( undo_token VARCHAR(64) NOT NULL PRIMARY KEY, student_id INT NOT NULL, created_ts BIGINT NOT NULL, KEY idx_vtg_student (student_id) )");
+        $done = true;
+    } catch (\Throwable $e) { error_log('verify_toast_gate ensure: ' . $e->getMessage()); }
+    return $done;
+}
+function cv_vt_table_exists($conn, $table) {
+    $r = $conn->query("SHOW TABLES LIKE '" . $conn->real_escape_string($table) . "'");
+    return ($r && $r->num_rows > 0);
+}
+function cv_vt_shared_cols($conn, $from, $to) {   // the columns both tables have (so a later schema change cannot break the move)
+    $cols = [];
+    foreach ([$from, $to] as $i => $t) {
+        $c = [];
+        $r = $conn->query("SHOW COLUMNS FROM `" . $t . "`");
+        if ($r) while ($x = $r->fetch_assoc()) $c[] = $x['Field'];
+        $cols[$i] = $c;
+    }
+    $shared = array_values(array_intersect($cols[0], $cols[1]));
+    return (in_array('student_id', $shared, true) && in_array('company_id', $shared, true)) ? '`' . implode('`,`', $shared) . '`' : '';
+}
+// moves a student's row(s) between the hold table and its stash; the source row is only deleted once the copy is confirmed
+function cv_vt_move_rows($conn, $from, $to, $student_id) {
+    $sid = (int)$student_id;
+    if ($sid <= 0 || !cv_vt_table_exists($conn, $from) || !cv_vt_table_exists($conn, $to)) return false;
+    $r = $conn->query("SELECT 1 FROM `" . $from . "` WHERE student_id = " . $sid . " LIMIT 1");
+    if (!$r || $r->num_rows === 0) return true;   // nothing to move
+    $cols = cv_vt_shared_cols($conn, $from, $to);
+    if ($cols === '') return false;
+    $conn->query("INSERT IGNORE INTO `" . $to . "` (" . $cols . ") SELECT " . $cols . " FROM `" . $from . "` WHERE student_id = " . $sid);
+    $chk = $conn->query("SELECT 1 FROM `" . $to . "` WHERE student_id = " . $sid . " LIMIT 1");
+    if (!$chk || $chk->num_rows === 0) return false;
+    $conn->query("DELETE FROM `" . $from . "` WHERE student_id = " . $sid);
+    return true;
+}
+function cv_vt_live_count($conn, $student_id, $exclude = '') {   // live toasts of this student (fails open: 0)
+    try {
+        if (!cv_vt_gate_ensure($conn)) return 0;
+        $since = time() - (int)CV_VT_WINDOW_SECONDS; $sid = (int)$student_id; $ex = (string)$exclude;
+        $st = $conn->prepare("SELECT COUNT(*) FROM verify_toast_gate WHERE student_id = ? AND created_ts >= ? AND undo_token <> ?");
+        $st->bind_param('iis', $sid, $since, $ex);
+        $st->execute(); $n = (int)($st->get_result()->fetch_row()[0] ?? 0); $st->close();
+        return $n;
+    } catch (\Throwable $e) { return 0; }
+}
+// puts the student's held application back once NO toast of theirs is live any more (ended / undone / expired)
+function cv_vt_restore_if_idle($conn, $student_id, $exclude = '') {
+    try {
+        if (!cv_vt_table_exists($conn, 'verify_toast_hold_stash')) return;
+        if (cv_vt_live_count($conn, $student_id, $exclude) > 0) return;
+        cv_vt_move_rows($conn, 'verify_toast_hold_stash', 'placement_hold_applications', $student_id);
+    } catch (\Throwable $e) { error_log('verify_toast_gate restore: ' . $e->getMessage()); }
+}
+// the companies of this student's application that is out of sight while the admin's Verified toast is active
+function cv_vt_stashed_company_ids($conn, $student_id) {
+    $ids = [];
+    try {
+        if (!cv_vt_table_exists($conn, 'verify_toast_hold_stash')) return $ids;
+        $sid = (int)$student_id;
+        $r = $conn->query("SELECT company_id FROM verify_toast_hold_stash WHERE student_id = " . $sid);
+        if ($r) while ($x = $r->fetch_assoc()) $ids[] = (int)$x['company_id'];
+    } catch (\Throwable $e) {}
+    return $ids;
+}
+function cv_vt_stash_delete($conn, $student_id, $company_id) {   // cancelling an application while it waits behind the toast
+    try {
+        if (!cv_vt_table_exists($conn, 'verify_toast_hold_stash')) return 0;
+        $st = $conn->prepare("DELETE FROM verify_toast_hold_stash WHERE student_id = ? AND company_id = ?");
+        $sid = (int)$student_id; $cid = (int)$company_id;
+        $st->bind_param('ii', $sid, $cid); $st->execute(); $n = $st->affected_rows; $st->close();
+        return max(0, (int)$n);
+    } catch (\Throwable $e) { return 0; }
+}
 function cv_vt_pending($conn, $student_id) {
     try {
         $student_id = (int)$student_id;
-        if ($student_id <= 0) return false;
-        $conn->query("CREATE TABLE IF NOT EXISTS verify_toast_gate ( undo_token VARCHAR(64) NOT NULL PRIMARY KEY, student_id INT NOT NULL, created_ts BIGINT NOT NULL, KEY idx_vtg_student (student_id) )");
+        if ($student_id <= 0 || !cv_vt_gate_ensure($conn)) return false;
         $since = time() - (int)CV_VT_WINDOW_SECONDS;
         $st = $conn->prepare("SELECT 1 FROM verify_toast_gate WHERE student_id = ? AND created_ts >= ? LIMIT 1");
         $st->bind_param('ii', $student_id, $since);
@@ -33,6 +112,7 @@ function cv_vt_pending($conn, $student_id) {
     } catch (\Throwable $e) { error_log('verify_toast_gate check: ' . $e->getMessage()); return false; }
 }
 function cv_vt_release_if_ready($conn, $student_id) {
+    cv_vt_restore_if_idle($conn, $student_id);   // the toast is over (ended / undone / expired): the held application is back
     if (cv_vt_pending($conn, $student_id)) return;
     ph_release_if_ready($conn, (int)$student_id);
 }
@@ -126,6 +206,7 @@ function clAppLiveState($conn, $user_id) {
         while ($row = $r->fetch_assoc()) $pending[(string)(int)$row['company_id']] = 'hold';
         $q->close();
     } catch (\Throwable $e) {}
+    foreach (cv_vt_stashed_company_ids($conn, (int)$user_id) as $_vt_cid) $pending[(string)$_vt_cid] = 'hold';   // ADJUSTMENT: still on hold while the admin's Verified toast is active
     try {
         $q = $conn->prepare("SELECT company_id FROM admin_application_approvals WHERE student_id = ?");
         $q->bind_param("i", $user_id);
@@ -946,7 +1027,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['replace_placement']))
         $rp_busy = false;
         foreach (["SELECT 1 FROM admin_application_approvals WHERE student_id = ?",
                   "SELECT 1 FROM ojt_applications WHERE student_id = ? AND phase = 'pending'",
-                  "SELECT 1 FROM placement_hold_applications WHERE student_id = ?"] as $rp_sql) {
+                  "SELECT 1 FROM placement_hold_applications WHERE student_id = ?",
+                  "SELECT 1 FROM verify_toast_hold_stash WHERE student_id = ?"] as $rp_sql) {
             try {
                 $rp_q = $conn->prepare($rp_sql);
                 $rp_q->bind_param("i", $user_id);
@@ -1037,6 +1119,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['cancel_request'])) {
     if (ph_delete_hold($conn, (int)$user_id, $cancel_company_id) > 0) {
         $cancelled = true;
     }
+    if (cv_vt_stash_delete($conn, (int)$user_id, $cancel_company_id) > 0) {   // ADJUSTMENT: ...also while it waits behind the admin's Verified toast
+        $cancelled = true;
+    }
 
     if ($cancelled) {
         $cleanupStmt = $conn->prepare("DELETE FROM application_requirements WHERE student_id = ? AND company_id = ?");
@@ -1099,6 +1184,9 @@ try { cv_vt_release_if_ready($conn, (int)$user_id); } catch (\Throwable $e) {}
 $_ph_hold = ph_get_hold($conn, (int)$user_id);
 if ($_ph_hold) {
     $pending_applications[$_ph_hold['company_id']] = ['stage' => 'placement_hold'];
+}
+foreach (cv_vt_stashed_company_ids($conn, (int)$user_id) as $_vt_cid) {   // ADJUSTMENT: still on hold while the admin's Verified toast is active
+    $pending_applications[$_vt_cid] = ['stage' => 'placement_hold'];
 }
 
 $pendingAppStmt = $conn->prepare("SELECT company_id FROM admin_application_approvals WHERE student_id = ?");
