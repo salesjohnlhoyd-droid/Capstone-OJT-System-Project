@@ -350,6 +350,7 @@ cv_ensure_admin_application_approvals_table($conn);   // CLEAN-UP (audit): share
 $conn->query("ALTER TABLE admin_application_approvals MODIFY COLUMN skill1 TEXT");
 $conn->query("ALTER TABLE admin_application_approvals MODIFY COLUMN skill2 TEXT");
 $conn->query("ALTER TABLE admin_application_approvals MODIFY COLUMN skill3 TEXT");
+cv_ph_detect($conn);   // NEW (this adjustment): the indicator below already includes students who replaced their preferred placement
 $app_request_count_res = $conn->query("SELECT (SELECT COUNT(*) FROM admin_application_approvals aaa_c INNER JOIN users aaa_u ON aaa_u.id = aaa_c.student_id) + (SELECT COUNT(*) FROM student_requirement_upload_notifications srun INNER JOIN users srun_u ON srun_u.id = srun.user_id WHERE srun.admin_viewed = 0 AND COALESCE(srun_u.is_archived, 0) = 0) as total");
 $app_request_count = (int)(($app_request_count_res ? $app_request_count_res->fetch_assoc()['total'] : 0));
 // Ungraded faculty_grade count for sidebar badge
@@ -493,7 +494,9 @@ function cv_sru_detect($conn, $labels) {
         // 2) what was seen before
         $seen = [];
         $r = $conn->query("SELECT user_id, requirement_type, file_len FROM student_requirement_upload_watch");
-        if ($r) while ($x = $r->fetch_assoc()) $seen[(int)$x['user_id'] . '|' . $x['requirement_type']] = (int)$x['file_len'];
+        // NEW (this adjustment): '__placement' rows in this table belong to cv_ph_detect() (placement-replaced
+        // notifications), not to a file size — they are never compared against what is on file.
+        if ($r) while ($x = $r->fetch_assoc()) { if ($x['requirement_type'] === '__placement') continue; $seen[(int)$x['user_id'] . '|' . $x['requirement_type']] = (int)$x['file_len']; }
 
         // 3) the first run ever only remembers
         $conn->query("INSERT IGNORE INTO student_requirement_upload_meta (id, initialized) VALUES (1, 0)");
@@ -541,7 +544,8 @@ function cv_sru_detect($conn, $labels) {
             $detail = [];
             foreach (array_keys($types) as $t) $detail[$t] = ['key' => $t, 'label' => cv_sru_label($t, $labels)];
             $mq = $conn->prepare("SELECT id, detail FROM student_requirement_upload_notifications
-                                  WHERE user_id = ? AND admin_viewed = 0 AND updated_at >= (NOW() - INTERVAL 20 SECOND) ORDER BY id DESC LIMIT 1");
+                                  WHERE user_id = ? AND admin_viewed = 0 AND updated_at >= (NOW() - INTERVAL 20 SECOND)
+                                    AND detail NOT LIKE '%\"__placement\"%' ORDER BY id DESC LIMIT 1");   // a placement-replaced notification is never merged into
             $mq->bind_param('i', $uid); $mq->execute(); $existing = $mq->get_result()->fetch_assoc(); $mq->close();
             if ($existing) {
                 $prev = json_decode($existing['detail'] ?? '', true);
@@ -564,6 +568,7 @@ function cv_sru_detect($conn, $labels) {
             $keep = []; $uid = (int)$n['user_id'];
             foreach ($items as $it) {
                 $key = (string)($it['key'] ?? ''); if ($key === '') continue;
+                if ($key === '__placement') { $keep[] = $it; continue; }   // cleared by cv_ph_detect() once the new Application SIT is reviewed
                 if ($key === '__photo') {
                     $q = $conn->prepare("SELECT photo_status AS st, COALESCE(LENGTH(student_photo), 0) AS len FROM student_information WHERE user_id = ?");
                     $q->bind_param('i', $uid);
@@ -602,6 +607,7 @@ function cv_sru_list($conn) {
                 'full_name' => trim(preg_replace('/\s+/', ' ', ($x['first_name'] ?? '') . ' ' . ($x['middle_name'] ?? '') . ' ' . ($x['last_name'] ?? ''))),
                 'email'     => (string)($x['email'] ?? ''),
                 'items'     => is_array($items) ? array_values($items) : [],
+                'kind'      => (is_array($items) && in_array('__placement', array_column($items, 'key'), true)) ? 'placement' : 'upload',   // NEW (this adjustment): placement replaced → new Application SIT needs validation
                 'sig'       => (string)$x['updated_at'],
                 'when'      => $x['updated_at'] ? date('M d, Y h:i A', strtotime($x['updated_at'])) : '',
             ];
@@ -651,6 +657,73 @@ function cv_ph_reconcile($conn) {
     } catch (\Throwable $e) { /* never affects the page */ }
     return $held;
 }
+// ============================================================================
+// NEW (this adjustment): PLACEMENT REPLACED → A NOTIFICATION, LIKE ANY OTHER
+// ----------------------------------------------------------------------------
+// "<student> replaced the preferred placement — the new Application SIT needs
+// validation" used to be a one-off toast shown only on this page while it was
+// open, so it left nothing behind: no side-menu indicator and no popup on the
+// other admin pages. cv_ph_detect() turns it into a real notification in the
+// SAME table / pipeline as the student requirement submissions
+// (student_requirement_upload_notifications, one item with key '__placement'),
+// so it is counted in the Student Requirements side-menu indicator on every
+// admin page, listed in this page's Inbox, and announced by the popup that
+// every admin page already polls (?student_upload_list=1) — all without any
+// change to how those work.
+//   • A student is "pending" while on hold in placement_hold_applications, active,
+//     and the new Application SIT has not yet been reviewed (Verified / Denied).
+//   • Each hold is announced ONCE: the claim is an INSERT IGNORE into
+//     student_requirement_upload_watch (requirement_type '__placement'), so
+//     several admins / tabs polling together never create duplicates, and
+//     reloading or re-opening a page never re-announces it.
+//   • When a student stops being pending (new SIT reviewed, hold lifted, student
+//     archived/deleted) the claim is released and an un-viewed notification is
+//     removed, so a LATER replacement is announced again.
+// Any error (e.g. the hold table does not exist yet) is swallowed.
+// ============================================================================
+function cv_ph_detect($conn) {
+    try {
+        if (!cv_sru_ensure($conn)) return;
+        $t = $conn->query("SHOW TABLES LIKE 'placement_hold_applications'");
+        if (!$t || $t->num_rows === 0) return;
+
+        $pending = [];
+        $r = $conn->query("SELECT DISTINCT h.student_id FROM placement_hold_applications h
+                           INNER JOIN users u ON u.id = h.student_id
+                           WHERE u.role = 'student' AND COALESCE(u.is_archived, 0) = 0
+                             AND NOT EXISTS (SELECT 1 FROM requirements r WHERE r.user_id = u.id AND r.requirement_type = 'application_sit'
+                                             AND r.file_name IS NOT NULL AND r.file_name <> '' AND r.status IN ('Verified', 'Denied'))");
+        if (!$r) return;   // query problem: change nothing rather than wrongly releasing claims
+        while ($x = $r->fetch_assoc()) $pending[(int)$x['student_id']] = true;
+
+        $claimed = [];
+        $r = $conn->query("SELECT user_id FROM student_requirement_upload_watch WHERE requirement_type = '__placement'");
+        if (!$r) return;
+        while ($x = $r->fetch_assoc()) $claimed[(int)$x['user_id']] = true;
+
+        // announce each newly pending student once
+        $ins = $conn->prepare("INSERT IGNORE INTO student_requirement_upload_watch (user_id, requirement_type, file_len) VALUES (?, '__placement', 1)");
+        $add = $conn->prepare("INSERT INTO student_requirement_upload_notifications (user_id, detail, admin_viewed) VALUES (?, ?, 0)");
+        $json = json_encode([['key' => '__placement', 'label' => 'Preferred placement replaced — new Application SIT needs validation']]);
+        foreach (array_keys($pending) as $uid) {
+            if (isset($claimed[$uid])) continue;
+            $ins->bind_param('i', $uid); $ins->execute();
+            if ($ins->affected_rows !== 1) continue;   // another admin / tab claimed it first
+            $add->bind_param('is', $uid, $json); $add->execute();
+        }
+        $ins->close(); $add->close();
+
+        // release students that are no longer pending
+        $rel = $conn->prepare("DELETE FROM student_requirement_upload_watch WHERE user_id = ? AND requirement_type = '__placement'");
+        $del = $conn->prepare("DELETE FROM student_requirement_upload_notifications WHERE user_id = ? AND admin_viewed = 0 AND detail LIKE '%\"__placement\"%'");
+        foreach (array_keys($claimed) as $uid) {
+            if (isset($pending[$uid])) continue;
+            $rel->bind_param('i', $uid); $rel->execute();
+            $del->bind_param('i', $uid); $del->execute();
+        }
+        $rel->close(); $del->close();
+    } catch (\Throwable $e) { /* never affects the page */ }
+}
 // UPDATED (this adjustment): detection no longer runs on every request (it used to run here, on page load and
 // on every save) — only in the submissions check below and when the Inbox is opened.
 
@@ -659,6 +732,7 @@ if (isset($_GET['student_upload_list']) && $_GET['student_upload_list'] == '1') 
     header('Content-Type: application/json');
     session_write_close();   // FIX (this adjustment): read-only check — never keep this admin's other requests waiting
     cv_ph_reconcile($conn);   // NEW (this adjustment): placement replaced → student needs validation again
+    cv_ph_detect($conn);      // NEW (this adjustment): …and that is announced as a notification
     cv_sru_detect($conn, $reqLabels);
     echo json_encode(['success' => true, 'rows' => cv_sru_list($conn), 'count' => cv_inbox_total($conn)]);
     exit;
@@ -2164,6 +2238,7 @@ if (isset($_POST['ajax_endorsement_preview'])) {
 
 /* ================= AJAX: FETCH PENDING APPLICATION REQUESTS ================= */
 if (isset($_POST['ajax_fetch_app_requests'])) {
+    cv_ph_detect($conn);   // NEW (this adjustment): placement replaced → notification
     cv_sru_detect($conn, $reqLabels);   // NEW (this adjustment): new student submissions
     header('Content-Type: application/json');
     $rows = [];
@@ -4622,6 +4697,7 @@ if (!$courseOfferingsLoaded) {
     #studentUploadInbox .moa-card-meta span { display:flex; align-items:center; gap:4px; }
     #studentUploadInbox .moa-notif-type-badge { display:inline-flex; align-items:center; gap:5px; font-size:10.5px; font-weight:700; padding:3px 9px; border-radius:0; margin:0; width:fit-content; flex-shrink:0; white-space:nowrap; }
     #studentUploadInbox .moa-notif-type-badge.notif-uploaded { background:#E4EAF4; color:#1B2A4A; }
+    #studentUploadInbox .moa-notif-type-badge.notif-placement { background:#FFF4CC; color:#7A5A00; }   /* NEW (this adjustment): placement replaced */
     #studentUploadInbox .moa-card-detail-row { display:flex; align-items:center; justify-content:space-between; gap:14px; }
     #studentUploadInbox .moa-card-address { font-size:12px; color:#66718D; }
     #studentUploadInbox .moa-card-address.moa-notif-upload-detail { white-space:normal; color:#1B2A4A; font-weight:600; line-height:1.4; margin-top:3px; }
@@ -6679,20 +6755,6 @@ if (!$courseOfferingsLoaded) {
             .then(function (res) { delete _svRowBusy[uid]; return res; });
     }
 
-    function showPlacementReplacedToast(studentName, uid) {
-        var div = document.createElement('div');
-        div.className = 'cv-top-toast';
-        div.setAttribute('role', 'status');
-        div.innerHTML = '<i class="fas fa-right-left"></i><span><strong>' + escHtml(studentName) + '</strong> replaced the preferred placement — the new Application SIT needs validation.</span>';
-        document.body.appendChild(div);
-        cvLayoutTopToasts();
-        requestAnimationFrame(function () { div.classList.add('show'); });
-        setTimeout(function () {
-            div.classList.remove('show');
-            setTimeout(function () { div.remove(); cvLayoutTopToasts(); }, 400);
-        }, 6000);
-    }
-
     var _svAnnouncedHold = {};
     function svSyncPlacementReplaced(data) {
         var needs = Array.isArray(data.needs_validation) ? data.needs_validation : [];
@@ -6712,9 +6774,7 @@ if (!$courseOfferingsLoaded) {
                 // not on the page (verified earlier): bring the student back — only a student on hold is a placement
                 // replacement, any other not-verified student not shown here is left to the normal page load.
                 if (!held[uid]) return;
-                svEnsureStudentRow(uid).then(function (r) {
-                    if (r && !_svAnnouncedHold[uid]) { _svAnnouncedHold[uid] = true; showPlacementReplacedToast(n.name || 'A student', uid); }
-                });
+                svEnsureStudentRow(uid).then(function (r) { if (r) _svAnnouncedHold[uid] = true; });   // UPDATED (this adjustment): announced by the notification popup (cv_ph_detect), not here
                 return;
             }
             if (!held[uid] || hasSit) return;
@@ -6723,9 +6783,7 @@ if (!$courseOfferingsLoaded) {
             var cardState = card ? card.getAttribute('data-state') : null;
             if (card && cardState && cardState !== 'awaiting' && !svIsDeniedPending(uid, 'application_sit')) {
                 _svRowFailedAt[uid] = Date.now();   // at most one refresh per 30 seconds for the same student
-                svEnsureStudentRow(uid, true).then(function (r) {
-                    if (r && !_svAnnouncedHold[uid]) { _svAnnouncedHold[uid] = true; showPlacementReplacedToast(n.name || 'A student', uid); }
-                });
+                svEnsureStudentRow(uid, true).then(function (r) { if (r) _svAnnouncedHold[uid] = true; });
             }
         });
         // forget students no longer on hold, so a later replacement is announced again
@@ -8239,16 +8297,18 @@ if (!$courseOfferingsLoaded) {
     function cvSruEsc(v) { return escHtml(v == null ? '' : String(v)); }
     function cvSruCard(r) {
         var items = (r.items || []).map(function (i) { return cvSruEsc(i.label || i.key || ''); }).join(', ');
+        var isPlace = (r.kind === 'placement');   // NEW (this adjustment)
         return '<div class="moa-card moa-notif-card" id="sruCard_' + r.id + '">' +
                  '<div class="moa-card-top"><div class="moa-card-info"><div class="moa-card-company">' + cvSruEsc(r.full_name || 'Student') + '</div></div>' +
-                   '<div class="moa-notif-type-badge notif-uploaded"><i class="fas fa-file-arrow-up"></i> Requirement Uploaded</div></div>' +
+                   (isPlace ? '<div class="moa-notif-type-badge notif-placement"><i class="fas fa-right-left"></i> Placement Replaced</div></div>'
+                            : '<div class="moa-notif-type-badge notif-uploaded"><i class="fas fa-file-arrow-up"></i> Requirement Uploaded</div></div>') +
                  '<div class="moa-card-detail-row"><div class="moa-card-info">' +
                    '<div class="moa-card-meta"><span><i class="fas fa-envelope" style="font-size:10px;"></i> ' + cvSruEsc(r.email || '—') + '</span>' +
                      '<span><i class="fas fa-clock" style="font-size:10px;"></i> ' + cvSruEsc(r.when || '—') + '</span></div>' +
-                   '<div class="moa-card-address moa-notif-upload-detail"><i class="fas fa-file-arrow-up" style="font-size:10px;"></i> ' + items + '</div>' +
+                   '<div class="moa-card-address moa-notif-upload-detail"><i class="fas ' + (isPlace ? 'fa-right-left' : 'fa-file-arrow-up') + '" style="font-size:10px;"></i> ' + items + '</div>' +
                  '</div><div class="moa-card-actions">' +
                    '<button type="button" class="moa-action-btn accept-btn" id="sruViewBtn_' + r.id + '" onclick="cvViewStudentUpload(' + r.id + ', ' + r.user_id + ')">' +
-                     '<i class="fas fa-file-arrow-up"></i> View Requirements</button>' +
+                     '<i class="fas ' + (isPlace ? 'fa-right-left' : 'fa-file-arrow-up') + '"></i> View Requirements</button>' +
                  '</div></div></div>';
     }
     function cvRenderStudentUploads(rows) {
@@ -8303,9 +8363,11 @@ if (!$courseOfferingsLoaded) {
         setTimeout(function () {
             try { row.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch (e) { row.scrollIntoView(); }
             (keys || []).forEach(function (k) {
+                var isPlacement = (k === '__placement');
+                if (isPlacement) k = 'application_sit';   // NEW (this adjustment): the card that needs the new submission (no "New upload" tag — nothing was uploaded yet)
                 var card = (k === '__photo') ? row.querySelector('.profile-card') : document.getElementById('req-item-' + uid + '-' + k);
                 if (!card) return;
-                svFlagNewUpload(card);
+                if (!isPlacement) svFlagNewUpload(card);
                 card.classList.remove('just-updated'); void card.offsetWidth; card.classList.add('just-updated');
                 setTimeout(function () { card.classList.remove('just-updated'); }, 1400);
             });
@@ -10606,7 +10668,11 @@ window.addEventListener('pageshow', function (e) {
         var div = document.createElement('div');
         div.className = 'cv-top-toast';
         div.setAttribute('role', 'status');
-        div.innerHTML = '<i class="fas fa-file-arrow-up"></i><span><strong>' + esc(r.full_name || 'A student') + '</strong> submitted ' + esc(what) + ' \u2014 check the Application Requests inbox.</span>';
+        if (r.kind === 'placement') {   // NEW (this adjustment): preferred placement replaced → the new Application SIT needs validation
+            div.innerHTML = '<i class="fas fa-right-left"></i><span><strong>' + esc(r.full_name || 'A student') + '</strong> replaced the preferred placement \u2014 the new Application SIT needs validation.</span>';
+        } else {
+            div.innerHTML = '<i class="fas fa-file-arrow-up"></i><span><strong>' + esc(r.full_name || 'A student') + '</strong> submitted ' + esc(what) + ' \u2014 check the Application Requests inbox.</span>';
+        }
         document.body.appendChild(div);
         if (window.cvTagToast) window.cvTagToast(div, 'studentupload:' + r.id + ':' + r.user_id);   // clickable
         layoutToasts();
