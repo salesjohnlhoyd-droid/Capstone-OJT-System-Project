@@ -3966,25 +3966,27 @@ if (!$courseOfferingsLoaded) {
     /* the first-paint ring: exactly where the page's own spinner is; its size and look come from the shared ring rule below,
        and it carries on from the previous page's loading page (--cv-ring-delay). CLEAN-UP (audit): two rules merged into one. */
     html.cv-booting::before { content: ''; position: fixed; left: 50%; top: 50%; margin: -47.5px 0 0 -32px; z-index: 20002;
-        animation: cvRingSpin 0.85s linear infinite; animation-delay: var(--cv-ring-delay, 0s); }
+        animation: cvRingSpin 1s steps(12, end) infinite; animation-delay: var(--cv-ring-delay, 0s); }
     html.cv-booting::after { content: 'LOADING'; position: fixed; inset: 0; z-index: 20001; display: flex; align-items: center; justify-content: center;
         padding: 80px 20.7px 0 0; box-sizing: border-box; background: rgba(238, 241, 246, 0.92); color: #1B2A4A;   /* UPDATED (this adjustment): label exactly where the page's own label is */
         font: 700 13px 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; letter-spacing: 0.6px; }
-    /* FIX (loading page out of step with the other pages): this page used its own 12-segment, 1 s "ticking" ring,
-       while every other page (company_validation.php, monitoring.php, admin_student_list.php, ...) uses the plain
-       54 px arc turning once every 0.85 s. Moving between pages therefore swapped one ring for a different one
-       (different shape, speed and rhythm), which read as the loading page stopping and starting over. The first-paint
-       cover and this page's own loading page now use exactly the same ring as the other pages, so the loading page
-       looks and turns identically from page to page. `will-change: transform` keeps the turning on the browser's
-       compositor, so it no longer freezes while this large page is busy parsing / rendering (the "pause"). */
+    /* NEW (this adjustment): ENHANCED LOADING RING — instead of one solid arc sweeping round, 12 rounded segments
+       in the site's navy that fade from dark to light around the circle and tick round (like a classic activity
+       indicator). Same 64 px footprint and position as before, so nothing else moves. Used by the first-paint
+       cover AND by this page's own loading page, so both always look identical. */
     html.cv-booting::before,
     #globalLoadingOverlay .global-loading-spinner {
-        width: 54px; height: 54px; border-radius: 50%; box-sizing: content-box;
-        border: 5px solid #A3AFC7; border-top-color: #1B2A4A;
-        background: none; -webkit-mask: none; mask: none;
-        will-change: transform;
+        width: 64px; height: 64px; border: 0; border-radius: 50%; box-sizing: border-box;
+        background: conic-gradient(from 0deg, rgba(27,42,74,0.12) 0deg, rgba(27,42,74,0.35) 120deg, rgba(27,42,74,0.7) 240deg, #1B2A4A 330deg, #1B2A4A 360deg);
+        -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 9px), #000 calc(100% - 8px)),
+                      repeating-conic-gradient(from 5deg, #000 0deg 20deg, transparent 20deg 30deg);
+        -webkit-mask-composite: source-in;
+                mask: radial-gradient(farthest-side, transparent calc(100% - 9px), #000 calc(100% - 8px)),
+                      repeating-conic-gradient(from 5deg, #000 0deg 20deg, transparent 20deg 30deg);
+                mask-composite: intersect;
+        will-change: transform;   /* FIX: the ring keeps turning on the compositor while this large page is busy loading (no pause) */
     }
-    #globalLoadingOverlay .global-loading-spinner { animation: cvRingSpin 0.85s linear infinite; }
+    #globalLoadingOverlay .global-loading-spinner { animation: cvRingSpin 1s steps(12, end) infinite; }
     @keyframes cvRingSpin { to { transform: rotate(360deg); } }
     /* NEW (this adjustment): the animated dots after "LOADING", like the page's own loading page, so nothing changes
        when the page's loading page takes over */
@@ -4065,7 +4067,7 @@ if (!$courseOfferingsLoaded) {
         if (cvSince >= 0 && cvSince < 15000) {
             cvCarriedOver = true; cvCoverPainted = true;
             cvBootStart = cvBootStart - cvSince;
-            root.style.setProperty('--cv-ring-delay', (-((cvSince / 1000) % 0.85)).toFixed(3) + 's');
+            root.style.setProperty('--cv-ring-delay', (-((cvSince / 1000) % 1)).toFixed(3) + 's');
             root.style.setProperty('--cv-dots-delay', (-((cvSince / 1000) % 1.2)).toFixed(3) + 's');
         }
     } catch (e) {}
@@ -4077,7 +4079,7 @@ if (!$courseOfferingsLoaded) {
             var now = (window.performance && performance.now) ? performance.now() : Date.now();
             var elapsed = (now - cvBootStart) / 1000;
             var spinner = ov.querySelector('.global-loading-spinner');
-            if (spinner) spinner.style.animationDelay = (-(elapsed % 0.85)).toFixed(3) + 's';   // UPDATED: the ring's 0.85 s turn (same as the other pages)
+            if (spinner) spinner.style.animationDelay = (-(elapsed % 1)).toFixed(3) + 's';   // UPDATED (this adjustment): the ring's 1 s turn
             var dots = ov.querySelectorAll('.global-loading-dots span');
             for (var i = 0; i < dots.length; i++) dots[i].style.animationDelay = (-((elapsed - i * 0.2) % 1.2 + 1.2) % 1.2).toFixed(3) + 's';
             var box = ov.querySelector('.global-loading-box');
