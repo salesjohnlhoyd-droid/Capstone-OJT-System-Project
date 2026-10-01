@@ -5305,7 +5305,7 @@ if (new URLSearchParams(window.location.search).get('inbox') === '1') {
    changes, a popup (administrator.php's .cv-top-toast style) explains
    what happened and the UI updates right away:
      • stage changes      → the company panel list is refreshed in place
-                            (open panels stay open) behind the loading page
+                            (open panels stay open) in place, without a loading page
      • registration change → the page reloads (the sidebar's locked pages
                             change too); the popup is shown again after it
    ══════════════════════════════════════════════════════════════════════ */
@@ -5390,7 +5390,9 @@ function clShowTopToast(name, messageText, iconClass, isError) {
     // Re-renders the company panel list from the server, keeping open panels open.
     function refreshCompanyList() {
         var open = Array.prototype.map.call(document.querySelectorAll('.company-row .toggle-input:checked'), function (i) { return i.id; });
-        showGlobalLoading('Updating company list');
+        /* ADJUSTMENT: no loading page here any more. This is a background refresh triggered by the live
+           poll (e.g. the endorsement letter arrived); the list is swapped in place and the popup / badges
+           appear right after, so covering the page with an overlay was an extra, unwanted loading page. */
         return fetch(window.location.pathname, { credentials: 'same-origin', cache: 'no-store' })
             .then(function (r) { return r.text(); })
             .then(function (html) {
@@ -5402,8 +5404,7 @@ function clShowTopToast(name, messageText, iconClass, isError) {
                     open.forEach(function (id) { var t = document.getElementById(id); if (t) t.checked = true; });
                 }
             })
-            .catch(function () {})
-            .finally(function () { hideGlobalLoading(); });
+            .catch(function () {});
     }
 
     // The letter row can land a moment after the stage change; retry briefly until it is listed
