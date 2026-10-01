@@ -20,6 +20,48 @@ if (
     exit;
 }
 
+// ============================================================================
+// NEW (this adjustment): NO NOTIFICATIONS LEFT BEHIND BY DELETED ACCOUNTS
+// ----------------------------------------------------------------------------
+// When a student or company account is deleted (Student List, Company List or
+// Manage Accounts), its notifications must disappear from the inboxes of
+// administrator.php / company_validation.php and from every side-menu
+// indicator. The company delete paths now remove them directly; this sweep also
+// clears any that were already left behind (or come from any other path). It
+// removes ONLY notification rows whose account no longer exists in `users`:
+//   • company_requirement_upload_notifications  (Company Requirements inbox + badge)
+//   • admin_application_approvals              (Application Requests inbox + badge)
+//   • moa_requests                             (MOA notifications — rows tied to an account)
+//   • email_recovery_requests, Pending only    (Manage Accounts indicator)
+// Archiving never deletes an account, so archived students / companies are never
+// touched. Runs at most once every 15 seconds per admin; fully guarded.
+// ============================================================================
+if (!function_exists('cv_sweep_orphan_notifications')) {
+    function cv_sweep_orphan_notifications($conn) {
+        $has = function ($t) use ($conn) {
+            try { $r = $conn->query("SHOW TABLES LIKE '" . $conn->real_escape_string($t) . "'"); return $r && $r->num_rows > 0; }
+            catch (\Throwable $e) { return false; }
+        };
+        $run = function ($sql) use ($conn) { try { $conn->query($sql); } catch (\Throwable $e) { /* never affects the page */ } };
+        if (!$has('users')) return;
+        if ($has('company_requirement_upload_notifications'))
+            $run("DELETE n FROM company_requirement_upload_notifications n LEFT JOIN users u ON u.id = n.user_id WHERE u.id IS NULL");
+        if ($has('admin_application_approvals'))
+            $run("DELETE a FROM admin_application_approvals a LEFT JOIN users s ON s.id = a.student_id LEFT JOIN users c ON c.id = a.company_id WHERE s.id IS NULL OR c.id IS NULL");
+        if ($has('moa_requests'))
+            $run("DELETE m FROM moa_requests m LEFT JOIN users u ON u.id = m.user_id WHERE m.user_id > 0 AND u.id IS NULL");
+        if ($has('email_recovery_requests'))
+            $run("DELETE r FROM email_recovery_requests r WHERE r.status = 'Pending' AND NOT EXISTS (SELECT 1 FROM users u WHERE u.email = r.old_email OR u.email = r.new_email)");
+    }
+}
+try {
+    $cvSweepNow = time();
+    if (!isset($_SESSION['cv_orphan_sweep_at']) || $cvSweepNow - (int)$_SESSION['cv_orphan_sweep_at'] >= 15) {
+        $_SESSION['cv_orphan_sweep_at'] = $cvSweepNow;
+        cv_sweep_orphan_notifications($conn);
+    }
+} catch (\Throwable $e) { /* never affects the page */ }
+
 // ── NEW (this adjustment): EMAIL RECOVERY REQUESTS side-menu indicator ─────────
 // Number of Pending rows in email_recovery_requests (the requests handled in
 // Manage Accounts > Email Recovery Requests on monitoring.php). Shown as a badge
@@ -94,7 +136,7 @@ if (!function_exists('cv_alog_capture')) {
     function cv_alog_status_word($status) {
         $s = strtolower(trim((string)$status));
         $map = ['verified' => 'Verified', 'approved' => 'Approved', 'rejected' => 'Rejected', 'pending' => 'Set to Pending', 'complied' => 'Complied'];
-        return $map[$s] ?? ($s !== '' ? ucwords($s) : 'Updated');
+        return $map[$s] ?? ($s !== '' ? ucwords($s ?? '') : 'Updated');
     }
     function cv_alog_performer($conn) {
         $n = trim((string)($GLOBALS['adminFullName'] ?? ''));
@@ -186,7 +228,7 @@ cv_alog_capture($conn, [
         $rid = (int)($_POST['report_id'] ?? 0);
         $n = cv_alog_user_name($conn, (int)cv_alog_scalar($conn, "SELECT user_id FROM reports WHERE id = ?", 'i', [$rid]));
         $wk = (string)cv_alog_scalar($conn, "SELECT week_start FROM reports WHERE id = ?", 'i', [$rid]);
-        return ['Report Comment Saved', 'Student', $n, "Saved a comment on $n's weekly report" . ($wk !== '' ? " (week of " . date('M d, Y', strtotime($wk)) . ")" : '') . " via Reports"];
+        return ['Report Comment Saved', 'Student', $n, "Saved a comment on $n's weekly report" . ($wk !== '' ? " (week of " . date('M d, Y', strtotime($wk ?? '')) . ")" : '') . " via Reports"];
     }],
 ]);
 // ── NEW (this adjustment): full name of the logged-in admin for the sidebar header (with the
@@ -227,8 +269,46 @@ $conn->query("CREATE TABLE IF NOT EXISTS admin_application_approvals (
     submitted_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     UNIQUE KEY unique_application (student_id, company_id)
 )");
-$app_request_count_res = $conn->query("SELECT COUNT(*) as total FROM admin_application_approvals");
+$app_request_count_res = $conn->query("SELECT COUNT(*) as total FROM admin_application_approvals aaa_c INNER JOIN users aaa_u ON aaa_u.id = aaa_c.student_id");
 $app_request_count = (int)(($app_request_count_res ? $app_request_count_res->fetch_assoc()['total'] : 0));
+
+// ============================================================================
+// NEW (this adjustment): STUDENT REQUIREMENT SUBMISSIONS — side-menu indicator.
+// A student's new / re-uploaded requirement is recorded as a notification by
+// administrator.php (cv_sru_detect()) and counts toward the Student Validation
+// indicator next to the application requests — the same count administrator.php
+// shows. Same helpers as administrator.php (created once per session, so every
+// admin page can count them). Fully guarded: if anything fails the count simply
+// stays the application requests only.
+// ============================================================================
+if (!function_exists('cv_sru_ensure')) {
+    function cv_sru_ensure($conn) {
+        if (!empty($_SESSION['cv_sru_ready'])) return true;
+        try {
+            $conn->query("CREATE TABLE IF NOT EXISTS student_requirement_upload_notifications (
+                id INT AUTO_INCREMENT PRIMARY KEY, user_id INT NOT NULL, detail TEXT NULL,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                admin_viewed TINYINT(1) NOT NULL DEFAULT 0, KEY idx_sru_viewed (admin_viewed), KEY idx_sru_user (user_id))");
+            $conn->query("CREATE TABLE IF NOT EXISTS student_requirement_upload_watch (
+                user_id INT NOT NULL, requirement_type VARCHAR(100) NOT NULL, file_len BIGINT NOT NULL DEFAULT 0,
+                PRIMARY KEY (user_id, requirement_type))");
+            $conn->query("CREATE TABLE IF NOT EXISTS student_requirement_upload_meta (id TINYINT NOT NULL PRIMARY KEY, initialized TINYINT(1) NOT NULL DEFAULT 0)");
+            $_SESSION['cv_sru_ready'] = 1;
+            return true;
+        } catch (\Throwable $e) { return false; }
+    }
+    // unviewed submissions of active (not archived) students
+    function cv_sru_count($conn) {
+        try {
+            if (!cv_sru_ensure($conn)) return 0;
+            $r = $conn->query("SELECT COUNT(*) AS total FROM student_requirement_upload_notifications n
+                               INNER JOIN users u ON u.id = n.user_id WHERE n.admin_viewed = 0 AND COALESCE(u.is_archived, 0) = 0");
+            $row = $r ? $r->fetch_assoc() : null;
+            return (int)($row['total'] ?? 0);
+        } catch (\Throwable $e) { return 0; }
+    }
+}
+try { $app_request_count += cv_sru_count($conn); } catch (\Throwable $e) { /* indicator keeps the application-request count */ }
 
 /* ── FIX (sidebar notification indicator — adopted from
    admin_student_list.php / course_offering.php): this page's "Company Requirements" link
@@ -366,7 +446,7 @@ function computeWeeklyReportStats(string $ojt_start_date, int $submitted_count):
         return $stats;
     }
 
-    $start_ts = strtotime($ojt_start_date);
+    $start_ts = strtotime($ojt_start_date ?? '');
     $today_ts = strtotime(date('Y-m-d'));
     if ($start_ts === false || $today_ts < $start_ts) {
         return $stats;
@@ -405,7 +485,7 @@ if (isset($_GET['download']) && $_GET['download'] == '1') {
 
     $student_last_name = $dlrow['last_name'] ?? 'Student';
     $clean_company_name = preg_replace('/[^A-Za-z0-9_\-]/', '_', $company_name);
-    $week_start_date = strtotime($dlrow['week_start']);
+    $week_start_date = strtotime($dlrow['week_start'] ?? '');
     $week_end_date = strtotime('+4 days', $week_start_date);
     $week_range = date("M d", $week_start_date) . ' – ' . date("M d, Y", $week_end_date);
 
@@ -449,13 +529,13 @@ if (isset($_GET['view']) && $_GET['view'] == '1') {
 
     $blob         = $dlrow['report_blob'];
     $student_name = $dlrow['first_name'] . ' ' . $dlrow['last_name'];
-    $week_label   = date("M d, Y", strtotime($dlrow['week_start']));
+    $week_label   = date("M d, Y", strtotime($dlrow['week_start'] ?? ''));
 
     if (blobIsHTML($blob)) {
         $iframe_src = 'admin_reports.php?company_id=' . $company_id . '&viewraw=1&id=' . $report_id;
         header('Content-Type: application/json');
         echo json_encode([
-            'html'    => '<iframe class="lib-report-preview-frame" src="' . htmlspecialchars($iframe_src) . '" title="Weekly Report"></iframe>',
+            'html'    => '<iframe class="lib-report-preview-frame" src="' . htmlspecialchars($iframe_src ?? '') . '" title="Weekly Report"></iframe>',
             'week'    => $week_label,
             'student' => $student_name,
             'is_html' => true,
@@ -654,7 +734,7 @@ if (isset($_GET['print_eval']) && $_GET['print_eval'] == '1') {
    admin grading of weekly reports no longer exists. */
 if (isset($_GET['poll']) && $_GET['poll'] == '1') {
     $selected_p   = $_GET['week'] ?? date("Y-m-d");
-    $week_start_p = date("Y-m-d", strtotime("monday this week", strtotime($selected_p)));
+    $week_start_p = date("Y-m-d", strtotime("monday this week", strtotime($selected_p ?? '')));
     $sp = $conn->prepare("
         SELECT u.id AS student_id, u.first_name, u.last_name, u.course,
                r.id AS report_id, r.report_blob IS NOT NULL AS has_blob,
@@ -954,15 +1034,15 @@ if (isset($_GET['attendance_summary']) && $_GET['attendance_summary'] == '1') {
         exit;
     }
 
-    $att_end_date_limit = date("Y-m-d", strtotime("+4 months", strtotime($att_start_date)));
-    $att_ojt_start_month = date('Y-m', strtotime($att_start_date));
+    $att_end_date_limit = date("Y-m-d", strtotime("+4 months", strtotime($att_start_date ?? '')));
+    $att_ojt_start_month = date('Y-m', strtotime($att_start_date ?? ''));
     $att_month_min = $att_ojt_start_month;
-    $att_month_max = date("Y-m", strtotime($att_end_date_limit));
+    $att_month_max = date("Y-m", strtotime($att_end_date_limit ?? ''));
 
     if ($att_month < $att_month_min) $att_month = $att_month_min;
     if ($att_month > $att_month_max) $att_month = $att_month_max;
 
-    if (date('Y-m', strtotime($att_start_date)) === $att_month) {
+    if (date('Y-m', strtotime($att_start_date ?? '')) === $att_month) {
         $att_start = $att_start_date;
     } else {
         $att_start = $att_month . '-01';
@@ -1017,7 +1097,7 @@ if (isset($_GET['attendance_summary']) && $_GET['attendance_summary'] == '1') {
     }
 
     $att_dates = [];
-    for ($d = strtotime($att_start); $d <= strtotime($att_end); $d = strtotime('+1 day', $d)) {
+    for ($d = strtotime($att_start ?? ''); $d <= strtotime($att_end ?? ''); $d = strtotime('+1 day', $d)) {
         $att_dates[] = date('Y-m-d', $d);
     }
 
@@ -1026,7 +1106,7 @@ if (isset($_GET['attendance_summary']) && $_GET['attendance_summary'] == '1') {
         $cells = [];
         $s_mark = $att_ojt_marks[$sid] ?? ['start' => null, 'end' => null, 'end_type' => 'last_log'];
         foreach ($att_dates as $d) {
-            $dow = (int)date('w', strtotime($d));
+            $dow = (int)date('w', strtotime($d ?? ''));
             $is_wkd = ($dow === 0 || $dow === 6);
             if ($is_wkd) {
                 $cells[] = ['val' => 'O', 'class' => 'att-off', 'wknd' => true, 'mark' => null];
@@ -1061,27 +1141,27 @@ if (isset($_GET['attendance_summary']) && $_GET['attendance_summary'] == '1') {
         $table_rows[] = [
             'name'      => $s['first_name'] . ' ' . $s['last_name'],
             'cells'     => $cells,
-            'ojt_start' => !empty($s_mark['start']) ? date('M j, Y', strtotime($s_mark['start'])) : '—',
+            'ojt_start' => !empty($s_mark['start']) ? date('M j, Y', strtotime($s_mark['start'] ?? '')) : '—',
             'ojt_end'   => !empty($s_mark['end'])
-                ? (date('M j, Y', strtotime($s_mark['end'])) . ($s_mark['end_type'] === 'estimated' ? ' (est.)' : ''))
+                ? (date('M j, Y', strtotime($s_mark['end'] ?? '')) . ($s_mark['end_type'] === 'estimated' ? ' (est.)' : ''))
                 : '—',
         ];
     }
 
     $date_headers = [];
     foreach ($att_dates as $d) {
-        $dow = (int)date('w', strtotime($d));
+        $dow = (int)date('w', strtotime($d ?? ''));
         $is_wkd = ($dow === 0 || $dow === 6);
         $date_headers[] = [
-            'label' => date('D d', strtotime($d)),
+            'label' => date('D d', strtotime($d ?? '')),
             'wknd'  => $is_wkd,
         ];
     }
 
     $today_str = date('Y-m-d');
     $all_chart_months = [];
-    $cm = strtotime(date("Y-m-01", strtotime($att_start_date)));
-    $cm_end = strtotime(date("Y-m-01", strtotime($att_end_date_limit)));
+    $cm = strtotime(date("Y-m-01", strtotime($att_start_date ?? '')));
+    $cm_end = strtotime(date("Y-m-01", strtotime($att_end_date_limit ?? '')));
     while ($cm <= $cm_end) {
         $all_chart_months[] = date("Y-m", $cm);
         $cm = strtotime("+1 month", $cm);
@@ -1100,14 +1180,14 @@ if (isset($_GET['attendance_summary']) && $_GET['attendance_summary'] == '1') {
 
     $monthly_stats = [];
     foreach ($all_chart_months as $ym) {
-        $ym_start = (date('Y-m', strtotime($att_start_date)) === $ym) ? $att_start_date : $ym . '-01';
+        $ym_start = (date('Y-m', strtotime($att_start_date ?? '')) === $ym) ? $att_start_date : $ym . '-01';
         $ym_end   = date('Y-m-t', strtotime($ym . '-01'));
         if ($ym_end > $att_end_date_limit) $ym_end = $att_end_date_limit;
         if ($ym_start > $today_str) continue;
         if ($ym_end   > $today_str) $ym_end = $today_str;
 
         $p = 0; $inc = 0; $a = 0;
-        for ($d = strtotime($ym_start); $d <= strtotime($ym_end); $d = strtotime('+1 day', $d)) {
+        for ($d = strtotime($ym_start ?? ''); $d <= strtotime($ym_end ?? ''); $d = strtotime('+1 day', $d)) {
             $day_str = date('Y-m-d', $d);
             $dow = (int)date('w', $d);
             if ($dow === 0 || $dow === 6) continue;
@@ -1179,13 +1259,13 @@ if (isset($_GET['export_att_csv']) && $_GET['export_att_csv'] == '1') {
     $sd_row = $s2->get_result()->fetch_assoc();
     $exp_start_date = $sd_row['sd'] ?? date('Y-m-d');
 
-    $exp_end_date_limit = date("Y-m-d", strtotime("+4 months", strtotime($exp_start_date)));
-    $exp_month_min = date('Y-m', strtotime($exp_start_date));
-    $exp_month_max = date('Y-m', strtotime($exp_end_date_limit));
+    $exp_end_date_limit = date("Y-m-d", strtotime("+4 months", strtotime($exp_start_date ?? '')));
+    $exp_month_min = date('Y-m', strtotime($exp_start_date ?? ''));
+    $exp_month_max = date('Y-m', strtotime($exp_end_date_limit ?? ''));
     if ($exp_month < $exp_month_min) $exp_month = $exp_month_min;
     if ($exp_month > $exp_month_max) $exp_month = $exp_month_max;
 
-    if (date('Y-m', strtotime($exp_start_date)) === $exp_month) {
+    if (date('Y-m', strtotime($exp_start_date ?? '')) === $exp_month) {
         $exp_start = $exp_start_date;
     } else {
         $exp_start = $exp_month . '-01';
@@ -1213,7 +1293,7 @@ if (isset($_GET['export_att_csv']) && $_GET['export_att_csv'] == '1') {
     ");
     $exp_logs = [];
     while ($lr = $log_res->fetch_assoc()) {
-        $dow  = (int)date('w', strtotime($lr['date']));
+        $dow  = (int)date('w', strtotime($lr['date'] ?? ''));
         $wknd = ($dow === 0 || $dow === 6);
         $isMissed = fn($v) => ($v === 'missed');
         $hasVal   = fn($v) => ($v !== null && $v !== '' && $v !== 'missed');
@@ -1246,7 +1326,7 @@ if (isset($_GET['export_att_csv']) && $_GET['export_att_csv'] == '1') {
     }
 
     $exp_dates = [];
-    for ($d = strtotime($exp_start); $d <= strtotime($exp_end); $d = strtotime('+1 day', $d)) {
+    for ($d = strtotime($exp_start ?? ''); $d <= strtotime($exp_end ?? ''); $d = strtotime('+1 day', $d)) {
         $exp_dates[] = date('Y-m-d', $d);
     }
 
@@ -1266,8 +1346,8 @@ if (isset($_GET['export_att_csv']) && $_GET['export_att_csv'] == '1') {
 
     $header = ['Student Name'];
     foreach ($exp_dates as $d) {
-        $dow = (int)date('w', strtotime($d));
-        $header[] = date('D d', strtotime($d)) . ($dow === 0 || $dow === 6 ? ' (Off)' : '');
+        $dow = (int)date('w', strtotime($d ?? ''));
+        $header[] = date('D d', strtotime($d ?? '')) . ($dow === 0 || $dow === 6 ? ' (Off)' : '');
     }
     $header[] = 'Present';
     $header[] = 'Incomplete';
@@ -1278,7 +1358,7 @@ if (isset($_GET['export_att_csv']) && $_GET['export_att_csv'] == '1') {
         $row = [$stu['first_name'] . ' ' . $stu['last_name']];
         $p = 0; $inc = 0; $a = 0;
         foreach ($exp_dates as $d) {
-            $dow = (int)date('w', strtotime($d));
+            $dow = (int)date('w', strtotime($d ?? ''));
             if ($dow === 0 || $dow === 6) {
                 $row[] = 'OFF';
             } elseif ($d > date('Y-m-d')) {
@@ -1310,15 +1390,15 @@ $submitted_weeks = array_column($all_weeks_res, 'week_start');
 
 $current_week_start = date("Y-m-d", strtotime("monday this week"));
 if (!in_array($current_week_start, $submitted_weeks)) array_unshift($submitted_weeks, $current_week_start);
-usort($submitted_weeks, fn($a, $b) => strtotime($b) - strtotime($a));
+usort($submitted_weeks, fn($a, $b) => strtotime($b ?? '') - strtotime($a ?? ''));
 
 $selected_date = $_GET['week'] ?? $current_week_start;
-$week_start    = date("Y-m-d", strtotime("monday this week", strtotime($selected_date)));
-$week_end      = date("Y-m-d", strtotime("friday this week", strtotime($selected_date)));
+$week_start    = date("Y-m-d", strtotime("monday this week", strtotime($selected_date ?? '')));
+$week_end      = date("Y-m-d", strtotime("friday this week", strtotime($selected_date ?? '')));
 
 if (!in_array($week_start, $submitted_weeks)) {
     $submitted_weeks[] = $week_start;
-    usort($submitted_weeks, fn($a, $b) => strtotime($b) - strtotime($a));
+    usort($submitted_weeks, fn($a, $b) => strtotime($b ?? '') - strtotime($a ?? ''));
 }
 
 /* ── MAIN QUERY ──
@@ -1369,7 +1449,7 @@ $att_check->execute();
 $att_exists = (int)($att_check->get_result()->fetch_assoc()['cnt'] ?? 0) > 0;
 
 function weekLabel(string $ws): string {
-    $mon = strtotime($ws);
+    $mon = strtotime($ws ?? '');
     $fri = strtotime('+4 days', $mon);
     $isCurrent = $ws === date("Y-m-d", strtotime("monday this week"));
     $label = date("M d", $mon) . " – " . date("M d, Y", $fri);
@@ -1399,7 +1479,7 @@ function lastSubmittedColorClass(string $submission_status): string {
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Admin Reports — <?= htmlspecialchars($company_name) ?></title>
+<title>Admin Reports — <?= htmlspecialchars($company_name ?? '') ?></title>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
@@ -2053,12 +2133,80 @@ body{ font-family:'Segoe UI',sans-serif; background:var(--fo-bg); color:var(--fo
      unchanged; fetch / XMLHttpRequest keep working exactly as before.
      ══════════════════════════════════════════════════════════════════════ -->
 <style>
-    html.cv-booting::before { content: ''; position: fixed; left: 50%; top: 50%; width: 54px; height: 54px; margin: -44px 0 0 -32px; border-radius: 50%;
-        border: 5px solid #A3AFC7; border-top-color: #1B2A4A; z-index: 20002; animation: cvBootSpin 0.85s linear infinite; }
+    /* the first-paint ring: exactly where the page's own spinner is; its size and look come from the shared ring rule below,
+       and it carries on from the previous page's loading page (--cv-ring-delay). CLEAN-UP (audit): two rules merged into one. */
+    html.cv-booting::before { content: ''; position: fixed; left: 50%; top: 50%; margin: -47.5px 0 0 -32px; z-index: 20002;
+        animation: cvRingSpin 1s steps(12, end) infinite; animation-delay: var(--cv-ring-delay, 0s); }
     html.cv-booting::after { content: 'LOADING'; position: fixed; inset: 0; z-index: 20001; display: flex; align-items: center; justify-content: center;
-        padding-top: 70px; box-sizing: border-box; background: rgba(238, 241, 246, 0.92); color: #1B2A4A;
+        padding: 80px 20.7px 0 0; box-sizing: border-box; background: rgba(238, 241, 246, 0.92); color: #1B2A4A;   /* UPDATED (this adjustment): label exactly where the page's own label is */
         font: 700 13px 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; letter-spacing: 0.6px; }
-    @keyframes cvBootSpin { to { transform: rotate(360deg); } }
+    /* NEW (this adjustment): ENHANCED LOADING RING — instead of one solid arc sweeping round, 12 rounded segments
+       in the site's navy that fade from dark to light around the circle and tick round (like a classic activity
+       indicator). Same 64 px footprint and position as before, so nothing else moves. Used by the first-paint
+       cover AND by this page's own loading page, so both always look identical. */
+    html.cv-booting::before,
+    #globalLoadingOverlay .global-loading-spinner {
+        width: 64px; height: 64px; border: 0; border-radius: 50%; box-sizing: border-box;
+        background: conic-gradient(from 0deg, rgba(27,42,74,0.12) 0deg, rgba(27,42,74,0.35) 120deg, rgba(27,42,74,0.7) 240deg, #1B2A4A 330deg, #1B2A4A 360deg);
+        -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 9px), #000 calc(100% - 8px)),
+                      repeating-conic-gradient(from 5deg, #000 0deg 20deg, transparent 20deg 30deg);
+        -webkit-mask-composite: source-in;
+                mask: radial-gradient(farthest-side, transparent calc(100% - 9px), #000 calc(100% - 8px)),
+                      repeating-conic-gradient(from 5deg, #000 0deg 20deg, transparent 20deg 30deg);
+                mask-composite: intersect;
+    }
+    #globalLoadingOverlay .global-loading-spinner { animation: cvRingSpin 1s steps(12, end) infinite; }
+    @keyframes cvRingSpin { to { transform: rotate(360deg); } }
+    /* NEW (this adjustment): the animated dots after "LOADING", like the page's own loading page, so nothing changes
+       when the page's loading page takes over */
+    /* UPDATED (this adjustment): the three dots fade one after another exactly like the page's own dots
+       (same 1.2 s cycle, 0.2 s apart), so they simply carry on when the page's loading page takes over */
+    html.cv-booting body::before { content: '.'; position: fixed; left: calc(50% + 29.75px); top: calc(50% + 32.5px); z-index: 20003;
+        font: 700 13px/15px 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; letter-spacing: 0.6px; color: rgba(27,42,74,0);
+        animation: cvBootDots 1.2s linear infinite; animation-delay: var(--cv-dots-delay, 0s); pointer-events: none; }
+    @keyframes cvBootDots {
+        0.0% { color: rgba(27,42,74,0.0); text-shadow: 4.23px 0 rgba(27,42,74,0.075), 8.47px 0 rgba(27,42,74,0.424); }
+        2.5% { color: rgba(27,42,74,0.0); text-shadow: 4.23px 0 rgba(27,42,74,0.052), 8.47px 0 rgba(27,42,74,0.342); }
+        5.0% { color: rgba(27,42,74,0.0); text-shadow: 4.23px 0 rgba(27,42,74,0.034), 8.47px 0 rgba(27,42,74,0.273); }
+        7.5% { color: rgba(27,42,74,0.0); text-shadow: 4.23px 0 rgba(27,42,74,0.02), 8.47px 0 rgba(27,42,74,0.215); }
+        10.0% { color: rgba(27,42,74,0.0); text-shadow: 4.23px 0 rgba(27,42,74,0.01), 8.47px 0 rgba(27,42,74,0.166); }
+        12.5% { color: rgba(27,42,74,0.0); text-shadow: 4.23px 0 rgba(27,42,74,0.004), 8.47px 0 rgba(27,42,74,0.126); }
+        15.0% { color: rgba(27,42,74,0.0); text-shadow: 4.23px 0 rgba(27,42,74,0.001), 8.47px 0 rgba(27,42,74,0.094); }
+        17.5% { color: rgba(27,42,74,0.0); text-shadow: 4.23px 0 rgba(27,42,74,0.0), 8.47px 0 rgba(27,42,74,0.067); }
+        20.0% { color: rgba(27,42,74,0.0); text-shadow: 4.23px 0 rgba(27,42,74,0.0), 8.47px 0 rgba(27,42,74,0.046); }
+        22.5% { color: rgba(27,42,74,0.071); text-shadow: 4.23px 0 rgba(27,42,74,0.0), 8.47px 0 rgba(27,42,74,0.029); }
+        25.0% { color: rgba(27,42,74,0.221); text-shadow: 4.23px 0 rgba(27,42,74,0.0), 8.47px 0 rgba(27,42,74,0.017); }
+        27.5% { color: rgba(27,42,74,0.409); text-shadow: 4.23px 0 rgba(27,42,74,0.0), 8.47px 0 rgba(27,42,74,0.008); }
+        30.0% { color: rgba(27,42,74,0.576); text-shadow: 4.23px 0 rgba(27,42,74,0.0), 8.47px 0 rgba(27,42,74,0.002); }
+        32.5% { color: rgba(27,42,74,0.706); text-shadow: 4.23px 0 rgba(27,42,74,0.0), 8.47px 0 rgba(27,42,74,0.0); }
+        35.0% { color: rgba(27,42,74,0.802); text-shadow: 4.23px 0 rgba(27,42,74,0.0), 8.47px 0 rgba(27,42,74,0.0); }
+        37.5% { color: rgba(27,42,74,0.874); text-shadow: 4.23px 0 rgba(27,42,74,0.015), 8.47px 0 rgba(27,42,74,0.0); }
+        40.0% { color: rgba(27,42,74,0.925); text-shadow: 4.23px 0 rgba(27,42,74,0.113), 8.47px 0 rgba(27,42,74,0.0); }
+        42.5% { color: rgba(27,42,74,0.96); text-shadow: 4.23px 0 rgba(27,42,74,0.283), 8.47px 0 rgba(27,42,74,0.0); }
+        45.0% { color: rgba(27,42,74,0.983); text-shadow: 4.23px 0 rgba(27,42,74,0.468), 8.47px 0 rgba(27,42,74,0.0); }
+        47.5% { color: rgba(27,42,74,0.996); text-shadow: 4.23px 0 rgba(27,42,74,0.623), 8.47px 0 rgba(27,42,74,0.0); }
+        50.0% { color: rgba(27,42,74,1.0); text-shadow: 4.23px 0 rgba(27,42,74,0.741), 8.47px 0 rgba(27,42,74,0.0); }
+        52.5% { color: rgba(27,42,74,0.967); text-shadow: 4.23px 0 rgba(27,42,74,0.829), 8.47px 0 rgba(27,42,74,0.0); }
+        55.0% { color: rgba(27,42,74,0.905); text-shadow: 4.23px 0 rgba(27,42,74,0.893), 8.47px 0 rgba(27,42,74,0.038); }
+        57.5% { color: rgba(27,42,74,0.815); text-shadow: 4.23px 0 rgba(27,42,74,0.938), 8.47px 0 rgba(27,42,74,0.163); }
+        60.0% { color: rgba(27,42,74,0.705); text-shadow: 4.23px 0 rgba(27,42,74,0.969), 8.47px 0 rgba(27,42,74,0.346); }
+        62.5% { color: rgba(27,42,74,0.591); text-shadow: 4.23px 0 rgba(27,42,74,0.989), 8.47px 0 rgba(27,42,74,0.524); }
+        65.0% { color: rgba(27,42,74,0.487); text-shadow: 4.23px 0 rgba(27,42,74,0.998), 8.47px 0 rgba(27,42,74,0.666); }
+        67.5% { color: rgba(27,42,74,0.395); text-shadow: 4.23px 0 rgba(27,42,74,0.992), 8.47px 0 rgba(27,42,74,0.773); }
+        70.0% { color: rgba(27,42,74,0.317); text-shadow: 4.23px 0 rgba(27,42,74,0.95), 8.47px 0 rgba(27,42,74,0.852); }
+        72.5% { color: rgba(27,42,74,0.252); text-shadow: 4.23px 0 rgba(27,42,74,0.878), 8.47px 0 rgba(27,42,74,0.91); }
+        75.0% { color: rgba(27,42,74,0.198); text-shadow: 4.23px 0 rgba(27,42,74,0.779), 8.47px 0 rgba(27,42,74,0.95); }
+        77.5% { color: rgba(27,42,74,0.152); text-shadow: 4.23px 0 rgba(27,42,74,0.667), 8.47px 0 rgba(27,42,74,0.977); }
+        80.0% { color: rgba(27,42,74,0.115); text-shadow: 4.23px 0 rgba(27,42,74,0.555), 8.47px 0 rgba(27,42,74,0.993); }
+        82.5% { color: rgba(27,42,74,0.084); text-shadow: 4.23px 0 rgba(27,42,74,0.455), 8.47px 0 rgba(27,42,74,1.0); }
+        85.0% { color: rgba(27,42,74,0.059); text-shadow: 4.23px 0 rgba(27,42,74,0.368), 8.47px 0 rgba(27,42,74,0.981); }
+        87.5% { color: rgba(27,42,74,0.04); text-shadow: 4.23px 0 rgba(27,42,74,0.294), 8.47px 0 rgba(27,42,74,0.929); }
+        90.0% { color: rgba(27,42,74,0.024); text-shadow: 4.23px 0 rgba(27,42,74,0.233), 8.47px 0 rgba(27,42,74,0.848); }
+        92.5% { color: rgba(27,42,74,0.013); text-shadow: 4.23px 0 rgba(27,42,74,0.182), 8.47px 0 rgba(27,42,74,0.743); }
+        95.0% { color: rgba(27,42,74,0.006); text-shadow: 4.23px 0 rgba(27,42,74,0.139), 8.47px 0 rgba(27,42,74,0.629); }
+        97.5% { color: rgba(27,42,74,0.001); text-shadow: 4.23px 0 rgba(27,42,74,0.104), 8.47px 0 rgba(27,42,74,0.52); }
+        100.0% { color: rgba(27,42,74,0.0); text-shadow: 4.23px 0 rgba(27,42,74,0.075), 8.47px 0 rgba(27,42,74,0.424); }
+    }
 </style>
 <script>
 (function () {
@@ -2070,13 +2218,103 @@ body{ font-family:'Segoe UI',sans-serif; background:var(--fo-bg); color:var(--fo
     // ── 1) first paint: covered until this page's own loading overlay exists ──
     root.classList.add('cv-booting');
     function releaseBoot() { root.classList.remove('cv-booting'); }
+    /* NEW (this adjustment): the loading animation no longer starts over midway. When the page's own loading page
+       takes over from this cover, its spinner continues from the same angle, its dots continue in the same rhythm,
+       and its pop-in is not replayed (it is already on screen). Only for this one hand-over, and only if the cover
+       was actually painted; any later showing of the loading page (e.g. "Saving") animates exactly as before. */
+    var cvBootStart = (window.performance && performance.now) ? performance.now() : Date.now();
+    var cvCoverPainted = false;
+    /* NEW (this adjustment): ONE loading page from the side-menu click / refresh until the new page is ready.
+       The page being left saves the moment its loading page appeared (see "pagehide" below); this page picks it
+       up and simply carries on from there — same ring position, same dots, no second pop-in, nothing drawn twice.
+       Used once, only if recent (15 s); a first visit (nothing saved) behaves as before. */
+    var CV_LOADER_KEY = 'cvLoaderEpoch', cvCarriedOver = false;
+    try {
+        var cvEpoch = parseInt(sessionStorage.getItem(CV_LOADER_KEY) || '', 10);
+        sessionStorage.removeItem(CV_LOADER_KEY);
+        var cvSince = cvEpoch ? Date.now() - cvEpoch : -1;
+        if (cvSince >= 0 && cvSince < 15000) {
+            cvCarriedOver = true; cvCoverPainted = true;
+            cvBootStart = cvBootStart - cvSince;
+            root.style.setProperty('--cv-ring-delay', (-((cvSince / 1000) % 1)).toFixed(3) + 's');
+            root.style.setProperty('--cv-dots-delay', (-((cvSince / 1000) % 1.2)).toFixed(3) + 's');
+        }
+    } catch (e) {}
+    function cvLoaderStartedAt() { return Date.now() - (((window.performance && performance.now) ? performance.now() : Date.now()) - cvBootStart); }
+    if (window.requestAnimationFrame) requestAnimationFrame(function () { requestAnimationFrame(function () { cvCoverPainted = root.classList.contains('cv-booting'); }); });
+    function continueCoverAnimation(ov) {
+        try {
+            if (!cvCoverPainted || !ov || ov.classList.contains('hidden')) return;
+            var now = (window.performance && performance.now) ? performance.now() : Date.now();
+            var elapsed = (now - cvBootStart) / 1000;
+            var spinner = ov.querySelector('.global-loading-spinner');
+            if (spinner) spinner.style.animationDelay = (-(elapsed % 1)).toFixed(3) + 's';   // UPDATED (this adjustment): the ring's 1 s turn
+            var dots = ov.querySelectorAll('.global-loading-dots span');
+            for (var i = 0; i < dots.length; i++) dots[i].style.animationDelay = (-((elapsed - i * 0.2) % 1.2 + 1.2) % 1.2).toFixed(3) + 's';
+            var box = ov.querySelector('.global-loading-box');
+            if (box) {
+                box.style.animation = 'none';   // no second pop-in
+                var restore = new MutationObserver(function () {   // later showings get their pop-in back, as before
+                    if (ov.classList.contains('hidden')) {
+                        restore.disconnect();
+                        setTimeout(function () { box.style.animation = ''; if (spinner) spinner.style.animationDelay = ''; for (var j = 0; j < dots.length; j++) dots[j].style.animationDelay = ''; }, 400);
+                    }
+                });
+                restore.observe(ov, { attributes: true, attributeFilter: ['class'] });
+            }
+        } catch (e) { /* never affects the page */ }
+    }
+    // UPDATED (this adjustment): the cover gives way the instant the page's loading page is in the page (before the
+    // next frame is drawn), so the two are never drawn at the same time
+    var cvHandedOver = false;
+    function cvHandOver(ovEl) {
+        if (cvHandedOver) return;
+        cvHandedOver = true;
+        continueCoverAnimation(ovEl);
+        releaseBoot();
+    }
+    if (window.MutationObserver) {
+        var cvOvWatch = new MutationObserver(function () {
+            var o = document.getElementById('globalLoadingOverlay');
+            if (o) { cvOvWatch.disconnect(); cvHandOver(o); }
+        });
+        cvOvWatch.observe(root, { childList: true, subtree: true });
+        document.addEventListener('DOMContentLoaded', function () { cvOvWatch.disconnect(); });
+    }
     (function waitForOverlay() {
-        if (document.getElementById('globalLoadingOverlay')) { releaseBoot(); return; }
+        var ovEl = document.getElementById('globalLoadingOverlay');
+        if (ovEl) { cvHandOver(ovEl); return; }
         if (document.readyState !== 'loading') { releaseBoot(); return; }   // page without an overlay: never keep it covered
         setTimeout(waitForOverlay, 16);
     })();
     document.addEventListener('DOMContentLoaded', function () { setTimeout(releaseBoot, 0); });
     window.addEventListener('pageshow', function (e) { if (e.persisted) releaseBoot(); });
+
+    /* NEW (this adjustment): remember when this page's loading page appeared, and hand that moment to the next
+       page when this one is left (side-menu link, refresh, redirect) while it is showing — so the next page
+       carries on the same loading page instead of starting a second one. Downloads never leave the page, so
+       they never hand anything over. */
+    var cvShownSince = null;
+    function cvWatchOverlay() {
+        var ov = document.getElementById('globalLoadingOverlay');
+        if (!ov) return;
+        var mark = function () {
+            var shown = !ov.classList.contains('hidden');
+            if (shown && cvShownSince === null) cvShownSince = Date.now();
+            if (!shown) cvShownSince = null;
+        };
+        if (!ov.classList.contains('hidden')) cvShownSince = cvLoaderStartedAt();   // the page's first loading page
+        new MutationObserver(mark).observe(ov, { attributes: true, attributeFilter: ['class'] });
+    }
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', cvWatchOverlay); else cvWatchOverlay();
+    window.addEventListener('pagehide', function () {
+        try {
+            var ov = document.getElementById('globalLoadingOverlay');
+            if (ov && !ov.classList.contains('hidden') && !ov.classList.contains('success-state')) {
+                sessionStorage.setItem(CV_LOADER_KEY, String(cvShownSince !== null ? cvShownSince : Date.now()));
+            }
+        } catch (e) {}
+    });
 
     // ── shared: this page's loading overlay ──
     var LABEL = 'Processing', MIN_MS = 350, SAFETY_MS = 30000;
@@ -2267,6 +2505,10 @@ body{ font-family:'Segoe UI',sans-serif; background:var(--fo-bg); color:var(--fo
             transition: opacity 0.2s;
         }
         .global-result-ok:hover { opacity: 0.88; }
+</style>
+<!-- NEW (this adjustment): button tooltips can now hold a short description, so they may wrap onto a second line -->
+<style>
+    #cvBtnTip { white-space: normal; max-width: 300px; text-align: center; }
 </style>
 </head>
 <body>
@@ -2470,7 +2712,7 @@ body{ font-family:'Segoe UI',sans-serif; background:var(--fo-bg); color:var(--fo
     <div class="sidebar-header">
         <!-- UPDATED (this adjustment): admin full name + "Administrator" label, same markup as the other admin pages -->
         <div class="sidebar-header-titles">
-            <h2 id="sidebarTitle"><?= htmlspecialchars($adminFullName) ?></h2>
+            <h2 id="sidebarTitle"><?= htmlspecialchars($adminFullName ?? '') ?></h2>
             <span class="sidebar-role-label">Administrator</span>
         </div>
         <button id="toggleBtn" style="background:none;border:none;color:white;cursor:pointer;font-size:20px;"><i class="fas fa-bars"></i></button>
@@ -2518,7 +2760,7 @@ body{ font-family:'Segoe UI',sans-serif; background:var(--fo-bg); color:var(--fo
     <!-- PAGE HEADER -->
     <div class="page-header">
         <div>
-            <h2><?= htmlspecialchars($company_name) ?> — Student Reports</h2>
+            <h2><?= htmlspecialchars($company_name ?? '') ?> — Student Reports</h2>
             <div class="page-header-sub" id="headerSub"></div>
         </div>
         <div class="page-header-right">
@@ -2574,7 +2816,7 @@ body{ font-family:'Segoe UI',sans-serif; background:var(--fo-bg); color:var(--fo
             $course_label  = htmlspecialchars($row['course'] ?? '');
             $total_reports_for_student = (int)($row['total_reports'] ?? 0);
             $last_submitted_label = $row['last_submitted_at']
-                ? 'Last submitted: ' . date("M d, Y", strtotime($row['last_submitted_at']))
+                ? 'Last submitted: ' . date("M d, Y", strtotime($row['last_submitted_at'] ?? ''))
                 : 'No reports yet';
             $last_submitted_color_class = $row['last_submitted_at'] ? lastSubmittedColorClass($status) : 'lastsub-neutral';
             $evalIconClass = 'icon-btn' . ($evalDone ? ' eval-done' : '');
@@ -2588,7 +2830,7 @@ body{ font-family:'Segoe UI',sans-serif; background:var(--fo-bg); color:var(--fo
                     <div style="flex:1;min-width:0;">
                         <div class="sc-name"><?= $student_label ?></div>
                         <div class="sc-course"><?= $course_label ?></div>
-                        <div class="sc-last <?= $last_submitted_color_class ?>" id="sclast-<?= $sid ?>"><?= htmlspecialchars($last_submitted_label) ?></div>
+                        <div class="sc-last <?= $last_submitted_color_class ?>" id="sclast-<?= $sid ?>"><?= htmlspecialchars($last_submitted_label ?? '') ?></div>
                     </div>
                     <div class="sc-badges" id="badges-<?= $sid ?>">
                         <button type="button" class="<?= $evalIconClass ?>" id="viewplan-<?= $sid ?>"
@@ -2607,7 +2849,7 @@ body{ font-family:'Segoe UI',sans-serif; background:var(--fo-bg); color:var(--fo
                 <?php if ($evalDone): ?>
                 <div class="sc-eval-strip" id="eval-strip-<?= $sid ?>">
                     <span class="sc-eval-label">Performance Evaluation Submitted</span>
-                    <span class="sc-eval-date">Submitted <?= date("M d, Y", strtotime($row['eval_submitted_at'])) ?></span>
+                    <span class="sc-eval-date">Submitted <?= date("M d, Y", strtotime($row['eval_submitted_at'] ?? '')) ?></span>
                 </div>
                 <?php else: ?>
                 <div class="sc-eval-strip" id="eval-strip-<?= $sid ?>" style="display:none;"></div>
@@ -2622,7 +2864,7 @@ body{ font-family:'Segoe UI',sans-serif; background:var(--fo-bg); color:var(--fo
     <!-- ATTENDANCE SUMMARY PANEL -->
     <div id="attSummaryPanel">
         <div class="att-panel-header">
-            <h3> Monthly Attendance Summary — <?= htmlspecialchars($company_name) ?></h3>
+            <h3> Monthly Attendance Summary — <?= htmlspecialchars($company_name ?? '') ?></h3>
             <div class="att-month-nav">
                 <button id="attPrevBtn" onclick="changeAttMonth(-1)">&#8592; Prev</button>
                 <span class="att-month-label" id="attMonthLabel">—</span>
@@ -4400,15 +4642,196 @@ window.addEventListener('pageshow', function (e) {
         for (var k = 0; k < ICONS.length; k++) { if (cls.indexOf(ICONS[k][0]) !== -1) return ICONS[k][1]; }
         return '';
     }
+    /* ─────────────────────────────────────────────────────────────────────
+       UPDATED (this adjustment): tooltips now say, in a few simple words,
+       WHAT the button does — instead of repeating the button's own name.
+       Order: a description written for that exact button → the button's own
+       title / label when it says more than its name → the description for
+       that kind of button (this page first, then the general list) → the
+       old behaviour as a last resort. Counters are understood, e.g.
+       "Delete (2)" / "Export (Excluding 3)".
+       ───────────────────────────────────────────────────────────────────── */
+    var CV_TIP_GENERAL = {
+        'cancel': 'Close this without saving',
+        'close': 'Close this window',
+        'dismiss': 'Hide this message',
+        'ok': 'Close this message',
+        'ok, got it': 'Close this message',
+        'done': 'Close this summary',
+        'save': 'Save your changes',
+        'save changes': 'Save your changes',
+        'save all': 'Save every course you edited',
+        'yes, delete': 'Delete for good — this cannot be undone',
+        'delete': 'Remove this item',
+        'remove': 'Remove this item',
+        'confirm': 'Yes, go ahead',
+        'continue': 'Go on to the next step',
+        'back': 'Go back to the previous step',
+        'next': 'Go to the next page',
+        'prev': 'Go to the previous page',
+        'previous': 'Go to the previous page',
+        'next page': 'Go to the next page',
+        'previous page': 'Go to the previous page',
+        'next month': 'Show the next month',
+        'previous month': 'Show the previous month',
+        'export excel': 'Download this list as an Excel file',
+        'export to excel': 'Download this list as an Excel file',
+        'export filtered': 'Download only the rows that match your filters',
+        'export': 'Download this list as a file',
+        'export (excluding n)': 'Download the list without the entries you ticked',
+        'none, proceed with export': 'Export everyone in the list',
+        'archive batch': 'Move a finished batch to the archive',
+        'unarchive batch': 'Bring an archived batch back',
+        'unarchive': 'Bring this batch back to the active list',
+        'yes, unarchive': 'Bring the batch back to the active list',
+        'view archived batches': 'See the batches you archived',
+        'view archived company batches': 'See the company batches you archived',
+        'undo': 'Reverse your last action',
+        'refresh': 'Load the latest list',
+        'print': 'Print this page',
+        'save as pdf': 'Download this as a PDF file',
+        'select all': 'Tick every item in this list',
+        'clear': 'Untick every item in this list',
+        'import selected': 'Import only the groups you ticked',
+        'cancel import': 'Stop — nothing from the file is added',
+        'skip these students': 'Import the rest and leave these students out',
+        'no, skip these students': 'Import the rest and leave these students out',
+        'no, skip this student': 'Leave this student out',
+        'skip this student': 'Leave this student out',
+        'yes, add course': 'Add this course to Course Offering first',
+        'add course offering': 'Save this course to Course Offering',
+        'edit': 'Choose one entry, then change it',
+        'edit selected': 'Open the entry you picked for editing',
+        'edit (n)': 'Edit the entries you picked',
+        'delete (n)': 'Delete the entries you picked',
+        'view': 'Open the full details',
+        'full view': 'Open the full application',
+        'details': 'Show the full details',
+        'company details': "Show the company's details",
+        'view requirements': "See this company's requirements",
+        'view pdf': 'Open the document',
+        'view pdf (locked)': 'Open the flagged document (read only)',
+        'send': 'Send your message',
+        'open chat': 'Chat with this company',
+        'preview letter': 'See the letter before sending it',
+        'apply & send endorsement letter': 'Assign the students and email the letter',
+        'approve moa': "Approve this company's MOA",
+        'reject': 'Reject it and say what to fix',
+        'accept': 'Accept this request',
+        'send & request revision': 'Ask the company to fix the flagged items',
+        'set signing schedule': 'Pick the MOA signing date and time',
+        're-schedule': 'Change the MOA signing date',
+        'accept proposed schedule': "Agree to the company's proposed date",
+        'review moa': 'Check the MOA the company sent',
+        'moa workflow': "Track each company's MOA progress",
+        'notification inbox': 'See new company notifications',
+        'requirements': "See the companies' requirements",
+        'requirements /': "See the companies' requirements",
+        'allow': "Approve this student's application",
+        'allow application': "Approve this student's application",
+        'deny': "Decline this student's application",
+        'deny application': "Decline this student's application",
+        'approve & send letter': 'Approve and email the endorsement letter',
+        'application requests': 'See new student application requests',
+        'update id': "Save the student's new ID number",
+        'add student': 'Add a student',
+        'remove student': 'Take this student off the list',
+        'confirm & create admin': 'Create the new admin account',
+        'verify credentials': 'Check the details before creating the account',
+        'verify otp': 'Confirm the code sent by email',
+        'clear history': 'Remove all finished recovery requests',
+        'clear log': 'Remove every activity log entry',
+        'confirm accept': 'Approve this email change',
+        'confirm reject': 'Decline this email change',
+        'accept request': 'Approve this email change request',
+        'reject request': 'Decline this email change request',
+        'history': 'Show requests already handled',
+        'pending': 'Show requests waiting for you',
+        'quick actions': 'Open shortcuts for common tasks',
+        'attendance': 'Show the attendance records',
+        'reports': 'Show the weekly reports',
+        'comment': 'Leave feedback on this report',
+        'edit comment': 'Change your feedback',
+        'save comment': 'Save your feedback',
+        'upload': 'Let the student see this grade',
+        'unupload': 'Hide this grade from the student',
+        'upload selected': 'Show the ticked grades to students',
+        'unupload selected': 'Hide the ticked grades from students',
+        'backup now': 'Make a copy of the database now',
+        'add company manually': 'Open the form to add one company',
+        'add company': 'Save this new company',
+        'import companies': 'Add many companies from an Excel file',
+        'import students': 'Add many students from an Excel file',
+        'log out': 'Sign out of your account',
+        'logout': 'Sign out of your account',
+        'notifications': 'See new notifications',
+        'search': 'Search the list',
+        'filter': 'Narrow down the list',
+        'menu': 'Open the menu'
+    };
+    var CV_TIP_PAGE = {
+        'admin_student_list.php': {
+            'delete': 'Choose students to remove', 'yes': 'Choose students to leave out of the export', 'done': 'Close this summary'
+        },
+        'admin_company_list.php': {
+            'delete': 'Choose companies to remove', 'yes': 'Choose companies to leave out of the export', 'done': 'Close this summary'
+        },
+        'course_offering.php': {
+            'delete': 'Choose courses to remove', 'next course': 'Go to the next course', 'previous course': 'Go to the previous course'
+        },
+        'company_validation.php': { 'done': 'Mark this MOA as completed', 'back': 'Go back to the list' },
+        'admin_final_grades.php': { 'export': 'Download the grades as a file' },
+        'system_setting.php': { 'delete': 'Delete this backup', 'refresh': 'Load the latest backup list' },
+        'monitoring.php': { 'delete': 'Delete this account for good' }
+    };
+    var CV_TIP_EXACT = [   // [CSS selector, description] — for buttons whose words mean different things on the same page
+        ['#toggleBtn', null],
+        ['#addStudentBtn', 'Open the form to add one student'],
+        ['#addStudentForm button[type="submit"]', 'Save this new student'],
+        ['#addCourseOfferingBtn', 'Open the form to add a course'],
+        ['#importAddCourseSubmitBtn', 'Save this course, then continue'],
+        ['#courseOfferingSubmitBtn', 'Save this course'],
+        ['#addCompanyBtn', 'Open the form to add one company'],
+        ['#alogClearBtn', 'Remove every activity log entry'],
+        ['#studentImportFilterCloseBtn', 'Stop — nothing from the file is added'],
+        ['#importClassificationCloseBtn', 'Stop — nothing from the file is added'],
+        ['#exportChoiceCloseBtn', 'Cancel the export'],
+        ['#globalResultOkBtn', 'Close this message']
+    ];
+    var CV_TIP_PAGE_NAME = (window.location.pathname.split('/').pop() || '').toLowerCase();
+    function cvTipKey(t) {
+        return String(t || '').replace(/\s+/g, ' ').trim().toLowerCase()
+            .replace(/^[\u2190\u2192\u2039\u203a\u00ab\u00bb\u00d7\u2715<>\s]+|[\u2190\u2192\u2039\u203a\u00ab\u00bb\u00d7\u2715<>\s]+$/g, '')
+            .replace(/\d+/g, 'n');
+    }
+    function cvTipDescribe(key) {
+        var page = CV_TIP_PAGE[CV_TIP_PAGE_NAME] || {};
+        // try the name as it is, then without a trailing counter ("Pending 3", "Requirements 2 / 5")
+        var keys = [key, String(key).replace(/(\s+n(\s*\/\s*n)?)+$/, '').replace(/\s*\/\s*$/, '').trim()];
+        for (var k = 0; k < keys.length; k++) {
+            if (Object.prototype.hasOwnProperty.call(page, keys[k])) return page[keys[k]];
+            if (Object.prototype.hasOwnProperty.call(CV_TIP_GENERAL, keys[k])) return CV_TIP_GENERAL[keys[k]];
+        }
+        return '';
+    }
     function labelOf(b) {
         if (b.id === 'toggleBtn') {
             var sb = document.getElementById('sidebar');
-            return sb && sb.classList.contains('collapsed') ? 'Expand menu' : 'Collapse menu';
+            return sb && sb.classList.contains('collapsed') ? 'Show the full menu' : 'Make the menu smaller';
         }
-        var t = b.getAttribute('data-cv-tip') || b.getAttribute('aria-label') || b.getAttribute('data-cv-title') || b.getAttribute('title') || '';
-        if (!t) t = b.tagName === 'INPUT' ? (b.value || '') : (b.textContent || '');
-        t = t.replace(/\s+/g, ' ').trim();
-        if (/^[\u00D7\u2715xX]$/.test(t)) t = 'Close';
+        for (var i = 0; i < CV_TIP_EXACT.length; i++) {
+            try { if (CV_TIP_EXACT[i][1] && b.matches(CV_TIP_EXACT[i][0])) return CV_TIP_EXACT[i][1]; } catch (x) {}
+        }
+        var visible = (b.tagName === 'INPUT' ? (b.value || '') : (b.textContent || '')).replace(/\s+/g, ' ').trim();
+        if (/^[\u00D7\u2715xX]$/.test(visible)) visible = 'Close';
+        var own = (b.getAttribute('data-cv-tip') || b.getAttribute('aria-label') || b.getAttribute('data-cv-title') || b.getAttribute('title') || '').replace(/\s+/g, ' ').trim();
+        // the button's own title / label, when it says more than the button's name (more than one word)
+        if (own && own.indexOf(' ') !== -1 && cvTipKey(own) !== cvTipKey(visible) && own.length <= 160 && !cvTipDescribe(cvTipKey(own))) return own;
+        var d = cvTipDescribe(cvTipKey(visible)) || cvTipDescribe(cvTipKey(own));
+        if (!d && (!visible || /^[^A-Za-z0-9]+$/.test(visible))) d = cvTipDescribe(cvTipKey(iconName(b)));
+        if (d) return d;
+        // last resort — the old behaviour
+        var t = own || visible;
         if (!t || /^[^A-Za-z0-9]+$/.test(t)) t = iconName(b);
         return t.length > 60 ? '' : t;     // long text (e.g. whole cards acting as buttons) gets no tooltip
     }
@@ -4578,8 +5001,16 @@ window.addEventListener('pageshow', function (e) {
         });
     }
 
+    // NEW (this adjustment): new requirement submission → administrator.php opens that student's requirements
+    function openStudentUpload(id, uid) {
+        var view = g('cvViewStudentUpload');
+        if (typeof view === 'function') { view(parseInt(id, 10), parseInt(uid, 10)); return; }
+        goTo('administrator.php?open_student_upload=' + encodeURIComponent(id) + '&uid=' + encodeURIComponent(uid));
+    }
+
     function go(spec) {
         var p = String(spec || '').split(':');
+        if (p[0] === 'studentupload') { openStudentUpload(p[1], p[2]); return; }
         if (p[0] === 'notif') openNotif(p[1], p[2], p[3]);
         else if (p[0] === 'app') openApp(p[1]);
         else if (p[0] === 'recovery') openRecovery(p[1]);
@@ -4606,8 +5037,9 @@ window.addEventListener('pageshow', function (e) {
     if (params.get('open_notif')) spec = 'notif:' + params.get('open_notif') + ':' + (params.get('uid') || 0) + ':' + (params.get('type') || 'new_request');
     else if (params.get('open_app_request')) spec = 'app:' + params.get('open_app_request');
     else if (params.get('open_recovery')) spec = 'recovery:' + params.get('open_recovery');
+    else if (params.get('open_student_upload')) spec = 'studentupload:' + params.get('open_student_upload') + ':' + (params.get('uid') || 0);   // NEW (this adjustment)
     if (spec) {
-        ['open_notif', 'uid', 'type', 'open_app_request', 'open_recovery'].forEach(function (k) { params.delete(k); });
+        ['open_notif', 'uid', 'type', 'open_app_request', 'open_recovery', 'open_student_upload'].forEach(function (k) { params.delete(k); });
         if (window.history.replaceState) {
             var q = params.toString();
             window.history.replaceState({}, document.title, window.location.pathname + (q ? '?' + q : '') + window.location.hash);
@@ -4653,6 +5085,91 @@ document.addEventListener('keydown', function (e) {
     var ov = document.getElementById('globalResultOverlay');
     if (e.key === 'Escape' && ov && !ov.classList.contains('hidden')) hideGlobalResult();
 });
+</script>
+<!-- ══════════════════════════════════════════════════════════════════════
+     NEW (this adjustment) — NEW REQUIREMENT SUBMISSION POPUP + INDICATOR
+     Same design and behaviour as the other popups on this page (and as
+     company_validation.php's "uploaded new requirement document(s)" popup):
+     checked right away and then every 4 s; submissions that were already
+     waiting when the page opened do not pop up; each one pops up once (a
+     further file merged into it pops up again, listing everything); clicking
+     it opens that student's requirements (administrator.php). The Student Validation indicator is
+     kept in step with the Inbox total (application requests + submissions).
+     Ported from administrator.php: the submissions list, the detection and the
+     indicator count all come from administrator.php?student_upload_list=1, so
+     every admin page shows the same popups once, whichever page is open.
+     ══════════════════════════════════════════════════════════════════════ -->
+<script>
+(function () {
+    'use strict';
+    if (window._cvStudentUploadPopupReady) return;
+    window._cvStudentUploadPopupReady = true;
+    var SRU_ENDPOINT    = 'administrator.php?student_upload_list=1';
+    var SRU_POLL_MS     = 4000;
+    var SRU_TOAST_MS    = 7000;
+    var SRU_STORE_KEY   = 'cvStudentUploadKnown';
+    var SRU_STORE_FRESH = 45000;
+    var known = null, inFlight = false;
+    function esc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
+    function sigOf(r) { return String(r.id) + '@' + String(r.sig || ''); }
+    function readStore() {
+        try {
+            var o = JSON.parse(sessionStorage.getItem(SRU_STORE_KEY) || 'null');
+            if (!o || !Array.isArray(o.ids) || (Date.now() - (o.ts || 0)) > SRU_STORE_FRESH) return null;
+            return new Set(o.ids.map(String));
+        } catch (e) { return null; }
+    }
+    function writeStore() { if (!known) return; try { sessionStorage.setItem(SRU_STORE_KEY, JSON.stringify({ ids: Array.from(known), ts: Date.now() })); } catch (e) {} }
+    function layoutToasts() {
+        if (typeof window.cvLayoutTopToasts === 'function') { window.cvLayoutTopToasts(); return; }
+        var top = 30, undo = document.getElementById('undoToast');
+        if (undo && undo.classList.contains('show')) top = Math.max(top, undo.getBoundingClientRect().bottom + 12);
+        document.querySelectorAll('.cv-top-toast').forEach(function (el) { el.style.top = top + 'px'; top += el.offsetHeight + 12; });
+    }
+    function showPopup(r) {
+        var labels = (r.items || []).map(function (i) { return i.label || i.key || ''; }).filter(Boolean);
+        var what = labels.length === 1 ? 'a new requirement: ' + labels[0] : (labels.length + ' new requirements: ' + labels.join(', '));
+        var div = document.createElement('div');
+        div.className = 'cv-top-toast';
+        div.setAttribute('role', 'status');
+        div.innerHTML = '<i class="fas fa-file-arrow-up"></i><span><strong>' + esc(r.full_name || 'A student') + '</strong> submitted ' + esc(what) + ' \u2014 check the Application Requests inbox.</span>';
+        document.body.appendChild(div);
+        if (window.cvTagToast) window.cvTagToast(div, 'studentupload:' + r.id + ':' + r.user_id);   // clickable
+        layoutToasts();
+        requestAnimationFrame(function () { div.classList.add('show'); });
+        setTimeout(function () { div.classList.remove('show'); setTimeout(function () { div.remove(); layoutToasts(); }, 400); }, SRU_TOAST_MS);
+    }
+    function setBadge(count) {
+        var badge = document.getElementById('sidebarAppBadge');
+        if (!badge) return;
+        count = parseInt(count, 10) || 0;
+        badge.textContent = count;
+        badge.style.display = count > 0 ? 'inline-flex' : 'none';
+    }
+    function poll() {
+        if (inFlight || document.hidden) return;
+        inFlight = true;
+        fetch(SRU_ENDPOINT, { credentials: 'same-origin', cache: 'no-store' })
+            .then(function (r) { return r.json(); })
+            .then(function (d) {
+                inFlight = false;
+                if (!d || !d.success || !Array.isArray(d.rows)) return;
+                var now = new Set(d.rows.map(sigOf));
+                setBadge(d.count);
+                if (typeof window.cvRenderStudentUploads === 'function') window.cvRenderStudentUploads(d.rows);   // administrator.php's Inbox, if open
+                if (known === null) { known = readStore() || now; if (known === now) { writeStore(); return; } }
+                var fresh = d.rows.filter(function (r) { return !known.has(sigOf(r)); });
+                known = now; writeStore();
+                fresh.forEach(showPopup);
+            })
+            .catch(function () { inFlight = false; });
+    }
+    setTimeout(function () { poll(); setInterval(poll, SRU_POLL_MS); }, 0);
+    document.addEventListener('visibilitychange', function () { if (!document.hidden && known !== null) poll(); });
+    window.addEventListener('focus', function () { if (known !== null) poll(); });
+    window.addEventListener('pageshow', function (e) { if (e.persisted) poll(); });
+    window.addEventListener('pagehide', writeStore);
+})();
 </script>
 </body>
 </html>

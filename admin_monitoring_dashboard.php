@@ -26,6 +26,44 @@ $conn->query("CREATE TABLE IF NOT EXISTS admin_application_approvals (
 $app_request_count_res = $conn->query("SELECT COUNT(*) as total FROM admin_application_approvals");
 $app_request_count = (int)(($app_request_count_res ? $app_request_count_res->fetch_assoc()['total'] : 0));
 
+// ============================================================================
+// NEW (this adjustment): STUDENT REQUIREMENT SUBMISSIONS — side-menu indicator.
+// A student's new / re-uploaded requirement is recorded as a notification by
+// administrator.php (cv_sru_detect()) and counts toward the Student Validation
+// indicator next to the application requests — the same count administrator.php
+// shows. Same helpers as administrator.php (created once per session, so every
+// admin page can count them). Fully guarded: if anything fails the count simply
+// stays the application requests only.
+// ============================================================================
+if (!function_exists('cv_sru_ensure')) {
+    function cv_sru_ensure($conn) {
+        if (!empty($_SESSION['cv_sru_ready'])) return true;
+        try {
+            $conn->query("CREATE TABLE IF NOT EXISTS student_requirement_upload_notifications (
+                id INT AUTO_INCREMENT PRIMARY KEY, user_id INT NOT NULL, detail TEXT NULL,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                admin_viewed TINYINT(1) NOT NULL DEFAULT 0, KEY idx_sru_viewed (admin_viewed), KEY idx_sru_user (user_id))");
+            $conn->query("CREATE TABLE IF NOT EXISTS student_requirement_upload_watch (
+                user_id INT NOT NULL, requirement_type VARCHAR(100) NOT NULL, file_len BIGINT NOT NULL DEFAULT 0,
+                PRIMARY KEY (user_id, requirement_type))");
+            $conn->query("CREATE TABLE IF NOT EXISTS student_requirement_upload_meta (id TINYINT NOT NULL PRIMARY KEY, initialized TINYINT(1) NOT NULL DEFAULT 0)");
+            $_SESSION['cv_sru_ready'] = 1;
+            return true;
+        } catch (\Throwable $e) { return false; }
+    }
+    // unviewed submissions of active (not archived) students
+    function cv_sru_count($conn) {
+        try {
+            if (!cv_sru_ensure($conn)) return 0;
+            $r = $conn->query("SELECT COUNT(*) AS total FROM student_requirement_upload_notifications n
+                               INNER JOIN users u ON u.id = n.user_id WHERE n.admin_viewed = 0 AND COALESCE(u.is_archived, 0) = 0");
+            $row = $r ? $r->fetch_assoc() : null;
+            return (int)($row['total'] ?? 0);
+        } catch (\Throwable $e) { return 0; }
+    }
+}
+try { $app_request_count += cv_sru_count($conn); } catch (\Throwable $e) { /* indicator keeps the application-request count */ }
+
 // Determine page title for sidebar
 $pageTitle = "Monitoring Dashboard";
 
@@ -3123,8 +3161,16 @@ window.addEventListener('pageshow', function (e) {
         });
     }
 
+    // NEW (this adjustment): new requirement submission → administrator.php opens that student's requirements
+    function openStudentUpload(id, uid) {
+        var view = g('cvViewStudentUpload');
+        if (typeof view === 'function') { view(parseInt(id, 10), parseInt(uid, 10)); return; }
+        goTo('administrator.php?open_student_upload=' + encodeURIComponent(id) + '&uid=' + encodeURIComponent(uid));
+    }
+
     function go(spec) {
         var p = String(spec || '').split(':');
+        if (p[0] === 'studentupload') { openStudentUpload(p[1], p[2]); return; }
         if (p[0] === 'notif') openNotif(p[1], p[2], p[3]);
         else if (p[0] === 'app') openApp(p[1]);
         else if (p[0] === 'recovery') openRecovery(p[1]);
@@ -3151,8 +3197,9 @@ window.addEventListener('pageshow', function (e) {
     if (params.get('open_notif')) spec = 'notif:' + params.get('open_notif') + ':' + (params.get('uid') || 0) + ':' + (params.get('type') || 'new_request');
     else if (params.get('open_app_request')) spec = 'app:' + params.get('open_app_request');
     else if (params.get('open_recovery')) spec = 'recovery:' + params.get('open_recovery');
+    else if (params.get('open_student_upload')) spec = 'studentupload:' + params.get('open_student_upload') + ':' + (params.get('uid') || 0);   // NEW (this adjustment)
     if (spec) {
-        ['open_notif', 'uid', 'type', 'open_app_request', 'open_recovery'].forEach(function (k) { params.delete(k); });
+        ['open_notif', 'uid', 'type', 'open_app_request', 'open_recovery', 'open_student_upload'].forEach(function (k) { params.delete(k); });
         if (window.history.replaceState) {
             var q = params.toString();
             window.history.replaceState({}, document.title, window.location.pathname + (q ? '?' + q : '') + window.location.hash);
@@ -3160,6 +3207,91 @@ window.addEventListener('pageshow', function (e) {
         var start = function () { setTimeout(function () { go(spec); }, 600); };
         if (document.readyState === 'complete') start(); else window.addEventListener('load', start);
     }
+})();
+</script>
+<!-- ══════════════════════════════════════════════════════════════════════
+     NEW (this adjustment) — NEW REQUIREMENT SUBMISSION POPUP + INDICATOR
+     Same design and behaviour as the other popups on this page (and as
+     company_validation.php's "uploaded new requirement document(s)" popup):
+     checked right away and then every 4 s; submissions that were already
+     waiting when the page opened do not pop up; each one pops up once (a
+     further file merged into it pops up again, listing everything); clicking
+     it opens that student's requirements (administrator.php). The Student Validation indicator is
+     kept in step with the Inbox total (application requests + submissions).
+     Ported from administrator.php: the submissions list, the detection and the
+     indicator count all come from administrator.php?student_upload_list=1, so
+     every admin page shows the same popups once, whichever page is open.
+     ══════════════════════════════════════════════════════════════════════ -->
+<script>
+(function () {
+    'use strict';
+    if (window._cvStudentUploadPopupReady) return;
+    window._cvStudentUploadPopupReady = true;
+    var SRU_ENDPOINT    = 'administrator.php?student_upload_list=1';
+    var SRU_POLL_MS     = 4000;
+    var SRU_TOAST_MS    = 7000;
+    var SRU_STORE_KEY   = 'cvStudentUploadKnown';
+    var SRU_STORE_FRESH = 45000;
+    var known = null, inFlight = false;
+    function esc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
+    function sigOf(r) { return String(r.id) + '@' + String(r.sig || ''); }
+    function readStore() {
+        try {
+            var o = JSON.parse(sessionStorage.getItem(SRU_STORE_KEY) || 'null');
+            if (!o || !Array.isArray(o.ids) || (Date.now() - (o.ts || 0)) > SRU_STORE_FRESH) return null;
+            return new Set(o.ids.map(String));
+        } catch (e) { return null; }
+    }
+    function writeStore() { if (!known) return; try { sessionStorage.setItem(SRU_STORE_KEY, JSON.stringify({ ids: Array.from(known), ts: Date.now() })); } catch (e) {} }
+    function layoutToasts() {
+        if (typeof window.cvLayoutTopToasts === 'function') { window.cvLayoutTopToasts(); return; }
+        var top = 30, undo = document.getElementById('undoToast');
+        if (undo && undo.classList.contains('show')) top = Math.max(top, undo.getBoundingClientRect().bottom + 12);
+        document.querySelectorAll('.cv-top-toast').forEach(function (el) { el.style.top = top + 'px'; top += el.offsetHeight + 12; });
+    }
+    function showPopup(r) {
+        var labels = (r.items || []).map(function (i) { return i.label || i.key || ''; }).filter(Boolean);
+        var what = labels.length === 1 ? 'a new requirement: ' + labels[0] : (labels.length + ' new requirements: ' + labels.join(', '));
+        var div = document.createElement('div');
+        div.className = 'cv-top-toast';
+        div.setAttribute('role', 'status');
+        div.innerHTML = '<i class="fas fa-file-arrow-up"></i><span><strong>' + esc(r.full_name || 'A student') + '</strong> submitted ' + esc(what) + ' \u2014 check the Application Requests inbox.</span>';
+        document.body.appendChild(div);
+        if (window.cvTagToast) window.cvTagToast(div, 'studentupload:' + r.id + ':' + r.user_id);   // clickable
+        layoutToasts();
+        requestAnimationFrame(function () { div.classList.add('show'); });
+        setTimeout(function () { div.classList.remove('show'); setTimeout(function () { div.remove(); layoutToasts(); }, 400); }, SRU_TOAST_MS);
+    }
+    function setBadge(count) {
+        var badge = document.getElementById('sidebarAppBadge');
+        if (!badge) return;
+        count = parseInt(count, 10) || 0;
+        badge.textContent = count;
+        badge.style.display = count > 0 ? 'inline-flex' : 'none';
+    }
+    function poll() {
+        if (inFlight || document.hidden) return;
+        inFlight = true;
+        fetch(SRU_ENDPOINT, { credentials: 'same-origin', cache: 'no-store' })
+            .then(function (r) { return r.json(); })
+            .then(function (d) {
+                inFlight = false;
+                if (!d || !d.success || !Array.isArray(d.rows)) return;
+                var now = new Set(d.rows.map(sigOf));
+                setBadge(d.count);
+                if (typeof window.cvRenderStudentUploads === 'function') window.cvRenderStudentUploads(d.rows);   // administrator.php's Inbox, if open
+                if (known === null) { known = readStore() || now; if (known === now) { writeStore(); return; } }
+                var fresh = d.rows.filter(function (r) { return !known.has(sigOf(r)); });
+                known = now; writeStore();
+                fresh.forEach(showPopup);
+            })
+            .catch(function () { inFlight = false; });
+    }
+    setTimeout(function () { poll(); setInterval(poll, SRU_POLL_MS); }, 0);
+    document.addEventListener('visibilitychange', function () { if (!document.hidden && known !== null) poll(); });
+    window.addEventListener('focus', function () { if (known !== null) poll(); });
+    window.addEventListener('pageshow', function (e) { if (e.persisted) poll(); });
+    window.addEventListener('pagehide', writeStore);
 })();
 </script>
 </body>
