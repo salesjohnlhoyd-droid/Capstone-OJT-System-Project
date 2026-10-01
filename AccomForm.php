@@ -8,6 +8,9 @@ require_once 'SIT_form_builder.php';
 /* ── Load the WAIVER form builder from its own file ── */
 require_once 'WAIVER_form_builder.php';
 
+/* ADJUSTMENT: preferred-placement match / on-hold application helpers (shared with company_list.php) */
+require_once __DIR__ . '/placement_hold.php';
+
 /* ── Load the CONTRACT form builder from its own file ── */
 require_once 'CONTRACT_form_builder.php';
 
@@ -88,6 +91,38 @@ function splitFullNameParts(string $full): array {
     return [$first, $middle, $last];
 }
 
+/* ADJUSTMENT: every picture selected for a requirement is kept as its own record
+   (table requirement_files, written by submit_requirements.php — same idea as CompanyForm.php's
+   one-row-per-file storage). These helpers list them so the card can show ALL the pictures. */
+function accomEnsureReqFilesTable(mysqli $conn): void {
+    static $done = false;
+    if ($done) return;
+    $conn->query("CREATE TABLE IF NOT EXISTS requirement_files (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        user_id INT NOT NULL,
+        requirement_type VARCHAR(64) NOT NULL,
+        sort_order INT NOT NULL DEFAULT 0,
+        file_name LONGBLOB NOT NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        KEY idx_user_type (user_id, requirement_type)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+    $done = true;
+}
+
+/** ids of the individually stored pictures of one requirement (empty unless there are 2 or more) */
+function accomReqPartIds(mysqli $conn, int $user_id, string $key): array {
+    accomEnsureReqFilesTable($conn);
+    $ids = [];
+    $st = $conn->prepare("SELECT id FROM requirement_files WHERE user_id=? AND requirement_type=? ORDER BY sort_order ASC, id ASC");
+    if (!$st) return $ids;
+    $st->bind_param("is", $user_id, $key);
+    $st->execute();
+    $res = $st->get_result();
+    while ($r = $res->fetch_assoc()) $ids[] = (int)$r['id'];
+    $st->close();
+    return count($ids) > 1 ? $ids : [];
+}
+
 /**
  * Reads the assigned company's real profile info (company name,
  * address, telephone, contact person, position) directly from
@@ -138,13 +173,220 @@ function fetchCompanyInformation(mysqli $conn, int $company_user_id): ?array {
     return $row;
 }
 
+/* ============================================================
+   ADJUSTMENT: SCHEDULE MULTI-SELECT (MON–FRI) + OJT COORDINATOR HELPERS
+   ------------------------------------------------------------
+   getScheduleWeekdays()       -> the five selectable days (Mon–Fri) and
+                                  their acronyms (M, T, W, Th, F).
+   parseScheduleValue()        -> reads a saved schedule value back into
+                                  the selected days ("MWF" -> M, W, F).
+                                  "None" and legacy free-text values that
+                                  can't be read as Mon–Fri acronyms are
+                                  handled too, so nothing saved is lost.
+   renderScheduleDropdown()    -> the multi-select day dropdown. The
+                                  student ticks any of the five days (or
+                                  "None"); the acronym is built from the
+                                  ticked days and saved via a hidden input.
+   fetchAdminCoordinators()    -> existing admin accounts (admins table) used
+                                  to fill the OJT Coordinator dropdown.
+   ============================================================ */
+function getScheduleWeekdays(): array {
+    return [
+        'M'  => 'Monday',
+        'T'  => 'Tuesday',
+        'W'  => 'Wednesday',
+        'Th' => 'Thursday',
+        'F'  => 'Friday',
+    ];
+}
+
+function parseScheduleValue(string $value): array {
+    $value  = trim($value);
+    $result = ['none' => false, 'days' => [], 'legacy' => ''];
+    if ($value === '') return $result;
+    if (strcasecmp($value, 'None') === 0) { $result['none'] = true; return $result; }
+
+    $known  = getScheduleWeekdays();
+    $rest   = $value;
+    $found  = [];
+    while ($rest !== '') {
+        if (stripos($rest, 'Th') === 0)      { $found['Th'] = true; $rest = substr($rest, 2); }
+        elseif (stripos($rest, 'M') === 0)   { $found['M']  = true; $rest = substr($rest, 1); }
+        elseif (stripos($rest, 'T') === 0)   { $found['T']  = true; $rest = substr($rest, 1); }
+        elseif (stripos($rest, 'W') === 0)   { $found['W']  = true; $rest = substr($rest, 1); }
+        elseif (stripos($rest, 'F') === 0)   { $found['F']  = true; $rest = substr($rest, 1); }
+        else { $found = []; break; }
+    }
+    if (empty($found)) { $result['legacy'] = $value; return $result; }
+    foreach ($known as $acr => $name) {
+        if (isset($found[$acr])) $result['days'][] = $acr;
+    }
+    return $result;
+}
+
+function renderScheduleDropdown(string $name, string $id, string $current, string $reqLabel = ''): string {
+    $p        = parseScheduleValue($current);
+    $weekdays = getScheduleWeekdays();
+
+    if ($p['none'])                 { $hidden = 'None'; }
+    elseif (!empty($p['days']))     { $hidden = implode('', $p['days']); }
+    else                            { $hidden = $p['legacy']; }
+
+    $html  = '<div class="sched-dd" data-sched-dd>';
+    $html .= '<input type="hidden" name="' . htmlspecialchars($name) . '" id="' . htmlspecialchars($id) . '" value="' . htmlspecialchars($hidden) . '"' . ($reqLabel !== '' ? ' data-req-label="' . htmlspecialchars($reqLabel) . '"' : '') . '>';
+    $html .= '<button type="button" class="sched-dd-btn" aria-haspopup="true" aria-expanded="false">';
+    $html .= '<span class="sched-dd-text"></span></button>';
+    $html .= '<div class="sched-dd-panel" role="group">';
+    $html .= '<label class="sched-dd-opt sched-dd-none"><input type="checkbox" value="None"' . ($p['none'] ? ' checked' : '') . '> <span>None</span></label>';
+    foreach ($weekdays as $acr => $full) {
+        $chk = in_array($acr, $p['days'], true) ? ' checked' : '';
+        $html .= '<label class="sched-dd-opt"><input type="checkbox" value="' . htmlspecialchars($acr) . '"' . $chk . '> <span>' . htmlspecialchars($full) . '</span> <em>' . htmlspecialchars($acr) . '</em></label>';
+    }
+    $html .= '</div></div>';
+    return $html;
+}
+
+/* ============================================================
+   ADJUSTMENT: VERIFIED COMPANIES FOR "PREFERENCE FOR PLACEMENT"
+   ------------------------------------------------------------
+   Same source as company_list.php: users with role = 'company' and
+   company_validation_status = 'verified', joined to
+   company_information (name, address, telephone, contact person,
+   position) and, as a telephone fallback, company_profile. Company
+   name falls back to the account's first + last name exactly like
+   company_list.php does.
+   ============================================================ */
+function fetchVerifiedCompanies(mysqli $conn): array {
+    $list = [];
+    $queries = [
+        "SELECT u.id, u.first_name, u.last_name,
+                ci.company AS company_name, ci.company_address AS company_address,
+                ci.telephone AS ci_tel, cp.telephone AS cp_tel,
+                ci.contact_first_name, ci.contact_middle_initial, ci.contact_last_name,
+                ci.position AS position
+         FROM users u
+         LEFT JOIN company_information ci ON ci.user_id = u.id
+         LEFT JOIN company_profile cp ON cp.user_id = u.id
+         WHERE u.role = 'company' AND u.company_validation_status = 'verified'",
+        "SELECT u.id, u.first_name, u.last_name,
+                ci.company AS company_name, ci.company_address AS company_address,
+                ci.telephone AS ci_tel, NULL AS cp_tel,
+                ci.contact_first_name, ci.contact_middle_initial, ci.contact_last_name,
+                ci.position AS position
+         FROM users u
+         LEFT JOIN company_information ci ON ci.user_id = u.id
+         WHERE u.role = 'company' AND u.company_validation_status = 'verified'",
+    ];
+    $res = null;
+    foreach ($queries as $q) {
+        try { $res = $conn->query($q); } catch (Throwable $e) { $res = null; }
+        if ($res) break;
+    }
+    if ($res) {
+        while ($r = $res->fetch_assoc()) {
+            $id = (int)$r['id'];
+            if (isset($list[$id])) continue;
+            $name = trim((string)($r['company_name'] ?? ''));
+            if ($name === '') $name = trim(($r['first_name'] ?? '') . ' ' . ($r['last_name'] ?? ''));
+            if ($name === '') continue;
+            $tel = trim((string)($r['ci_tel'] ?? ''));
+            if ($tel === '') $tel = trim((string)($r['cp_tel'] ?? ''));
+            $list[$id] = [
+                'id'      => $id,
+                'name'    => $name,
+                'address' => trim((string)($r['company_address'] ?? '')),
+                'tel'     => $tel,
+                'first'   => trim((string)($r['contact_first_name'] ?? '')),
+                'middle'  => trim((string)($r['contact_middle_initial'] ?? '')),
+                'last'    => trim((string)($r['contact_last_name'] ?? '')),
+                'position'=> trim((string)($r['position'] ?? '')),
+            ];
+        }
+    }
+    usort($list, function ($a, $b) { return strcasecmp($a['name'], $b['name']); });
+    return array_values($list);
+}
+
+function fetchAdminCoordinators(mysqli $conn): array {
+    /* FIX: the admin accounts live in the `admins` table (first_name,
+       middle_name, last_name, is_active — the same table monitoring.php
+       creates/lists admin accounts from), NOT in `users`. Reading `users`
+       is why this dropdown came back empty. Deactivated admins
+       (is_active = 0) are left out. The `users` table (role = admin) is
+       kept only as a last-resort fallback for older installations. */
+    $list = [];
+
+    $has_active = false;
+    $col = $conn->query("SHOW COLUMNS FROM admins LIKE 'is_active'");
+    if ($col && $col->num_rows > 0) $has_active = true;
+
+    $sql = "SELECT id, first_name, middle_name, last_name FROM admins"
+         . ($has_active ? " WHERE (is_active = 1 OR is_active IS NULL)" : "")
+         . " ORDER BY last_name ASC, first_name ASC";
+    $res = $conn->query($sql);
+
+    if (!$res || $res->num_rows === 0) {
+        $res = $conn->query("
+            SELECT id, first_name, middle_name, last_name
+            FROM users
+            WHERE LOWER(role) IN ('admin', 'administrator')
+            ORDER BY last_name ASC, first_name ASC
+        ");
+    }
+
+    if ($res) {
+        while ($r = $res->fetch_assoc()) {
+            $first  = trim($r['first_name']  ?? '');
+            $middle = trim($r['middle_name'] ?? '');
+            $last   = trim($r['last_name']   ?? '');
+            $full   = trim($first . ' ' . ($middle !== '' ? $middle . ' ' : '') . $last);
+            if ($full === '') continue;
+            $list[] = [
+                'id'     => (int)$r['id'],
+                'first'  => $first,
+                'middle' => $middle,
+                'last'   => $last,
+                'full'   => $full,
+            ];
+        }
+    }
+    return $list;
+}
+
 if ($_SESSION['role'] != "student") {
     header("Location: login.php");
     exit;
 }
 
 $user_id = $_SESSION['user_id'];
+
+/* ADJUSTMENT: per-file upload limit for requirement uploads — same value as CompanyForm.php's
+   $reqMaxFileSizeMB; the PHP check, the JS validation and the on-page hint all read this one setting. */
+$reqMaxFileSizeMB = 5;
 date_default_timezone_set("Asia/Manila");
+
+/* ADJUSTMENT: an application put on hold by company_list.php (the student replaced their
+   Preference for Placement with the selected company's data) is sent automatically as soon
+   as ALL requirements are Verified again. Checked on every load and on every status poll. */
+try { ph_release_if_ready($conn, (int)$user_id); } catch (\Throwable $e) {}
+$placement_hold = null;
+try { $placement_hold = ph_get_hold($conn, (int)$user_id); } catch (\Throwable $e) {}
+
+/* ADJUSTMENT: streams ONE of the individually stored pictures of a requirement (own pictures only) */
+if (isset($_GET['stream_req_file'])) {
+    accomEnsureReqFilesTable($conn);
+    $sr_id = (int)$_GET['stream_req_file'];
+    $sr = $conn->prepare("SELECT file_name FROM requirement_files WHERE id=? AND user_id=? LIMIT 1");
+    $sr->bind_param("ii", $sr_id, $user_id);
+    $sr->execute();
+    $sr_row = $sr->get_result()->fetch_assoc();
+    $sr->close();
+    if (!$sr_row || $sr_row['file_name'] === null || $sr_row['file_name'] === '') { http_response_code(404); exit; }
+    header('Content-Type: image/jpeg');
+    header('Cache-Control: private, max-age=3600');
+    echo $sr_row['file_name'];
+    exit;
+}
 
 /* ============================================================
  * AJAX ENDPOINT — returns live requirement statuses as JSON
@@ -188,6 +430,7 @@ if (isset($_GET['poll_status'])) {
             'has_file' => $has_file,
             'is_pdf'   => $is_pdf,
             'img_src'  => $img_src,
+            'file_ids' => ($has_file && !$is_pdf) ? accomReqPartIds($conn, (int)$user_id, $k) : [], // ADJUSTMENT: all saved pictures
         ];
     }
     echo json_encode($out);
@@ -284,9 +527,62 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_profile_info']))
     $day_sched     = trim($_POST['day_sched']     ?? '');
     $evening_sched = trim($_POST['evening_sched'] ?? '');
 
-    $ojt_coordinator_first  = trim($_POST['ojt_coordinator_first']  ?? '');
-    $ojt_coordinator_middle = trim($_POST['ojt_coordinator_middle'] ?? '');
-    $ojt_coordinator_last   = trim($_POST['ojt_coordinator_last']   ?? '');
+    $ojt_coordinator_first  = '';
+    $ojt_coordinator_middle = '';
+    $ojt_coordinator_last   = '';
+
+    /* ADJUSTMENT: OJT Coordinator is now chosen from a dropdown of the
+       existing admin accounts. The posted value is the admin's user id;
+       the name parts are resolved server-side from the users table and
+       still saved into the same three ojt_coordinator_* columns, so every
+       other part of the system that reads them keeps working unchanged.
+       "__keep__" = a legacy coordinator name already saved in the DB that
+       doesn't match any admin account — it is left exactly as it was. */
+    $ojt_coordinator_id = trim($_POST['ojt_coordinator_id'] ?? '');
+    if ($ojt_coordinator_id === '__keep__') {
+        $kc = $conn->prepare("SELECT ojt_coordinator_first, ojt_coordinator_middle, ojt_coordinator_last FROM student_information WHERE user_id=? LIMIT 1");
+        if ($kc) {
+            $kc->bind_param("i", $user_id);
+            $kc->execute();
+            $kc_res = $kc->get_result();
+            $kc_row = $kc_res ? $kc_res->fetch_assoc() : null;
+            $kc->close();
+            if ($kc_row) {
+                $ojt_coordinator_first  = (string)($kc_row['ojt_coordinator_first']  ?? '');
+                $ojt_coordinator_middle = (string)($kc_row['ojt_coordinator_middle'] ?? '');
+                $ojt_coordinator_last   = (string)($kc_row['ojt_coordinator_last']   ?? '');
+            }
+        }
+    } elseif ($ojt_coordinator_id !== '' && ctype_digit($ojt_coordinator_id)) {
+        foreach (fetchAdminCoordinators($conn) as $_adm) {
+            if ($_adm['id'] === (int)$ojt_coordinator_id) {
+                $ojt_coordinator_first  = $_adm['first'];
+                $ojt_coordinator_middle = $_adm['middle'];
+                $ojt_coordinator_last   = $_adm['last'];
+                break;
+            }
+        }
+    }
+
+    /* ADJUSTMENT: Day Schedule and Evening Schedule cannot both be "None".
+       (Also enforced on the client with a popup — this is the server-side
+       safety net.) */
+    if (strcasecmp($day_sched, 'None') === 0)     $day_sched     = 'None';
+    if (strcasecmp($evening_sched, 'None') === 0) $evening_sched = 'None';
+    if ($day_sched === 'None' && $evening_sched === 'None') {
+        $_sched_msg = 'Day Schedule and Evening Schedule cannot both be set to "None". Please select at least one schedule.';
+        $_sched_is_ajax = (
+            (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) === 'xmlhttprequest')
+            || (isset($_POST['ajax_request']) && $_POST['ajax_request'] === '1')
+        );
+        if ($_sched_is_ajax) {
+            header('Content-Type: application/json');
+            echo json_encode(['success' => false, 'message' => $_sched_msg]);
+            exit;
+        }
+        header("Location: AccomForm.php?msg=schedule_none");
+        exit;
+    }
 
     $mobile_no         = trim($_POST['mobile_no']         ?? '');
     $mother_first      = trim($_POST['mother_first']      ?? '');
@@ -306,6 +602,28 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_profile_info']))
     $pref_contact_person_middle = trim($_POST['contact_person_middle'] ?? '');
     $pref_contact_person_last   = trim($_POST['contact_person_last']   ?? '');
     $pref_position       = trim($_POST['position']        ?? '');
+
+    /* ADJUSTMENT: when the student picked a verified company from the
+       dropdown (and did NOT tick "Other company"), the placement details
+       are taken from that company's own record, so they always match the
+       official data. With "Other company" ticked, the typed fields above
+       are used exactly as before. */
+    $pref_company_id  = trim($_POST['pref_company_id'] ?? '');
+    $pref_other_company = !empty($_POST['pref_other_company']);
+    if (!$pref_other_company && $pref_company_id !== '' && ctype_digit($pref_company_id)) {
+        foreach (fetchVerifiedCompanies($conn) as $_vc) {
+            if ($_vc['id'] === (int)$pref_company_id) {
+                $pref_company_name          = $_vc['name'];
+                $pref_company_address       = $_vc['address'];
+                $pref_telephone             = $_vc['tel'];
+                $pref_contact_person_first  = $_vc['first'];
+                $pref_contact_person_middle = $_vc['middle'];
+                $pref_contact_person_last   = $_vc['last'];
+                $pref_position              = $_vc['position'];
+                break;
+            }
+        }
+    }
 
     $guardian_other_first  = trim($_POST['guardian_other_first']  ?? '');
     $guardian_other_middle = trim($_POST['guardian_other_middle'] ?? '');
@@ -334,10 +652,119 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['save_profile_info']))
     if (isset($_FILES['student_photo']) && $_FILES['student_photo']['error'] === UPLOAD_ERR_OK) {
         $allowed_photo_types = ['image/jpeg'];
         $photo_mime = mime_content_type($_FILES['student_photo']['tmp_name']);
-        if (in_array($photo_mime, $allowed_photo_types) && $_FILES['student_photo']['size'] <= 5 * 1024 * 1024) {
+        if (in_array($photo_mime, $allowed_photo_types) && $_FILES['student_photo']['size'] <= $reqMaxFileSizeMB * 1024 * 1024) {
             $photo_data    = file_get_contents($_FILES['student_photo']['tmp_name']);
             $has_new_photo = ($photo_data !== false && strlen($photo_data) > 0);
         }
+    }
+
+    /* ============================================================
+       ADJUSTMENT: ALL FIELDS REQUIRED (server-side safety net)
+       ------------------------------------------------------------
+       Every field on the Student Info form must be filled in before
+       anything is saved (also enforced on the client with a popup).
+       The only fields left optional are the Middle Name fields, which
+       are labelled "(optional)" because not everyone has a middle name.
+       - 2x2 Photo: required until a photo has been uploaded (or again
+         after a Denied one).
+       - Preference for Placement: a verified company must be selected,
+         or "Other company" ticked with all details typed in. Students
+         already registered/deployed to a company have these fields
+         locked and auto-filled by the system, so they are not re-checked.
+       ============================================================ */
+    $_req_missing = [];
+    $_req_check = function ($value, $label) use (&$_req_missing) {
+        if (trim((string)$value) === '') $_req_missing[] = $label;
+    };
+
+    $_req_check($age,           'Age');
+    $_req_check($sex,           'Sex');
+    $_req_check($civil_status,  'Civil Status');
+    $_req_check($religion,      'Religion');
+    $_req_check($mobile_no,     'Mobile Number');
+    $_req_check($home_address,  'Home Address');
+    $_req_check($mother_first,  "Mother's First Name");
+    $_req_check($mother_last,   "Mother's Last Name");
+    $_req_check($father_first,  "Father's First Name");
+    $_req_check($father_last,   "Father's Last Name");
+    $_req_check($guardian_type, 'Guardian');
+    $_req_check($guardian_no,   'Guardian No.');
+    if ($guardian_type === 'Other') {
+        $_req_check($guardian_other_first, "Guardian's First Name");
+        $_req_check($guardian_other_last,  "Guardian's Last Name");
+    }
+    if (trim($ojt_coordinator_first) === '' && trim($ojt_coordinator_last) === '') {
+        $_req_missing[] = 'OJT Coordinator Name';
+    }
+    $_req_check($college,       'College');
+    $_req_check($major,         'Major');
+    $_req_check($year_section,  'Year and Section');
+    $_req_check($day_sched,     'Day Schedule');
+    $_req_check($evening_sched, 'Evening Schedule');
+
+    /* 2x2 photo: required if none is on file yet, or the last one was Denied */
+    $_req_has_photo    = false;
+    $_req_photo_status = '';
+    $_req_ph = $conn->prepare("SELECT (student_photo IS NOT NULL AND LENGTH(student_photo) > 0) AS has_photo, photo_status FROM student_information WHERE user_id=? LIMIT 1");
+    if ($_req_ph) {
+        $_req_ph->bind_param("i", $user_id);
+        $_req_ph->execute();
+        $_req_ph_res = $_req_ph->get_result();
+        $_req_ph_row = $_req_ph_res ? $_req_ph_res->fetch_assoc() : null;
+        $_req_ph->close();
+        if ($_req_ph_row) {
+            $_req_has_photo    = !empty($_req_ph_row['has_photo']);
+            $_req_photo_status = (string)($_req_ph_row['photo_status'] ?? '');
+        }
+    }
+    if (!$has_new_photo && (!$_req_has_photo || $_req_photo_status === 'Denied')) {
+        $_req_missing[] = '2x2 Photo (JPEG image, max ' . $reqMaxFileSizeMB . ' MB)';
+    }
+
+    /* Preference for Placement (skipped when already registered/deployed) */
+    $_req_assigned = false;
+    $_req_ca = $conn->prepare("SELECT company_id FROM ojt_assignments WHERE student_id=? LIMIT 1");
+    if ($_req_ca) {
+        $_req_ca->bind_param("i", $user_id);
+        $_req_ca->execute();
+        $_req_ca_res = $_req_ca->get_result();
+        $_req_ca_row = $_req_ca_res ? $_req_ca_res->fetch_assoc() : null;
+        $_req_ca->close();
+        $_req_assigned = !empty($_req_ca_row['company_id']);
+    }
+    if (!$_req_assigned) {
+        if ($pref_other_company) {
+            $_req_check($pref_company_name,          'Company Name');
+            $_req_check($pref_company_address,       'Company Address');
+            $_req_check($pref_contact_person_first,  "Contact Person's First Name");
+            $_req_check($pref_contact_person_last,   "Contact Person's Last Name");
+            $_req_check($pref_position,              'Position / Department');
+            $_req_check($pref_telephone,             'Telephone Number');
+        } else {
+            if ($pref_company_id === '' || !ctype_digit($pref_company_id) || trim($pref_company_name) === '') {
+                $_req_missing[] = 'Preferred Company (select one or tick Other company)';
+            }
+        }
+    }
+
+    if (!empty($_req_missing)) {
+        $_req_msg = 'Please complete all required fields before saving.';
+        $_req_is_ajax = (
+            (isset($_SERVER['HTTP_X_REQUESTED_WITH']) && strtolower($_SERVER['HTTP_X_REQUESTED_WITH']) === 'xmlhttprequest')
+            || (isset($_POST['ajax_request']) && $_POST['ajax_request'] === '1')
+        );
+        if ($_req_is_ajax) {
+            header('Content-Type: application/json');
+            echo json_encode([
+                'success' => false,
+                'title'   => 'Required Fields Missing',
+                'message' => $_req_msg,
+                'errors'  => array_values(array_map('htmlspecialchars', $_req_missing)),
+            ]);
+            exit;
+        }
+        header("Location: AccomForm.php?msg=required_missing");
+        exit;
     }
 
     $chk = $conn->prepare("SELECT id FROM student_information WHERE user_id=? LIMIT 1");
@@ -816,6 +1243,28 @@ $ojt_coordinator_full = trim(
     $ojt_coordinator_last_val
 );
 
+/* ADJUSTMENT: admin accounts for the OJT Coordinator dropdown, and which
+   one (if any) matches the coordinator already saved on this student.
+   Matching is done on first + last name (case-insensitive). A saved name
+   that doesn't match any admin account is kept as a "legacy" option so
+   existing data isn't lost or overwritten on the next save. */
+$admin_coordinators        = fetchAdminCoordinators($conn);
+$ojt_coordinator_selected  = '';
+$ojt_coordinator_is_legacy = false;
+if ($ojt_coordinator_first_val !== '' || $ojt_coordinator_last_val !== '') {
+    foreach ($admin_coordinators as $_adm) {
+        if (strcasecmp($_adm['first'], $ojt_coordinator_first_val) === 0
+            && strcasecmp($_adm['last'], $ojt_coordinator_last_val) === 0) {
+            $ojt_coordinator_selected = (string)$_adm['id'];
+            break;
+        }
+    }
+    if ($ojt_coordinator_selected === '') {
+        $ojt_coordinator_selected  = '__keep__';
+        $ojt_coordinator_is_legacy = true;
+    }
+}
+
 /* ============================================================
    Detect registration/deployment via ojt_assignments, and read the
    assigned company's real profile info.
@@ -876,6 +1325,13 @@ $contact_person_full = trim(
     $contact_person_last_val
 );
 
+/* ADJUSTMENT: remember whether the student has a REAL company assignment
+   (an ojt_assignments row) BEFORE the fallback below copies the student's
+   own saved placement preference into $sit_company. Previously that copied
+   preference made $has_ojt_assignment true for students who were never
+   registered/deployed, wrongly locking the Preference for Placement fields. */
+$has_real_assignment = !empty($_reg_company_id) || !empty($sit_company['company_name']);
+
 if (empty($sit_company['company_name']) && !empty($sit_extra['pref_company_name'])) {
     $sit_company = [
         'company_name'    => $sit_extra['pref_company_name']    ?? '',
@@ -886,7 +1342,7 @@ if (empty($sit_company['company_name']) && !empty($sit_extra['pref_company_name'
     ];
 }
 
-$has_ojt_assignment = !empty($_reg_company_id) || !empty($sit_company['company_name']);
+$has_ojt_assignment = $has_real_assignment;
 
 /* ============================================================
    PREFERENCE FOR PLACEMENT — DISPLAY VALUES
@@ -933,10 +1389,53 @@ if ($has_ojt_assignment && !empty($_pref_source['contact_person'])) {
     $pref_display_contact_last   = $contact_person_last_val;
 }
 
+/* ADJUSTMENT: single full-name value of the contact person, shown in one field
+   whenever the details come from a verified company (dropdown / locked);
+   the atomic first/middle/last inputs stay for "Other company" entry. */
+$pref_display_contact_full = trim(
+    ($pref_display_contact_first  !== '' ? $pref_display_contact_first  . ' ' : '') .
+    ($pref_display_contact_middle !== '' ? $pref_display_contact_middle . ' ' : '') .
+    $pref_display_contact_last
+);
+
 /* whether the Preference for Placement fields should be locked
    (read-only, like the student's name fields) because the student is
    already registered/deployed to an official company. */
 $lock_preference_fields = $has_ojt_assignment;
+
+/* ADJUSTMENT: verified-company dropdown state for Preference for Placement.
+   - Locked (already registered/deployed): the assigned company is shown
+     selected (dropdown disabled) and the read-only fields stay visible.
+   - Otherwise a saved company whose name matches a verified company is
+     pre-selected; a saved company that doesn't match is treated as an
+     "Other company" (checkbox ticked, fields shown with the saved values). */
+$verified_companies       = fetchVerifiedCompanies($conn);
+$pref_selected_company_id = 0;
+$pref_other_checked       = false;
+$pref_locked_legacy_name  = '';
+if ($lock_preference_fields) {
+    if (!empty($_reg_company_id)) {
+        foreach ($verified_companies as $_vc) {
+            if ($_vc['id'] === (int)$_reg_company_id) { $pref_selected_company_id = $_vc['id']; break; }
+        }
+    }
+    if ($pref_selected_company_id === 0) {
+        foreach ($verified_companies as $_vc) {
+            if (strcasecmp($_vc['name'], trim((string)$pref_display_company_name)) === 0) { $pref_selected_company_id = $_vc['id']; break; }
+        }
+    }
+    if ($pref_selected_company_id === 0) $pref_locked_legacy_name = trim((string)$pref_display_company_name);
+} elseif (trim((string)$pref_display_company_name) !== '') {
+    foreach ($verified_companies as $_vc) {
+        if (strcasecmp($_vc['name'], trim((string)$pref_display_company_name)) === 0) { $pref_selected_company_id = $_vc['id']; break; }
+    }
+    if ($pref_selected_company_id === 0) $pref_other_checked = true;
+}
+/* ADJUSTMENT: the placement fields are shown (and locked / read-only) as soon
+   as a verified company is selected, shown and editable when "Other company"
+   is ticked, and hidden when neither applies. */
+$pref_fields_readonly = ($lock_preference_fields || ($pref_selected_company_id > 0 && !$pref_other_checked));
+$pref_show_fields     = ($lock_preference_fields || $pref_other_checked || $pref_selected_company_id > 0);
 
 $sit_data = [
     'last_name'       => $last   ?? '',
@@ -972,12 +1471,42 @@ $sit_data = [
     'position'        => $sit_company['position']        ?? '',
 ];
 
+/* ADJUSTMENT: look up the Total Hour Requirement of the student's course in
+   course_offerings (managed in course_offering.php) so it can be passed to
+   WAIVER_form_builder.php as 'ojt_hours'. Left blank if the course has no
+   offering yet (the waiver then shows its normal blank line). */
+$waiver_total_hours = '';
+if (trim((string)($course ?? '')) !== '') {
+    try {
+        $_co_stmt = $conn->prepare("SELECT total_hours FROM course_offerings WHERE LOWER(TRIM(course)) = LOWER(TRIM(?)) LIMIT 1");
+        if ($_co_stmt) {
+            $_co_course = (string)$course;
+            $_co_stmt->bind_param('s', $_co_course);
+            $_co_stmt->execute();
+            $_co_stmt->bind_result($_co_hours);
+            if ($_co_stmt->fetch() && (int)$_co_hours > 0) {
+                $waiver_total_hours = (string)(int)$_co_hours;
+            }
+            $_co_stmt->close();
+        }
+    } catch (\Throwable $e) { /* course_offerings not available — leave blank */ }
+}
+
+/* ADJUSTMENT: FIELDS PROVIDED BY THE ADMIN (admin_student_list.php) ARE LOCKED.
+   admin_student_list.php manages first/middle/last name, course, major, section and
+   email/campus for every student. On this form the name and Course fields were already
+   read-only; Major and Year and Section (the admin's "Section") are now locked as well
+   once they hold a value. Every other field on this form is not managed by the admin
+   list and stays editable. The value is still submitted with the form (read-only, not
+   disabled). */
+$_lk = function ($v): string { return trim((string)($v ?? '')) !== '' ? ' readonly' : ''; };
+
 /* ================= BUILD WAIVER FORM DATA ================= */
 $waiver_data = [
     'first_name'    => $first  ?? '',
     'middle_name'   => $middle ?? '',
     'last_name'     => $last   ?? '',
-    'ojt_hours'     => '',
+    'ojt_hours'     => $waiver_total_hours,
     'ojt_start'     => '',
     'ojt_end'       => '',
     'company'       => $sit_company['company_name']    ?? '',
@@ -1200,7 +1729,7 @@ if (isset($_GET['accom_preview'])) {
 }
 
 $initial_tab = 'documents-page';
-if (isset($_GET['msg']) && $_GET['msg'] === 'profile_saved') {
+if (isset($_GET['msg']) && ($_GET['msg'] === 'profile_saved' || $_GET['msg'] === 'required_missing')) {
     $initial_tab = 'digital-page';
 }
 
@@ -1740,6 +2269,79 @@ if (isset($_GET['msg']) && $_GET['msg'] === 'profile_saved') {
             padding-right: 32px; cursor: pointer;
         }
 
+        /* ADJUSTMENT: Preference for Placement — Contact Person (full name or
+           First/Middle/Last), Position / Department and Telephone Number sit in
+           one horizontally aligned row (inputs share the same bottom line). In
+           full-name mode the Full Name field auto-fits the length of the name. */
+        .pref-contact-row { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 14px 20px; }
+        .pref-contact-row > .pref-contact-person { flex: 2 1 380px; min-width: 0; }
+        .pref-contact-row > .pref-contact-person.is-fullname { flex: 0 1 auto; }
+        .pref-contact-row > .pref-contact-cell { flex: 1 1 180px; min-width: 0; }
+        #prefContactFull { width: auto; min-width: 200px; max-width: 100%; }
+        /* Every label in the row is a single fixed-height line (the "(optional)"
+           tag stays inline), so First / Middle / Last, Position / Department and
+           Telephone Number all have their labels and input boxes on the same lines. */
+        .pref-contact-row .pinfo-field label { display: block; white-space: nowrap; line-height: 16px; height: 16px; }
+        .pref-contact-row .pinfo-field label .opt-label { display: inline; white-space: nowrap; }
+        .pref-contact-row #prefContactAtomicWrap { align-items: end; }
+        .pref-contact-row .pinfo-field input { height: 40px; box-sizing: border-box; }
+
+        /* ADJUSTMENT: OJT Coordinator dropdown auto-sizes to the length of the
+           selected admin name (width is set by the script below; without
+           script it simply fits its longest option). */
+        #ojtCoordinatorSelect { width: auto; min-width: 220px; max-width: 100%; align-self: flex-start; }
+
+        /* ADJUSTMENT: Day / Evening Schedule multi-select (Mon–Fri) —
+           styled to look like the existing .pinfo-field select. */
+        .sched-dd { position: relative; }
+        .sched-dd-btn {
+            width: 100%; padding: 9px 32px 9px 12px; border: 1px solid var(--grid-border);
+            border-radius: 0; font-size: 13.5px; color: var(--text); background: #fff;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; text-align: left;
+            cursor: pointer; transition: border-color 0.2s, box-shadow 0.2s; margin-bottom: 0;
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%231B2A4A' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+            background-repeat: no-repeat; background-position: right 12px center;
+        }
+        .sched-dd-btn:focus, .sched-dd.open .sched-dd-btn {
+            outline: none; border-color: var(--grid-navy);
+            box-shadow: 0 0 0 3px rgba(27,42,74,0.08);
+        }
+        .sched-dd-text.placeholder { color: var(--grid-muted); }
+        .sched-dd-panel {
+            display: none; position: absolute; left: 0; right: 0; top: 100%;
+            z-index: 60; background: #fff; border: 1px solid var(--grid-navy); border-top: none;
+            box-shadow: 0 6px 16px rgba(27,42,74,0.12);
+        }
+        .sched-dd.open .sched-dd-panel { display: block; }
+        .sched-dd-opt {
+            display: flex; align-items: center; gap: 10px; padding: 9px 12px;
+            font-size: 13.5px; font-weight: 400; color: var(--text);
+            text-transform: none; letter-spacing: 0; cursor: pointer;
+            border-bottom: 1px solid var(--grid-border-soft); margin: 0;
+        }
+        .sched-dd-opt:last-child { border-bottom: none; }
+        .sched-dd-opt:hover { background: #F3F5F9; }
+        .sched-dd-opt input[type="checkbox"] {
+            width: 15px; height: 15px; margin: 0; padding: 0; accent-color: var(--grid-navy); cursor: pointer;
+        }
+        .sched-dd-opt em { margin-left: auto; font-style: normal; font-size: 12px; font-weight: 600; color: var(--grid-muted); }
+        .sched-dd-none span { font-weight: 600; }
+
+        /* ADJUSTMENT: Preference for Placement — verified company dropdown
+           with the "Other company" checkbox on its right. */
+        .pref-company-row { display: flex; align-items: center; gap: 16px; }
+        .pref-company-row select { flex: 1; min-width: 0; }
+        .pref-company-row select:disabled { background-color: #F3F5F9; color: var(--grid-muted); cursor: not-allowed; }
+        .pinfo-field .pref-other-check {
+            display: inline-flex; align-items: center; gap: 8px; margin: 0; white-space: nowrap;
+            font-size: 13.5px; font-weight: 500; color: var(--text);
+            text-transform: none; letter-spacing: 0; cursor: pointer;
+        }
+        .pinfo-field .pref-other-check input[type="checkbox"] {
+            width: 16px; height: 16px; margin: 0; padding: 0; accent-color: var(--grid-navy); cursor: pointer;
+        }
+        .pinfo-field .pref-other-check input[type="checkbox"]:disabled { cursor: not-allowed; }
+
         /* Sub-section titles (Mother's Name, Father's Name, Guardian, ...)
            UPDATED: the coloured left bar was removed — a plain uppercase
            navy label with a thin rule underneath, like the admin page. */
@@ -1754,6 +2356,14 @@ if (isset($_GET['msg']) && $_GET['msg'] === 'profile_saved') {
         .opt-label {
             font-size: 10px; font-weight: 400; color: var(--grid-muted);
             text-transform: none; letter-spacing: 0; margin-left: 4px;
+        }
+
+        /* ADJUSTMENT: ALL FIELDS REQUIRED — red asterisk on required labels and a
+           red outline on any field the validation popup reports as missing. */
+        .req-star { color: var(--grid-red); font-weight: 700; margin-left: 2px; }
+        .field-missing {
+            border-color: var(--grid-red) !important;
+            box-shadow: 0 0 0 3px rgba(160,42,42,0.12) !important;
         }
 
         .pinfo-save-btn {
@@ -1982,6 +2592,125 @@ if (isset($_GET['msg']) && $_GET['msg'] === 'profile_saved') {
             100% { outline: 2px solid transparent; box-shadow: none; }
         }
         .rce-status-updated { animation: rce-status-flash 1.4s ease-in-out; }
+
+
+        /* ══ ADJUSTMENT: REQUIREMENT CARDS — DESIGN MATCHED TO administrator.php ══
+           Same gallery-card look as the administrator's requirement gallery
+           (.cv-gallery / .cv-req-card): the document preview on top with the
+           status pill in its top-right corner, a dashed "No file yet" /
+           "Rejected" placeholder when there is nothing to show, then the
+           requirement name, the rejection remark and the upload controls below,
+           plus the "N requirements · N verified …" summary line with a progress
+           bar. Every element id / class the page's JavaScript uses is unchanged. */
+        .cv-req-summary { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px 16px; margin: 16px auto 0; max-width: 730px; }
+        .cv-req-summary-text { font-size: 13px; color: #3E4963; }
+        .cv-req-summary-text b { color: #1B2A4A; }
+        .cv-progress { display: flex; align-items: center; gap: 10px; }
+        .cv-progress-bar { width: 120px; height: 8px; border-radius: 0; background: #C9D3E6; overflow: hidden; }
+        .cv-progress-fill { height: 8px; background: #2C5A2C; transition: width 0.3s ease; }
+        .cv-progress-pct { font-size: 12px; color: #3E4963; white-space: nowrap; }
+
+        /* ADJUSTMENT: three-by-three layout and card size matched to CompanyForm.php — three cards per
+           row in a 730px-wide grid (the width CompanyForm's requirement grid has), so each card is the
+           same size and the eight requirements sit in a 3 x 3 arrangement. Narrower screens fall back
+           to fewer columns. */
+        .requirements-container { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin: 14px auto 0; max-width: 730px; }
+        @media (max-width: 900px) { .requirements-container { grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); max-width: none; } }
+        .req-card-e { border: 1px solid #A3AFC7; box-shadow: 0 1px 3px rgba(27,42,74,0.16); overflow: hidden; }
+        .req-card-e:hover { border-color: #A3AFC7; }
+
+        .req-card-e .rce-preview-area { position: relative; flex: 1 0 176px; min-height: 176px; background: #E4EAF4; display: flex; align-items: center; justify-content: center; }
+        .req-card-e .rce-preview-area .rce-preview-container { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; }
+        .req-card-e .rce-preview-area .rce-preview-img { position: absolute; top: 0; left: 0; width: 100%; height: 100%; margin: 0; border: none; border-radius: 0; object-fit: cover; object-position: top center; cursor: pointer; }
+        .req-card-e .rce-preview-area .rce-pdf-thumb { margin: 0; }
+
+        /* status pill — top-right of the preview (info button stays top-left) */
+        .req-card-e .rce-header { position: absolute; top: 10px; left: 10px; right: 10px; z-index: 6; padding: 0; background: none; border: none; pointer-events: none; gap: 0; }
+        .req-card-e .rce-header .rce-info-btn { order: -1; margin-right: auto; pointer-events: auto; }
+        .req-card-e .rce-header .rce-status-icon { font-size: 11px; padding: 3px 0 3px 9px; box-shadow: 0 1px 2px rgba(0,0,0,0.12); }
+        .req-card-e .rce-header .rce-status-label { flex: none; font-size: 11px; letter-spacing: 0; text-transform: none; padding: 3px 9px 3px 4px; box-shadow: 0 1px 2px rgba(0,0,0,0.12); }
+        .rce-header.hdr-verified .rce-status-icon, .rce-header.hdr-verified .rce-status-label { background: #D9E8D2; color: #2C5A2C; }
+        .rce-header.hdr-pending  .rce-status-icon, .rce-header.hdr-pending  .rce-status-label { background: #F3E7B5; color: #7A5A0B; }
+        .rce-header.hdr-denied   .rce-status-icon, .rce-header.hdr-denied   .rce-status-label { background: #F2D5D1; color: #A02A2A; }
+
+        /* placeholders (shown when the preview container is empty / hidden) */
+        .req-card-e .rce-no-file, .req-card-e .rce-rej-placeholder { display: none; position: absolute; top: 14px; right: 14px; bottom: 14px; left: 14px; box-sizing: border-box; border-radius: 0; flex-direction: column; align-items: center; justify-content: center; gap: 6px; font-size: 12px; font-weight: 600; text-align: center; line-height: 1.4; }
+        .req-card-e .rce-no-file { border: 1px dashed #A3AFC7; color: #3E4963; }
+        .req-card-e .rce-no-file i { font-size: 20px; }
+        .req-card-e .rce-rej-placeholder { border: 1px dashed #D49A94; background: #F2D5D1; color: #A02A2A; gap: 8px; }
+        .req-card-e .rce-rej-placeholder i { font-size: 24px; }
+        .req-card-e .rce-preview-container[style*="display:none"] ~ .rce-no-file,
+        .req-card-e .rce-preview-container[style*="display: none"] ~ .rce-no-file { display: flex; }
+        .req-card-e[data-status="Denied"] .rce-preview-container[style*="display:none"] ~ .rce-no-file,
+        .req-card-e[data-status="Denied"] .rce-preview-container[style*="display: none"] ~ .rce-no-file { display: none; }
+        .req-card-e[data-status="Denied"] .rce-preview-container[style*="display:none"] ~ .rce-rej-placeholder,
+        .req-card-e[data-status="Denied"] .rce-preview-container[style*="display: none"] ~ .rce-rej-placeholder { display: flex; }
+
+        .req-card-e .rce-body { padding: 12px; gap: 8px; flex: 0 0 auto; }
+        .req-card-e .rce-title { font-size: 13.5px; text-transform: none; letter-spacing: 0; }
+        .req-card-e .rce-remark { background: #F2D5D1; border: 1px solid #D49A94; padding: 7px 10px; font-size: 12px; font-weight: 400; line-height: 1.4; }
+        .req-card-e .rce-remark-text { overflow-wrap: anywhere; }
+
+
+        /* ══ ADJUSTMENT: MULTIPLE PICTURES PER REQUIREMENT — overlay card stack + paged preview ══
+           Same display as CompanyForm.php's multi-file requirements: up to three cards
+           layered on top of each other (slightly rotated) with a count badge and an
+           "N files" label; clicking it opens the paged preview viewer (prev / next). */
+        .rce-file-stack-wrap { cursor: pointer; flex-shrink: 0; text-align: center; }
+        .rce-file-stack { position: relative; width: 132px; height: 116px; margin: 0 auto 4px; }
+        .rce-file-stack .rce-stack-layer {
+            position: absolute; top: 8px; left: 16px; width: 100px; height: 100px;
+            border: 2px solid #C3CADA; background-color: #ffffff; border-radius: 0;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.12); background-size: cover; background-position: center;
+            transition: transform 0.15s;
+        }
+        .rce-file-stack .rce-stack-layer.layer-1 { transform: rotate(0deg) translate(0, 0); z-index: 3; }
+        .rce-file-stack .rce-stack-layer.layer-2 { transform: rotate(7deg) translate(5px, 3px); z-index: 2; }
+        .rce-file-stack .rce-stack-layer.layer-3 { transform: rotate(-9deg) translate(-5px, 4px); z-index: 1; }
+        .rce-file-stack-wrap:hover .rce-stack-layer.layer-1 { transform: rotate(0deg) translate(0, -2px); }
+        .rce-file-stack-wrap:hover .rce-stack-layer.layer-2 { transform: rotate(9deg) translate(6px, 0px); }
+        .rce-file-stack-wrap:hover .rce-stack-layer.layer-3 { transform: rotate(-11deg) translate(-6px, 1px); }
+        .rce-file-stack .rce-stack-count-badge {
+            position: absolute; bottom: 2px; right: 8px; z-index: 4;
+            background: var(--grid-navy); color: #F7C600; font-size: 11px; font-weight: 700;
+            border-radius: 999px; min-width: 22px; height: 22px; padding: 0 6px;
+            display: flex; align-items: center; justify-content: center; border: 2px solid #ffffff;
+        }
+        .rce-file-stack-label { font-size: 11px; color: var(--grid-muted); font-weight: 700; }
+
+        #reqDocPreviewModal { display: none; position: fixed; inset: 0; z-index: 10020; background: rgba(0,0,0,0.92); flex-direction: column; }
+        #reqDocPreviewModal .rdp-bar { display: flex; align-items: center; justify-content: space-between; padding: 12px 20px; background: var(--grid-navy); color: #fff; font-size: 14px; font-weight: 600; flex-shrink: 0; }
+        #reqDocPreviewModal .rdp-title { display: flex; align-items: center; gap: 10px; min-width: 0; }
+        #reqDocPreviewModal .rdp-title i { color: #F7C600; }
+        #reqDocPreviewModal .rdp-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        #reqDocPreviewModal .rdp-counter { color: #C3CADA; font-size: 12px; font-weight: 600; }
+        #reqDocPreviewModal .rdp-close { background: rgba(255,255,255,0.14); border: none; color: #fff; width: 34px; height: 34px; font-size: 22px; cursor: pointer; line-height: 1; }
+        #reqDocPreviewModal .rdp-close:hover { background: rgba(255,255,255,0.28); }
+        #reqDocPreviewModal .rdp-viewer { position: relative; flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; padding: 16px; }
+        #reqDocPreviewModal .rdp-viewer img { max-width: 100%; max-height: 100%; object-fit: contain; border: 1px solid #A3AFC7; background: #fff; }
+        #reqDocPreviewModal .rdp-nav { position: absolute; top: 50%; transform: translateY(-50%); background: rgba(15,23,42,0.55); color: #fff; border: none; width: 40px; height: 40px; border-radius: 50%; font-size: 15px; cursor: pointer; display: flex; align-items: center; justify-content: center; z-index: 5; }
+        #reqDocPreviewModal .rdp-nav:hover { background: rgba(15,23,42,0.8); }
+        #reqDocPreviewModal .rdp-prev { left: 16px; }
+        #reqDocPreviewModal .rdp-next { right: 16px; }
+
+        /* ══ ADJUSTMENT: UPLOAD BUTTON ROW — DESIGN MATCHED TO CompanyForm.php ══
+           The upload controls of every requirement card now sit in one bordered box, like
+           CompanyForm.php's requirement cards: [upload icon] "Click to upload" ........ [CHOOSE].
+           Same elements, ids and behaviour as before — only the look changes. */
+        .req-card-e .rce-upload-row,
+        .req-card-e .rce-bottom-action-row {
+            border: 1px solid #A3AFC7; background: #ffffff; border-radius: 0;
+            padding: 6px 6px 6px 10px; gap: 6px; box-sizing: border-box; align-items: center;
+        }
+        .req-card-e .rce-upload-icon { font-size: 12px; color: var(--grid-navy); }
+        .req-card-e .rce-upload-label { font-size: 11px; font-weight: 600; color: var(--grid-navy); flex: 1; min-width: 0; }
+        .req-card-e .rce-upload-label[data-reupload] { color: var(--grid-red); }
+        .req-card-e .rce-file-btn { padding: 6px 10px; }
+        /* Application SIT / Waiver / Contract: preview (eye) button sits inside the box, just before CHOOSE */
+        .req-card-e .rce-bottom-action-row .rce-preview-eye-btn { order: 1; }
+        .req-card-e .rce-bottom-action-row .rce-file-btn { order: 2; }
+        /* once a file is uploaded (and not denied) the controls hide — the empty box hides with them */
+        .req-card-e .rce-bottom-action-row:has(> span[style*="none"]) { display: none; }
 
         /* ══ "How to submit this form" popup ══ */
         .rce-info-overlay {
@@ -2275,6 +3004,12 @@ if (isset($_GET['msg']) && $_GET['msg'] === 'profile_saved') {
             font-size: 13px; color: var(--grid-red); line-height: 1.8;
         }
         .error-detail-list li { margin-bottom: 2px; }
+        /* ADJUSTMENT: the "Only One PDF Allowed" / "Mixed File Formats" popup uses the page's plain
+           navy look — no red / coloured accents — like the other notification popups on this page. */
+        .notif-modal-box.neutral-modal .notif-modal-icon { display: none; } /* no icon on top of this popup */
+        .notif-modal-box.error-modal.neutral-modal .notif-modal-title { color: #1e293b; }
+        .notif-modal-box.error-modal.neutral-modal .notif-modal-btn   { background: var(--grid-navy); border-color: var(--grid-navy); color: #fff; }
+        .notif-modal-box.neutral-modal .error-detail-list { background: var(--grid-bg); border: 1px solid var(--grid-border); color: var(--grid-navy); }
 
         #guardianOtherWrap { display: none; grid-column: 1 / -1; }
         #guardianOtherWrap.show {
@@ -2436,6 +3171,15 @@ if (isset($_GET['msg']) && $_GET['msg'] === 'profile_saved') {
     <img id="previewImage" style="max-width:80%; max-height:80%; border-radius:0; border:1px solid #C3CADA; box-shadow:0 0 20px rgba(0,0,0,0.5);">
 </div>
 
+<!-- ADJUSTMENT: paged preview for the pictures picked for one requirement (same viewer idea as CompanyForm.php's reqDocPreviewModal) -->
+<div id="reqDocPreviewModal">
+    <div class="rdp-bar">
+        <div class="rdp-title"><i class="fas fa-image"></i><span class="rdp-name" id="reqDocPreviewName">Picture</span><span class="rdp-counter" id="reqDocPreviewCounter"></span></div>
+        <button type="button" class="rdp-close" onclick="closeReqStackPreview()" title="Close">&times;</button>
+    </div>
+    <div class="rdp-viewer" id="reqDocPreviewViewer"></div>
+</div>
+
 <!-- ══════════════════════════════════════════════════════════════
      FULL-SCREEN DOCUMENT PREVIEWS (SIT / Waiver / Contract)
      ------------------------------------------------------------
@@ -2571,7 +3315,7 @@ if (isset($_GET['msg']) && $_GET['msg'] === 'profile_saved') {
 
             <div id="digital-page" class="page-content">
 
-                <form method="POST" action="AccomForm.php" id="profileInfoForm" enctype="multipart/form-data">
+                <form method="POST" action="AccomForm.php" id="profileInfoForm" enctype="multipart/form-data" novalidate>
                     <input type="hidden" name="save_profile_info" value="1">
                     <input type="hidden" name="ajax_request" id="ajaxRequestFlag" value="1">
 
@@ -2583,7 +3327,7 @@ if (isset($_GET['msg']) && $_GET['msg'] === 'profile_saved') {
                         </div>
 
                         <div class="photo-section">
-                            <h3>2x2 Photo</h3>
+                            <h3>2x2 Photo<?php if (!$photo || ($photo_status ?? 'Pending') === 'Denied'): ?> <span class="req-star">*</span><?php endif; ?></h3>
                             <?php $photo_display = $photo_status ?? 'Pending'; ?>
 
                             <?php if ($photo): ?>
@@ -2611,7 +3355,7 @@ if (isset($_GET['msg']) && $_GET['msg'] === 'profile_saved') {
                                         <span id="profilePhotoBtnText">Choose Photo</span>
                                     </label>
                                     <input type="file" name="student_photo" accept="image/jpeg"
-                                           data-label="2x2 Photo" id="profilePhotoInput"
+                                           data-label="2x2 Photo" data-req-label="2x2 Photo (JPEG image)" required id="profilePhotoInput"
                                            class="rce-file-input-hidden"
                                            onchange="handleProfilePhotoChange(this)">
                                 </div>
@@ -2642,14 +3386,14 @@ if (isset($_GET['msg']) && $_GET['msg'] === 'profile_saved') {
 
                         <div class="pinfo-grid cols-4" style="margin-bottom:14px;">
                             <div class="pinfo-field">
-                                <label>Age</label>
-                                <input type="number" name="age" min="1" max="120"
+                                <label>Age <span class="req-star">*</span></label>
+                                <input required data-req-label="Age" type="number" name="age" min="1" max="120"
                                        value="<?= htmlspecialchars($sit_extra['age'] ?? '') ?>"
                                        placeholder="e.g. 21">
                             </div>
                             <div class="pinfo-field">
-                                <label>Sex</label>
-                                <select name="sex">
+                                <label>Sex <span class="req-star">*</span></label>
+                                <select required data-req-label="Sex" name="sex">
                                     <option value="">— Select —</option>
                                     <?php foreach (['Male','Female'] as $opt): ?>
                                     <option value="<?= $opt ?>" <?= ($sit_extra['sex'] ?? '') === $opt ? 'selected' : '' ?>><?= $opt ?></option>
@@ -2657,8 +3401,8 @@ if (isset($_GET['msg']) && $_GET['msg'] === 'profile_saved') {
                                 </select>
                             </div>
                             <div class="pinfo-field">
-                                <label>Civil Status</label>
-                                <select name="civil_status">
+                                <label>Civil Status <span class="req-star">*</span></label>
+                                <select required data-req-label="Civil Status" name="civil_status">
                                     <option value="">— Select —</option>
                                     <?php foreach (['Single','Married','Widowed','Separated'] as $opt): ?>
                                     <option value="<?= $opt ?>" <?= ($sit_extra['civil_status'] ?? '') === $opt ? 'selected' : '' ?>><?= $opt ?></option>
@@ -2666,8 +3410,8 @@ if (isset($_GET['msg']) && $_GET['msg'] === 'profile_saved') {
                                 </select>
                             </div>
                             <div class="pinfo-field">
-                                <label>Religion</label>
-                                <input type="text" name="religion"
+                                <label>Religion <span class="req-star">*</span></label>
+                                <input required data-req-label="Religion" type="text" name="religion"
                                        value="<?= htmlspecialchars($sit_extra['religion'] ?? '') ?>"
                                        placeholder="e.g. Roman Catholic">
                             </div>
@@ -2675,8 +3419,8 @@ if (isset($_GET['msg']) && $_GET['msg'] === 'profile_saved') {
 
                         <div class="pinfo-grid cols-2" style="margin-bottom:14px;">
                             <div class="pinfo-field">
-                                <label>Mobile Number</label>
-                                <input type="text" name="mobile_no" id="mobileNoInput"
+                                <label>Mobile Number <span class="req-star">*</span></label>
+                                <input required data-req-label="Mobile Number" type="text" name="mobile_no" id="mobileNoInput"
                                        inputmode="numeric" pattern="[0-9]*" maxlength="15"
                                        value="<?= htmlspecialchars($sit_extra['mobile_no'] ?? '') ?>"
                                        placeholder="e.g. 09XX-XXX-XXXX">
@@ -2685,16 +3429,16 @@ if (isset($_GET['msg']) && $_GET['msg'] === 'profile_saved') {
 
                         <div class="pinfo-grid" style="margin-bottom:20px;">
                             <div class="pinfo-field full">
-                                <label>Home Address</label>
-                                <textarea name="home_address" placeholder="Complete home address"><?= htmlspecialchars($sit_extra['home_address'] ?? '') ?></textarea>
+                                <label>Home Address <span class="req-star">*</span></label>
+                                <textarea required data-req-label="Home Address" name="home_address" placeholder="Complete home address"><?= htmlspecialchars($sit_extra['home_address'] ?? '') ?></textarea>
                             </div>
                         </div>
 
                         <div class="pinfo-subsection-title" style="margin-bottom:10px;">Mother's Name</div>
                         <div class="pinfo-grid cols-3" style="margin-bottom:14px;">
                             <div class="pinfo-field">
-                                <label>First Name</label>
-                                <input type="text" name="mother_first"
+                                <label>First Name <span class="req-star">*</span></label>
+                                <input required data-req-label="Mother's First Name" type="text" name="mother_first"
                                        value="<?= htmlspecialchars($sit_extra['mother_first'] ?? '') ?>"
                                        placeholder="Mother's first name">
                             </div>
@@ -2705,8 +3449,8 @@ if (isset($_GET['msg']) && $_GET['msg'] === 'profile_saved') {
                                        placeholder="Mother's middle name">
                             </div>
                             <div class="pinfo-field">
-                                <label>Last Name</label>
-                                <input type="text" name="mother_last"
+                                <label>Last Name <span class="req-star">*</span></label>
+                                <input required data-req-label="Mother's Last Name" type="text" name="mother_last"
                                        value="<?= htmlspecialchars($sit_extra['mother_last'] ?? '') ?>"
                                        placeholder="Mother's last name">
                             </div>
@@ -2715,8 +3459,8 @@ if (isset($_GET['msg']) && $_GET['msg'] === 'profile_saved') {
                         <div class="pinfo-subsection-title" style="margin-bottom:10px;">Father's Name</div>
                         <div class="pinfo-grid cols-3" style="margin-bottom:14px;">
                             <div class="pinfo-field">
-                                <label>First Name</label>
-                                <input type="text" name="father_first"
+                                <label>First Name <span class="req-star">*</span></label>
+                                <input required data-req-label="Father's First Name" type="text" name="father_first"
                                        value="<?= htmlspecialchars($sit_extra['father_first'] ?? '') ?>"
                                        placeholder="Father's first name">
                             </div>
@@ -2727,8 +3471,8 @@ if (isset($_GET['msg']) && $_GET['msg'] === 'profile_saved') {
                                        placeholder="Father's middle name">
                             </div>
                             <div class="pinfo-field">
-                                <label>Last Name</label>
-                                <input type="text" name="father_last"
+                                <label>Last Name <span class="req-star">*</span></label>
+                                <input required data-req-label="Father's Last Name" type="text" name="father_last"
                                        value="<?= htmlspecialchars($sit_extra['father_last'] ?? '') ?>"
                                        placeholder="Father's last name">
                             </div>
@@ -2737,8 +3481,8 @@ if (isset($_GET['msg']) && $_GET['msg'] === 'profile_saved') {
                         <div class="pinfo-subsection-title" style="margin-bottom:10px;">Guardian</div>
                         <div class="pinfo-grid cols-3" style="margin-bottom:0;">
                             <div class="pinfo-field">
-                                <label>Guardian</label>
-                                <select name="guardian_type" id="guardianTypeSelect" onchange="handleGuardianChange(this.value)">
+                                <label>Guardian <span class="req-star">*</span></label>
+                                <select required data-req-label="Guardian" name="guardian_type" id="guardianTypeSelect" onchange="handleGuardianChange(this.value)">
                                     <option value="">— Select Guardian —</option>
                                     <option value="Mother" <?= ($sit_extra['guardian_type'] ?? '') === 'Mother' ? 'selected' : '' ?>>Mother</option>
                                     <option value="Father" <?= ($sit_extra['guardian_type'] ?? '') === 'Father' ? 'selected' : '' ?>>Father</option>
@@ -2747,8 +3491,8 @@ if (isset($_GET['msg']) && $_GET['msg'] === 'profile_saved') {
                             </div>
 
                             <div class="pinfo-field">
-                                <label>Guardian No.</label>
-                                <input type="text" name="guardian_no" id="guardianNoInput"
+                                <label>Guardian No. <span class="req-star">*</span></label>
+                                <input required data-req-label="Guardian No." type="text" name="guardian_no" id="guardianNoInput"
                                        inputmode="numeric" pattern="[0-9]*" maxlength="15"
                                        value="<?= htmlspecialchars($sit_extra['guardian_no'] ?? '') ?>"
                                        placeholder="e.g. 09XX-XXX-XXXX">
@@ -2756,8 +3500,8 @@ if (isset($_GET['msg']) && $_GET['msg'] === 'profile_saved') {
 
                             <div id="guardianOtherWrap" class="<?= ($sit_extra['guardian_type'] ?? '') === 'Other' ? 'show' : '' ?>">
                                 <div class="pinfo-field">
-                                    <label>First Name</label>
-                                    <input type="text" name="guardian_other_first" id="guardianOtherFirst"
+                                    <label>First Name <span class="req-star">*</span></label>
+                                    <input required data-req-label="Guardian's First Name" type="text" name="guardian_other_first" id="guardianOtherFirst"
                                            value="<?= htmlspecialchars($guardian_other_first_val) ?>"
                                            placeholder="Guardian's first name">
                                 </div>
@@ -2768,8 +3512,8 @@ if (isset($_GET['msg']) && $_GET['msg'] === 'profile_saved') {
                                            placeholder="Guardian's middle name">
                                 </div>
                                 <div class="pinfo-field">
-                                    <label>Last Name</label>
-                                    <input type="text" name="guardian_other_last" id="guardianOtherLast"
+                                    <label>Last Name <span class="req-star">*</span></label>
+                                    <input required data-req-label="Guardian's Last Name" type="text" name="guardian_other_last" id="guardianOtherLast"
                                            value="<?= htmlspecialchars($guardian_other_last_val) ?>"
                                            placeholder="Guardian's last name">
                                 </div>
@@ -2783,65 +3527,57 @@ if (isset($_GET['msg']) && $_GET['msg'] === 'profile_saved') {
                             Academic Data
                         </h3>
 
+                        <div class="pinfo-subsection-title" style="margin-bottom:10px;">OJT Coordinator</div>
+                        <div class="pinfo-grid" style="margin-bottom:14px;">
+                            <div class="pinfo-field full">
+                                <label>OJT Coordinator Name <span class="req-star">*</span></label>
+                                <select required data-req-label="OJT Coordinator Name" name="ojt_coordinator_id" id="ojtCoordinatorSelect">
+                                    <option value="">— Select OJT Coordinator —</option>
+                                    <?php if ($ojt_coordinator_is_legacy): ?>
+                                    <option value="__keep__" selected><?= htmlspecialchars($ojt_coordinator_full) ?></option>
+                                    <?php endif; ?>
+                                    <?php foreach ($admin_coordinators as $_adm): ?>
+                                    <option value="<?= (int)$_adm['id'] ?>" <?= $ojt_coordinator_selected === (string)$_adm['id'] ? 'selected' : '' ?>><?= htmlspecialchars($_adm['full']) ?></option>
+                                    <?php endforeach; ?>
+                                </select>
+                            </div>
+                        </div>
+
                         <div class="pinfo-grid cols-3" style="margin-bottom:14px;">
                             <div class="pinfo-field">
                                 <label>Course</label>
                                 <input type="text" value="<?= htmlspecialchars($course ?? '') ?>" readonly>
                             </div>
                             <div class="pinfo-field">
-                                <label>College</label>
-                                <input type="text" name="college"
+                                <label>College <span class="req-star">*</span></label>
+                                <input required data-req-label="College" type="text" name="college"
                                        value="<?= htmlspecialchars($sit_extra['college'] ?? '') ?>"
                                        placeholder="e.g. College of Information and Communications Technology">
                             </div>
                             <div class="pinfo-field">
-                                <label>Major</label>
-                                <input type="text" name="major"
+                                <label>Major <span class="req-star">*</span></label>
+                                <input required data-req-label="Major" type="text" name="major"
                                        value="<?= htmlspecialchars($sit_extra['major'] ?? '') ?>"
-                                       placeholder="e.g. Computer Science">
+                                       placeholder="e.g. Computer Science"
+                                       <?= $_lk($sit_extra['major'] ?? '') ?>>
                             </div>
                         </div>
 
-                        <div class="pinfo-grid cols-3" style="margin-bottom:14px;">
+                        <div class="pinfo-grid cols-3" style="margin-bottom:0;">
                             <div class="pinfo-field">
-                                <label>Year and Section</label>
-                                <input type="text" name="year_section"
+                                <label>Year and Section <span class="req-star">*</span></label>
+                                <input required data-req-label="Year and Section" type="text" name="year_section"
                                        value="<?= htmlspecialchars($sit_extra['year_section'] ?? '') ?>"
-                                       placeholder="e.g. 4-A">
+                                       placeholder="e.g. 4-A"
+                                       <?= $_lk($sit_extra['year_section'] ?? '') ?>>
                             </div>
                             <div class="pinfo-field">
-                                <label>Day Schedule</label>
-                                <input type="text" name="day_sched"
-                                       value="<?= htmlspecialchars($sit_extra['day_sched'] ?? '') ?>"
-                                       placeholder="e.g. MWF">
+                                <label>Day Schedule <span class="req-star">*</span></label>
+                                <?= renderScheduleDropdown('day_sched', 'daySchedSelect', $sit_extra['day_sched'] ?? '', 'Day Schedule') ?>
                             </div>
                             <div class="pinfo-field">
-                                <label>Evening Schedule</label>
-                                <input type="text" name="evening_sched"
-                                       value="<?= htmlspecialchars($sit_extra['evening_sched'] ?? '') ?>"
-                                       placeholder="e.g. TTh">
-                            </div>
-                        </div>
-
-                        <div class="pinfo-subsection-title" style="margin-bottom:10px;">OJT Coordinator</div>
-                        <div class="pinfo-grid cols-name" style="margin-bottom:0;">
-                            <div class="pinfo-field">
-                                <label>First Name</label>
-                                <input type="text" name="ojt_coordinator_first"
-                                       value="<?= htmlspecialchars($ojt_coordinator_first_val) ?>"
-                                       placeholder="First name">
-                            </div>
-                            <div class="pinfo-field">
-                                <label>Middle Name <span class="opt-label">(optional)</span></label>
-                                <input type="text" name="ojt_coordinator_middle"
-                                       value="<?= htmlspecialchars($ojt_coordinator_middle_val) ?>"
-                                       placeholder="Middle name">
-                            </div>
-                            <div class="pinfo-field">
-                                <label>Last Name</label>
-                                <input type="text" name="ojt_coordinator_last"
-                                       value="<?= htmlspecialchars($ojt_coordinator_last_val) ?>"
-                                       placeholder="Last name">
+                                <label>Evening Schedule <span class="req-star">*</span></label>
+                                <?= renderScheduleDropdown('evening_sched', 'eveningSchedSelect', $sit_extra['evening_sched'] ?? '', 'Evening Schedule') ?>
                             </div>
                         </div>
                     </div>
@@ -2860,73 +3596,117 @@ if (isset($_GET['msg']) && $_GET['msg'] === 'profile_saved') {
                         <?php else: ?>
                         <div class="pinfo-company-note">
                             <i class="fas fa-info-circle"></i>
-                            <span>Fill in your preferred company details below. These will be saved to your profile and used in your SIT Application form.</span>
+                            <span>Select a verified company from the list, or tick "Other company" to enter your preferred company details yourself. These will be saved to your profile and used in your SIT Application form.</span>
                         </div>
                         <?php endif; ?>
 
                         <div class="pinfo-grid" style="margin-bottom:14px;">
                             <div class="pinfo-field full">
-                                <label>Company Name</label>
-                                <input type="text" name="company_name"
-                                       value="<?= htmlspecialchars($pref_display_company_name) ?>"
-                                       placeholder="Full company name"
-                                       <?= $lock_preference_fields ? 'readonly' : '' ?>>
+                                <label>Preferred Company <span class="req-star">*</span></label>
+                                <div class="pref-company-row">
+                                    <select required data-req-label="Preferred Company (select one or tick Other company)" name="pref_company_id" id="prefCompanySelect"
+                                            data-locked="<?= $lock_preference_fields ? '1' : '0' ?>"
+                                            <?= ($lock_preference_fields || $pref_other_checked) ? 'disabled' : '' ?>>
+                                        <option value="">— Select Verified Company —</option>
+                                        <?php if ($pref_locked_legacy_name !== ''): ?>
+                                        <option value="" selected><?= htmlspecialchars($pref_locked_legacy_name) ?></option>
+                                        <?php endif; ?>
+                                        <?php foreach ($verified_companies as $_vc): ?>
+                                        <option value="<?= (int)$_vc['id'] ?>"
+                                                data-name="<?= htmlspecialchars($_vc['name']) ?>"
+                                                data-address="<?= htmlspecialchars($_vc['address']) ?>"
+                                                data-tel="<?= htmlspecialchars($_vc['tel']) ?>"
+                                                data-first="<?= htmlspecialchars($_vc['first']) ?>"
+                                                data-middle="<?= htmlspecialchars($_vc['middle']) ?>"
+                                                data-last="<?= htmlspecialchars($_vc['last']) ?>"
+                                                data-position="<?= htmlspecialchars($_vc['position']) ?>"
+                                                <?= $pref_selected_company_id === $_vc['id'] ? 'selected' : '' ?>><?= htmlspecialchars($_vc['name']) ?></option>
+                                        <?php endforeach; ?>
+                                    </select>
+                                    <label class="pref-other-check">
+                                        <input type="checkbox" name="pref_other_company" id="prefOtherCheck" value="1"
+                                               <?= $pref_other_checked ? 'checked' : '' ?>
+                                               <?= $lock_preference_fields ? 'disabled' : '' ?>>
+                                        <span>Other company</span>
+                                    </label>
+                                </div>
                             </div>
                         </div>
 
-                        <div class="pinfo-grid" style="margin-bottom:14px;">
-                            <div class="pinfo-field full">
-                                <label>Company Address</label>
-                                <textarea name="company_address"
-                                          placeholder="Complete company address"
-                                          <?= $lock_preference_fields ? 'readonly' : '' ?>><?= htmlspecialchars($pref_display_company_address) ?></textarea>
-                            </div>
-                        </div>
-
-                        <div class="pinfo-grid cols-3">
-                            <div class="pinfo-field">
-                                <label>Telephone Number</label>
-                                <input type="text" name="telephone"
-                                       value="<?= htmlspecialchars($pref_display_telephone) ?>"
-                                       placeholder="e.g. (044) 123-4567"
-                                       <?= $lock_preference_fields ? 'readonly' : '' ?>>
-                            </div>
-                            <div class="pinfo-field full" style="grid-column: span 2;">
+                        <div id="prefOtherFields" style="<?= $pref_show_fields ? '' : 'display:none;' ?>">
+                        <div class="pref-contact-row" style="margin-bottom:14px;">
+                            <div class="pinfo-field pref-contact-person<?= $pref_fields_readonly ? ' is-fullname' : '' ?>" id="prefContactPerson">
                                 <div class="pinfo-subsection-title" style="margin-bottom:6px;">Contact Person</div>
-                                <div class="pinfo-grid cols-name" style="margin-top:0;">
+
+                                <div id="prefContactFullWrap" style="<?= $pref_fields_readonly ? '' : 'display:none;' ?>">
                                     <div class="pinfo-field">
-                                        <label>First Name</label>
-                                        <input type="text" name="contact_person_first"
+                                        <label>Full Name</label>
+                                        <input type="text" id="prefContactFull"
+                                               value="<?= htmlspecialchars($pref_display_contact_full) ?>"
+                                               placeholder="Contact person full name"
+                                               readonly>
+                                    </div>
+                                </div>
+
+                                <div id="prefContactAtomicWrap" class="pinfo-grid cols-name" style="margin-top:0;<?= $pref_fields_readonly ? 'display:none;' : '' ?>">
+                                    <div class="pinfo-field">
+                                        <label>First Name <span class="req-star">*</span></label>
+                                        <input required data-req-label="Contact Person's First Name" type="text" name="contact_person_first"
                                                value="<?= htmlspecialchars($pref_display_contact_first) ?>"
                                                placeholder="First name"
-                                               <?= $lock_preference_fields ? 'readonly' : '' ?>>
+                                               <?= $pref_fields_readonly ? 'readonly' : '' ?>>
                                     </div>
                                     <div class="pinfo-field">
                                         <label>Middle Name <span class="opt-label">(optional)</span></label>
                                         <input type="text" name="contact_person_middle"
                                                value="<?= htmlspecialchars($pref_display_contact_middle) ?>"
                                                placeholder="Middle name"
-                                               <?= $lock_preference_fields ? 'readonly' : '' ?>>
+                                               <?= $pref_fields_readonly ? 'readonly' : '' ?>>
                                     </div>
                                     <div class="pinfo-field">
-                                        <label>Last Name</label>
-                                        <input type="text" name="contact_person_last"
+                                        <label>Last Name <span class="req-star">*</span></label>
+                                        <input required data-req-label="Contact Person's Last Name" type="text" name="contact_person_last"
                                                value="<?= htmlspecialchars($pref_display_contact_last) ?>"
                                                placeholder="Last name"
-                                               <?= $lock_preference_fields ? 'readonly' : '' ?>>
+                                               <?= $pref_fields_readonly ? 'readonly' : '' ?>>
                                     </div>
                                 </div>
                             </div>
-                        </div>
-
-                        <div class="pinfo-grid" style="margin-top:10px;">
-                            <div class="pinfo-field">
-                                <label>Position / Department</label>
-                                <input type="text" name="position"
+                            <div class="pinfo-field pref-contact-cell">
+                                <label>Position / Department <span class="req-star">*</span></label>
+                                <input required data-req-label="Position / Department" type="text" name="position"
                                        value="<?= htmlspecialchars($pref_display_position) ?>"
                                        placeholder="e.g. IT Department"
-                                       <?= $lock_preference_fields ? 'readonly' : '' ?>>
+                                       <?= $pref_fields_readonly ? 'readonly' : '' ?>>
                             </div>
+                            <div class="pinfo-field pref-contact-cell">
+                                <label>Telephone Number <span class="req-star">*</span></label>
+                                <input required data-req-label="Telephone Number" type="text" name="telephone"
+                                       value="<?= htmlspecialchars($pref_display_telephone) ?>"
+                                       placeholder="e.g. (044) 123-4567"
+                                       <?= $pref_fields_readonly ? 'readonly' : '' ?>>
+                            </div>
+                        </div>
+
+                        <div class="pinfo-grid" style="margin-bottom:14px;">
+                            <div class="pinfo-field full">
+                                <label>Company Name <span class="req-star">*</span></label>
+                                <input required data-req-label="Company Name" type="text" name="company_name"
+                                       value="<?= htmlspecialchars($pref_display_company_name) ?>"
+                                       placeholder="Full company name"
+                                       <?= $pref_fields_readonly ? 'readonly' : '' ?>>
+                            </div>
+                        </div>
+
+                        <div class="pinfo-grid" style="margin-bottom:0;">
+                            <div class="pinfo-field full">
+                                <label>Company Address <span class="req-star">*</span></label>
+                                <textarea required data-req-label="Company Address" name="company_address"
+                                          placeholder="Complete company address"
+                                          <?= $pref_fields_readonly ? 'readonly' : '' ?>><?= htmlspecialchars($pref_display_company_address) ?></textarea>
+                            </div>
+                        </div>
+
                         </div>
 
                         <div style="text-align:right;">
@@ -2941,6 +3721,39 @@ if (isset($_GET['msg']) && $_GET['msg'] === 'profile_saved') {
             <div id="documents-page" class="page-content">
                 <form id="requirementsForm" method="POST" action="submit_requirements.php" enctype="multipart/form-data">
                     <h3>Documentary Requirements</h3>
+                    <p class="req-size-hint" style="font-size:12px;color:var(--grid-muted);margin:-6px 0 14px;">
+                        Accepted: picture files (JPG, PNG, GIF, WEBP, BMP, ...) or a single PDF &middot; Max <?= (int)$reqMaxFileSizeMB ?>MB each.
+                    </p>
+                    <?php if (!empty($placement_hold)): ?>
+                    <!-- ADJUSTMENT: application on hold — waiting for the new Application SIT to be verified -->
+                    <div class="pinfo-company-note">
+                        <i class="fas fa-pause-circle"></i>
+                        <span>Your application to <strong><?= htmlspecialchars($placement_hold['company_name'] ?: 'the selected company') ?></strong> is <strong>on hold</strong>. Your Preference for Placement was updated with this company's data, so please upload a <strong>new Application SIT</strong>. Once all of your requirements are verified, your application will be sent to the company automatically.</span>
+                    </div>
+                    <?php endif; ?>
+                    <?php
+                    /* ADJUSTMENT: summary line + progress bar (same as administrator.php's requirement gallery) */
+                    $rs_n = ['verified' => 0, 'pending' => 0, 'awaiting' => 0];
+                    foreach (['cert_registration','certificate_pdos','ojt_sheet','application_sit','waiver_form','student_contract','psych_result','medical_result'] as $_rs_k) {
+                        $_rs = $conn->prepare("SELECT (file_name IS NOT NULL AND LENGTH(file_name) > 0) AS has_file, status FROM requirements WHERE user_id=? AND requirement_type=? LIMIT 1");
+                        $_rs->bind_param("is", $user_id, $_rs_k);
+                        $_rs->execute();
+                        $_rs_row = $_rs->get_result()->fetch_assoc();
+                        $_rs->close();
+                        if ($_rs_row && $_rs_row['status'] === 'Verified') $rs_n['verified']++;
+                        elseif (!$_rs_row || empty($_rs_row['has_file'])) $rs_n['awaiting']++;
+                        else $rs_n['pending']++;
+                    }
+                    $rs_total = 8;
+                    $rs_pct   = (int)round($rs_n['verified'] / $rs_total * 100);
+                    ?>
+                    <div class="cv-req-summary" id="reqSummary">
+                        <span class="cv-req-summary-text"><b class="cv-n-total"><?= $rs_total ?></b> requirements &middot; <b class="cv-n-verified"><?= $rs_n['verified'] ?></b> verified &middot; <b class="cv-n-pending"><?= $rs_n['pending'] ?></b> pending &middot; <b class="cv-n-awaiting"><?= $rs_n['awaiting'] ?></b> awaiting your submission</span>
+                        <div class="cv-progress">
+                            <div class="cv-progress-bar"><div class="cv-progress-fill" style="width:<?= $rs_pct ?>%;"></div></div>
+                            <span class="cv-progress-pct"><?= $rs_pct ?>% verified</span>
+                        </div>
+                    </div>
                     <div class="requirements-container" id="requirementsContainer">
                     <?php
                     $req_icons = [
@@ -3002,6 +3815,10 @@ if (isset($_GET['msg']) && $_GET['msg'] === 'profile_saved') {
 
                         $eye_hidden = $is_special && $file && $status !== 'Denied';
 
+                        /* ADJUSTMENT: all pictures saved for this requirement (2+ → shown as a card stack) */
+                        $part_ids = ($file && !$is_pdf_file) ? accomReqPartIds($conn, (int)$user_id, $key) : [];
+                        $stack_urls = array_map(function ($pid) { return 'AccomForm.php?stream_req_file=' . (int)$pid; }, $part_ids);
+
                         $popup_subtitle = '';
                         $popup_steps    = [];
                         $popup_warning  = '';
@@ -3040,23 +3857,20 @@ if (isset($_GET['msg']) && $_GET['msg'] === 'profile_saved') {
                          data-req-type="<?= htmlspecialchars($key) ?>"
                          data-status="<?= htmlspecialchars($status) ?>">
 
-                        <div class="rce-header <?= $hdr_cls ?>" id="rceHeader_<?= htmlspecialchars($key) ?>">
-                            <i class="<?= $status_icon ?> rce-status-icon" id="rceStatusIcon_<?= htmlspecialchars($key) ?>"></i>
-                            <span class="rce-status-label" id="rceStatusLabel_<?= htmlspecialchars($key) ?>"><?= $status_icon_lbl ?></span>
-                            <?php if ($is_special): ?>
-                            <button type="button"
-                                    class="rce-info-btn"
-                                    id="infoBtn_<?= htmlspecialchars($key) ?>"
-                                    onclick="toggleInfoPopup('<?= htmlspecialchars($key) ?>', event)"
-                                    aria-label="How to submit <?= htmlspecialchars($label) ?>">
-                                <i class="fas fa-info-circle"></i>
-                            </button>
-                            <?php endif; ?>
-                        </div>
-
-                        <div class="rce-body" id="rceBody_<?= htmlspecialchars($key) ?>">
-
-                            <div class="rce-title"><?= htmlspecialchars($label) ?></div>
+                        <div class="rce-preview-area">
+                            <div class="rce-header <?= $hdr_cls ?>" id="rceHeader_<?= htmlspecialchars($key) ?>">
+                                <i class="<?= $status_icon ?> rce-status-icon" id="rceStatusIcon_<?= htmlspecialchars($key) ?>"></i>
+                                <span class="rce-status-label" id="rceStatusLabel_<?= htmlspecialchars($key) ?>"><?= $status_icon_lbl ?></span>
+                                <?php if ($is_special): ?>
+                                <button type="button"
+                                        class="rce-info-btn"
+                                        id="infoBtn_<?= htmlspecialchars($key) ?>"
+                                        onclick="toggleInfoPopup('<?= htmlspecialchars($key) ?>', event)"
+                                        aria-label="How to submit <?= htmlspecialchars($label) ?>">
+                                    <i class="fas fa-info-circle"></i>
+                                </button>
+                                <?php endif; ?>
+                            </div>
 
                             <?php if ($file): ?>
                             <div class="rce-preview-container" id="rcePreview_<?= htmlspecialchars($key) ?>">
@@ -3064,6 +3878,16 @@ if (isset($_GET['msg']) && $_GET['msg'] === 'profile_saved') {
                                     <div class="rce-pdf-thumb">
                                         <i class="fas fa-file-pdf"></i>
                                         <span>PDF</span>
+                                    </div>
+                                <?php elseif (!empty($part_ids)): ?>
+                                    <div class="rce-file-stack-wrap" data-label="<?= htmlspecialchars($label, ENT_QUOTES) ?>" data-urls="<?= htmlspecialchars(json_encode($stack_urls), ENT_QUOTES) ?>" onclick="openSavedReqStack(this)" title="<?= count($part_ids) ?> files saved — click to preview them all">
+                                        <div class="rce-file-stack">
+                                            <?php for ($li = min(3, count($stack_urls)) - 1; $li >= 0; $li--): ?>
+                                            <div class="rce-stack-layer layer-<?= $li + 1 ?>" style="background-image:url('<?= htmlspecialchars($stack_urls[$li], ENT_QUOTES) ?>');"></div>
+                                            <?php endfor; ?>
+                                            <span class="rce-stack-count-badge"><?= count($part_ids) ?></span>
+                                        </div>
+                                        <div class="rce-file-stack-label"><?= count($part_ids) ?> files</div>
                                     </div>
                                 <?php else: ?>
                                     <img src="data:image/jpeg;base64,<?= base64_encode($file) ?>"
@@ -3075,14 +3899,17 @@ if (isset($_GET['msg']) && $_GET['msg'] === 'profile_saved') {
                             <?php else: ?>
                             <div class="rce-preview-container" id="rcePreview_<?= htmlspecialchars($key) ?>" style="display:none;"></div>
                             <?php endif; ?>
+                            <div class="rce-no-file"><i class="fas fa-hourglass-half"></i><span>No file yet</span></div>
+                            <div class="rce-rej-placeholder"><i class="fas fa-file-circle-xmark"></i><span>Rejected<br>Awaiting re-submission</span></div>
+                        </div>
+
+                        <div class="rce-body" id="rceBody_<?= htmlspecialchars($key) ?>">
+
+                            <div class="rce-title"><?= htmlspecialchars($label) ?></div>
 
                             <div class="rce-remark" id="rceRemark_<?= htmlspecialchars($key) ?>" <?= ($status !== 'Denied' || empty($remark)) ? 'style="display:none;"' : '' ?>>
                                 <i class="fas fa-exclamation-circle"></i>
                                 <span class="rce-remark-text">Reason: <?= htmlspecialchars($remark ?? '') ?></span>
-                            </div>
-
-                            <div class="rce-reupload" id="rceReupload_<?= htmlspecialchars($key) ?>" <?= $status !== 'Denied' ? 'style="display:none;"' : '' ?>>
-                                <i class="fas fa-redo"></i> Re-upload required
                             </div>
 
                             <?php if ($is_special): ?>
@@ -3091,7 +3918,7 @@ if (isset($_GET['msg']) && $_GET['msg'] === 'profile_saved') {
                                 <span id="rceUploadControls_<?= htmlspecialchars($key) ?>"
                                       style="display:<?= (!$file || $status === 'Denied') ? 'contents' : 'none' ?>;">
                                     <i class="fas fa-upload rce-upload-icon"></i>
-                                    <label class="rce-upload-label" for="fileInput_<?= htmlspecialchars($key) ?>">Upload file</label>
+                                    <label class="rce-upload-label" for="fileInput_<?= htmlspecialchars($key) ?>"<?= $status === 'Denied' ? ' data-reupload="1"' : '' ?>><?= $status === 'Denied' ? 'Re-upload' : 'Click to upload' ?></label>
                                     <label class="rce-file-btn"
                                            id="fileBtnLabel_<?= htmlspecialchars($key) ?>"
                                            for="fileInput_<?= htmlspecialchars($key) ?>">
@@ -3099,12 +3926,12 @@ if (isset($_GET['msg']) && $_GET['msg'] === 'profile_saved') {
                                         <span id="fileBtnText_<?= htmlspecialchars($key) ?>">Choose</span>
                                     </label>
                                     <input type="file"
-                                           name="<?= htmlspecialchars($key) ?>"
+                                           name="<?= htmlspecialchars($key) ?>[]" multiple
                                            id="fileInput_<?= htmlspecialchars($key) ?>"
                                            class="rce-file-input-hidden"
                                            data-label="<?= htmlspecialchars($label) ?>"
                                            data-req-type="<?= htmlspecialchars($key) ?>"
-                                           accept="image/jpeg"
+                                           accept="image/*,.pdf,application/pdf"
                                            onchange="handleReqFileChange(this, '<?= htmlspecialchars($key) ?>')">
                                 </span>
 
@@ -3139,7 +3966,7 @@ if (isset($_GET['msg']) && $_GET['msg'] === 'profile_saved') {
                             <div class="rce-upload-row" id="rceUploadRow_<?= htmlspecialchars($key) ?>"
                                  style="display:<?= (!$file || $status === 'Denied') ? 'flex' : 'none' ?>;">
                                 <i class="fas fa-upload rce-upload-icon"></i>
-                                <label class="rce-upload-label" for="fileInput_<?= htmlspecialchars($key) ?>">Upload file</label>
+                                <label class="rce-upload-label" for="fileInput_<?= htmlspecialchars($key) ?>"<?= $status === 'Denied' ? ' data-reupload="1"' : '' ?>><?= $status === 'Denied' ? 'Re-upload' : 'Click to upload' ?></label>
                                 <label class="rce-file-btn"
                                        id="fileBtnLabel_<?= htmlspecialchars($key) ?>"
                                        for="fileInput_<?= htmlspecialchars($key) ?>">
@@ -3147,12 +3974,12 @@ if (isset($_GET['msg']) && $_GET['msg'] === 'profile_saved') {
                                     <span id="fileBtnText_<?= htmlspecialchars($key) ?>">Choose</span>
                                 </label>
                                 <input type="file"
-                                       name="<?= htmlspecialchars($key) ?>"
+                                       name="<?= htmlspecialchars($key) ?>[]" multiple
                                        id="fileInput_<?= htmlspecialchars($key) ?>"
                                        class="rce-file-input-hidden"
                                        data-label="<?= htmlspecialchars($label) ?>"
                                        data-req-type="<?= htmlspecialchars($key) ?>"
-                                       accept="image/jpeg"
+                                       accept="image/*,.pdf,application/pdf"
                                        onchange="handleReqFileChange(this, '<?= htmlspecialchars($key) ?>')">
                             </div>
                             <?php endif; ?>
@@ -3207,7 +4034,7 @@ if (isset($_GET['msg']) && $_GET['msg'] === 'profile_saved') {
                     <?php endforeach; ?>
                     </div>
 
-                    <button type="submit" name="submit_all" value="1" class="submit-all">Submit All Requirements</button>
+                    <button type="submit" name="submit_all" value="1" class="submit-all">Submit Requirements</button>
                 </form>
             </div>
         </div>
@@ -3309,6 +4136,9 @@ function handleReqFileChange(input, key) {
         var icon = btnLabel.querySelector('i');
         if (icon) { icon.className = 'fas fa-redo'; }
     }
+    var upLbl = document.querySelector('label.rce-upload-label[for="fileInput_' + key + '"]');
+    if (upLbl) upLbl.removeAttribute('data-reupload');
+    if (upLbl) { upLbl.textContent = input.files.length > 1 ? (input.files.length + ' files selected') : 'Click to upload'; }
     previewRequirementFile(input);
 }
 
@@ -3335,9 +4165,101 @@ function previewProfilePhoto(input) {
     reader.readAsDataURL(file);
 }
 
+var reqPreviewUrls = {};
+function revokeReqPreviewUrls(key) {
+    (reqPreviewUrls[key] || []).forEach(function(u) { try { URL.revokeObjectURL(u); } catch (e) {} });
+    reqPreviewUrls[key] = [];
+}
+
+/* paged preview viewer for the pictures picked for one requirement (prev / next, counter) */
+var reqPvUrls = [], reqPvNames = [], reqPvIndex = 0, reqPvLabel = '';
+function openReqStackPreview(label, urls, names) {
+    reqPvUrls = urls; reqPvNames = names; reqPvIndex = 0; reqPvLabel = label || 'Picture';
+    renderReqStackPreview();
+    document.getElementById('reqDocPreviewModal').style.display = 'flex';
+    document.body.style.overflow = 'hidden';
+}
+function renderReqStackPreview() {
+    var viewer  = document.getElementById('reqDocPreviewViewer');
+    var nameEl  = document.getElementById('reqDocPreviewName');
+    var counter = document.getElementById('reqDocPreviewCounter');
+    if (!viewer || !reqPvUrls.length) return;
+    viewer.innerHTML = '';
+    var img = document.createElement('img');
+    img.src = reqPvUrls[reqPvIndex];
+    img.alt = reqPvLabel;
+    viewer.appendChild(img);
+    if (nameEl) nameEl.textContent = reqPvNames[reqPvIndex] || reqPvLabel;
+    if (reqPvUrls.length > 1) {
+        var prev = document.createElement('button');
+        prev.type = 'button'; prev.className = 'rdp-nav rdp-prev';
+        prev.innerHTML = '<i class="fas fa-chevron-left"></i>';
+        prev.onclick = function(e) { e.stopPropagation(); reqPvIndex = (reqPvIndex - 1 + reqPvUrls.length) % reqPvUrls.length; renderReqStackPreview(); };
+        var next = document.createElement('button');
+        next.type = 'button'; next.className = 'rdp-nav rdp-next';
+        next.innerHTML = '<i class="fas fa-chevron-right"></i>';
+        next.onclick = function(e) { e.stopPropagation(); reqPvIndex = (reqPvIndex + 1) % reqPvUrls.length; renderReqStackPreview(); };
+        viewer.appendChild(prev); viewer.appendChild(next);
+    }
+    if (counter) counter.textContent = reqPvUrls.length > 1 ? (reqPvIndex + 1) + ' / ' + reqPvUrls.length : '';
+}
+function closeReqStackPreview() {
+    var m = document.getElementById('reqDocPreviewModal');
+    if (m) m.style.display = 'none';
+    var v = document.getElementById('reqDocPreviewViewer');
+    if (v) v.innerHTML = '';
+    document.body.style.overflow = '';
+}
+document.addEventListener('keydown', function(e) {
+    var m = document.getElementById('reqDocPreviewModal');
+    if (!m || m.style.display !== 'flex') return;
+    if (e.key === 'Escape') closeReqStackPreview();
+    else if (e.key === 'ArrowLeft'  && reqPvUrls.length > 1) { reqPvIndex = (reqPvIndex - 1 + reqPvUrls.length) % reqPvUrls.length; renderReqStackPreview(); }
+    else if (e.key === 'ArrowRight' && reqPvUrls.length > 1) { reqPvIndex = (reqPvIndex + 1) % reqPvUrls.length; renderReqStackPreview(); }
+});
+document.getElementById('reqDocPreviewModal').addEventListener('click', function(e) {
+    if (e.target === this || e.target.id === 'reqDocPreviewViewer') closeReqStackPreview();
+});
+
+/* ADJUSTMENT: the pictures already saved for a requirement, shown as the same card stack + paged viewer */
+function openSavedReqStack(el) {
+    var urls = [];
+    try { urls = JSON.parse(el.getAttribute('data-urls') || '[]'); } catch (e) {}
+    if (!urls.length) return;
+    var names = urls.map(function(u, i) { return 'Picture ' + (i + 1); });
+    openReqStackPreview(el.getAttribute('data-label') || 'Picture', urls, names);
+}
+function buildSavedReqStack(ids, label) {
+    var urls = ids.map(function(id) { return 'AccomForm.php?stream_req_file=' + encodeURIComponent(id); });
+    var wrap = document.createElement('div');
+    wrap.className = 'rce-file-stack-wrap';
+    wrap.setAttribute('data-label', label || 'Picture');
+    wrap.setAttribute('data-urls', JSON.stringify(urls));
+    wrap.title = urls.length + ' files saved — click to preview them all';
+    wrap.onclick = function() { openSavedReqStack(wrap); };
+    var stack = document.createElement('div');
+    stack.className = 'rce-file-stack';
+    for (var li = Math.min(3, urls.length) - 1; li >= 0; li--) {
+        var layer = document.createElement('div');
+        layer.className = 'rce-stack-layer layer-' + (li + 1);
+        layer.style.backgroundImage = "url('" + urls[li] + "')";
+        stack.appendChild(layer);
+    }
+    var badge = document.createElement('span');
+    badge.className = 'rce-stack-count-badge';
+    badge.textContent = String(urls.length);
+    stack.appendChild(badge);
+    wrap.appendChild(stack);
+    var lbl = document.createElement('div');
+    lbl.className = 'rce-file-stack-label';
+    lbl.textContent = urls.length + ' files';
+    wrap.appendChild(lbl);
+    return wrap;
+}
+
 function previewRequirementFile(input) {
-    if (!input.files || !input.files[0]) return;
-    var file = input.files[0];
+    if (!input.files || !input.files.length) return;
+    var files = Array.prototype.slice.call(input.files);
     var key  = input.dataset.reqType || '';
     var previewContainer = key
         ? document.getElementById('rcePreview_' + key)
@@ -3354,19 +4276,52 @@ function previewRequirementFile(input) {
 
     previewContainer.innerHTML = '';
     previewContainer.style.display = '';
+    revokeReqPreviewUrls(key);
 
-    if (file.type.startsWith('image/')) {
-        var reader = new FileReader();
-        reader.onload = function(e) {
-            var img = document.createElement('img');
-            img.src = e.target.result;
-            img.className = 'rce-preview-img';
-            img.onclick = function() { openPreview(this.src); };
-            img.title = 'Click to view full size';
-            previewContainer.appendChild(img);
-        };
-        reader.readAsDataURL(file);
-    } else if (file.type === 'application/pdf') {
+    var images = files.filter(function(f) { return (f.type || '').indexOf('image/') === 0; });
+    var pdfs   = files.filter(function(f) { return f.type === 'application/pdf'; });
+    reqPreviewUrls[key] = [];
+    var label = input.dataset.label || key;
+
+    if (images.length === 1 && files.length === 1) {
+        var url = URL.createObjectURL(images[0]);
+        reqPreviewUrls[key].push(url);
+        var img = document.createElement('img');
+        img.src = url;
+        img.className = 'rce-preview-img';
+        img.onclick = function() { openPreview(this.src); };
+        img.title = images[0].name + ' — click to view full size';
+        previewContainer.appendChild(img);
+    } else if (images.length > 1) {
+        var urls  = images.map(function(f) { var u = URL.createObjectURL(f); reqPreviewUrls[key].push(u); return u; });
+        var names = images.map(function(f) { return f.name; });
+
+        var wrap = document.createElement('div');
+        wrap.className = 'rce-file-stack-wrap';
+        wrap.title = urls.length + ' files selected — not yet submitted, click to preview';
+        wrap.onclick = function() { openReqStackPreview(label, urls, names); };
+
+        var stack = document.createElement('div');
+        stack.className = 'rce-file-stack';
+        var layerCount = Math.min(3, urls.length);
+        for (var li = layerCount - 1; li >= 0; li--) {
+            var layer = document.createElement('div');
+            layer.className = 'rce-stack-layer layer-' + (li + 1);
+            layer.style.backgroundImage = "url('" + urls[li] + "')";
+            stack.appendChild(layer);
+        }
+        var badge = document.createElement('span');
+        badge.className = 'rce-stack-count-badge';
+        badge.textContent = String(urls.length);
+        stack.appendChild(badge);
+        wrap.appendChild(stack);
+
+        var lbl = document.createElement('div');
+        lbl.className = 'rce-file-stack-label';
+        lbl.textContent = urls.length + ' files';
+        wrap.appendChild(lbl);
+        previewContainer.appendChild(wrap);
+    } else if (pdfs.length) {
         var pdfDiv = document.createElement('div');
         pdfDiv.className = 'rce-pdf-thumb';
         pdfDiv.innerHTML = '<i class="fas fa-file-pdf"></i><span>PDF</span>';
@@ -3753,6 +4708,20 @@ document.getElementById('closeSubmittedModal').addEventListener('click', functio
 });
 <?php endif; ?>
 
+<?php if (isset($_GET['msg']) && $_GET['msg'] === 'schedule_none'): ?>
+document.addEventListener('DOMContentLoaded', function() {
+    showValidationError('Schedule Required', 'Day Schedule and Evening Schedule cannot both be set to "None". Please select at least one schedule.', []);
+    if (window.history.replaceState) window.history.replaceState({}, document.title, window.location.pathname);
+});
+<?php endif; ?>
+
+<?php if (isset($_GET['msg']) && $_GET['msg'] === 'required_missing'): ?>
+document.addEventListener('DOMContentLoaded', function() {
+    showValidationError('Required Fields Missing', 'Please complete all required fields before saving.', []);
+    if (window.history.replaceState) window.history.replaceState({}, document.title, window.location.pathname);
+});
+<?php endif; ?>
+
 <?php if (isset($_GET['msg']) && $_GET['msg'] === 'profile_saved'): ?>
 document.addEventListener('DOMContentLoaded', function() {
     var psModal = document.getElementById('profileSavedModal');
@@ -3765,20 +4734,25 @@ function showNotifModal(modalId) { document.getElementById(modalId).style.displa
 function hideNotifModal(modalId) { document.getElementById(modalId).style.display = 'none'; }
 
 /* ============================================================
-   ADJUSTMENT: JPEG-ONLY VALIDATION (CLIENT SIDE)
+   ADJUSTMENT: JPEG-ONLY VALIDATION (CLIENT SIDE) — 2x2 PHOTO
    ------------------------------------------------------------
-   Both the 2x2 photo upload and every requirement upload now
-   accept ONLY "image/jpeg" files. This mirrors the accept="image/jpeg"
-   attributes on the file inputs above and the server-side check in
-   the save_profile_info POST handler. Anything else (PNG, GIF, WEBP,
-   PDF, etc.) is rejected immediately with a clear message, before it
-   is even sent to the server.
+   The 2x2 photo upload still accepts ONLY "image/jpeg" files
+   (mirrors its accept="image/jpeg" attribute and the server-side
+   check in the save_profile_info POST handler).
+
+   ADJUSTMENT: the requirement uploads (Documentary Requirements)
+   now accept ANY picture format (JPG, PNG, GIF, WEBP, BMP, ...) and
+   several pictures per requirement — see isPictureFile() and
+   submit_requirements.php, which combines them into one image.
    ============================================================ */
-var MAX_FILE_SIZE = 5 * 1024 * 1024;
+var MAX_FILE_SIZE_MB = <?= (int)$reqMaxFileSizeMB ?>;
+var MAX_FILE_SIZE = MAX_FILE_SIZE_MB * 1024 * 1024;
 var ALLOWED_TYPES = ['image/jpeg'];
 var ALLOWED_PHOTO_TYPES = ['image/jpeg'];
 
 function showValidationError(title, message, errorList) {
+    var vbox = document.querySelector('#validationModal .notif-modal-box');
+    if (vbox) vbox.classList.remove('neutral-modal'); /* the regular validation popup keeps its own look */
     document.getElementById('validationModalTitle').textContent = title;
     document.getElementById('validationModalMsg').textContent   = message;
     var listEl = document.getElementById('validationErrorList');
@@ -3792,28 +4766,363 @@ function showValidationError(title, message, errorList) {
     showNotifModal('validationModal');
 }
 
-function validateFileInput(input) {
-    var file = input.files[0];
-    if (!file) return true;
-    var label = input.dataset.label || input.name || 'File';
-    var allowedTypes = input.id === 'profilePhotoInput' ? ALLOWED_PHOTO_TYPES : ALLOWED_TYPES;
-    if (!allowedTypes.includes(file.type)) {
-        showValidationError('Invalid File Type',
-            input.id === 'profilePhotoInput'
-                ? 'Only JPEG (JPG) image files are allowed for the 2x2 photo.'
-                : 'Only JPEG (JPG) image files are allowed for this requirement.',
-            ['"' + label + '" — uploaded file type (' + (file.type || 'unknown') + ') is not supported. Please upload a JPEG (.jpg/.jpeg) file.']);
-        input.value = '';
-        return false;
+/* ============================================================
+   ADJUSTMENT: DAY / EVENING SCHEDULE — "None" RESTRICTION
+   ------------------------------------------------------------
+   The student may choose "None" for one of the two schedules, but not
+   for both. Picking "None" on one while the other is already "None"
+   immediately shows a popup and reverts the dropdown to its previous
+   value. The same rule is re-checked when the form is submitted.
+   ============================================================ */
+var SCHED_BOTH_NONE_TITLE = 'Schedule Required';
+var SCHED_BOTH_NONE_MSG   = 'Day Schedule and Evening Schedule cannot both be set to "None". Please select at least one schedule.';
+
+function schedBothNone() {
+    var d = document.getElementById('daySchedSelect');
+    var e = document.getElementById('eveningSchedSelect');
+    return !!(d && e && d.value === 'None' && e.value === 'None');
+}
+
+var SCHED_DAY_ORDER = ['M', 'T', 'W', 'Th', 'F'];
+var SCHED_DAY_NAMES  = { 'M': 'Mon', 'T': 'Tue', 'W': 'Wed', 'Th': 'Thu', 'F': 'Fri' };
+
+/* Rebuilds the hidden value (acronym) + button text from the ticked days */
+function schedRefresh(dd) {
+    var hidden = dd.querySelector('input[type="hidden"]');
+    var text   = dd.querySelector('.sched-dd-text');
+    var boxes  = dd.querySelectorAll('.sched-dd-panel input[type="checkbox"]');
+    var noneBox = dd.querySelector('.sched-dd-panel input[value="None"]');
+    var picked = [];
+    boxes.forEach(function(b) { if (b.checked && b.value !== 'None') picked.push(b.value); });
+    picked.sort(function(a, b) { return SCHED_DAY_ORDER.indexOf(a) - SCHED_DAY_ORDER.indexOf(b); });
+
+    if (noneBox && noneBox.checked) {
+        hidden.value = 'None';
+        text.textContent = 'None';
+        text.classList.remove('placeholder');
+    } else if (picked.length) {
+        hidden.value = picked.join('');
+        text.textContent = hidden.value + ' — ' + picked.map(function(p) { return SCHED_DAY_NAMES[p]; }).join(', ');
+        text.classList.remove('placeholder');
+    } else if (hidden.value && !dd.getAttribute('data-touched')) {
+        /* legacy free-text value already saved — shown as-is until changed */
+        text.textContent = hidden.value;
+        text.classList.remove('placeholder');
+    } else {
+        hidden.value = '';
+        text.textContent = '— Select Days —';
+        text.classList.add('placeholder');
     }
-    if (file.size > MAX_FILE_SIZE) {
-        var sizeMB = (file.size / (1024 * 1024)).toFixed(2);
-        showValidationError('File Too Large', 'Each file must be 5 MB or smaller.',
-            ['"' + label + '" is ' + sizeMB + ' MB — please compress or choose a smaller file.']);
-        input.value = '';
-        return false;
+    hidden.setAttribute('data-prev', hidden.value);
+}
+
+function schedSnapshot(dd) {
+    var snap = {};
+    dd.querySelectorAll('.sched-dd-panel input[type="checkbox"]').forEach(function(b) { snap[b.value] = b.checked; });
+    return snap;
+}
+function schedRestore(dd, snap) {
+    dd.querySelectorAll('.sched-dd-panel input[type="checkbox"]').forEach(function(b) { b.checked = !!snap[b.value]; });
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+    var dds = document.querySelectorAll('[data-sched-dd]');
+
+    dds.forEach(function(dd) {
+        var btn   = dd.querySelector('.sched-dd-btn');
+        var boxes = dd.querySelectorAll('.sched-dd-panel input[type="checkbox"]');
+        var snap  = schedSnapshot(dd);
+        schedRefresh(dd);
+
+        btn.addEventListener('click', function(ev) {
+            ev.stopPropagation();
+            var willOpen = !dd.classList.contains('open');
+            dds.forEach(function(o) { o.classList.remove('open'); });
+            if (willOpen) dd.classList.add('open');
+            btn.setAttribute('aria-expanded', willOpen ? 'true' : 'false');
+        });
+        dd.querySelector('.sched-dd-panel').addEventListener('click', function(ev) { ev.stopPropagation(); });
+
+        boxes.forEach(function(box) {
+            box.addEventListener('change', function() {
+                dd.setAttribute('data-touched', '1');
+                if (box.checked) {
+                    if (box.value === 'None') {
+                        boxes.forEach(function(o) { if (o !== box) o.checked = false; });
+                    } else {
+                        var noneBox = dd.querySelector('.sched-dd-panel input[value="None"]');
+                        if (noneBox) noneBox.checked = false;
+                    }
+                }
+                schedRefresh(dd);
+
+                if (schedBothNone()) {
+                    schedRestore(dd, snap);
+                    schedRefresh(dd);
+                    showValidationError(SCHED_BOTH_NONE_TITLE, SCHED_BOTH_NONE_MSG, []);
+                    return;
+                }
+                snap = schedSnapshot(dd);
+            });
+        });
+    });
+
+    document.addEventListener('click', function() {
+        dds.forEach(function(o) {
+            o.classList.remove('open');
+            var b = o.querySelector('.sched-dd-btn');
+            if (b) b.setAttribute('aria-expanded', 'false');
+        });
+    });
+});
+
+/* ============================================================
+   ADJUSTMENT: OJT COORDINATOR DROPDOWN — AUTO-FIT WIDTH
+   ------------------------------------------------------------
+   Sizes the OJT Coordinator select to the text of the currently selected
+   admin name (plus padding and the arrow), so short names give a compact
+   field and long names get a wider one. It is capped at 100% of the row.
+   ============================================================ */
+document.addEventListener('DOMContentLoaded', function() {
+    var sel = document.getElementById('ojtCoordinatorSelect');
+    if (!sel) return;
+    var canvas = document.createElement('canvas');
+    var ctx = canvas.getContext('2d');
+
+    function fit() {
+        var opt  = sel.options[sel.selectedIndex];
+        var text = opt ? opt.text : '';
+        var cs   = window.getComputedStyle(sel);
+        ctx.font = cs.fontStyle + ' ' + cs.fontWeight + ' ' + cs.fontSize + ' ' + cs.fontFamily;
+        var textW = ctx.measureText(text).width;
+        var extra = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight)
+                  + parseFloat(cs.borderLeftWidth) + parseFloat(cs.borderRightWidth) + 6;
+        sel.style.width = Math.ceil(textW + extra) + 'px';
+    }
+    fit();
+    sel.addEventListener('change', fit);
+    window.addEventListener('resize', fit);
+});
+
+/* ============================================================
+   ADJUSTMENT: CONTACT PERSON FULL NAME — AUTO-FIT WIDTH
+   ------------------------------------------------------------
+   Sizes the read-only Full Name field to the length of the contact
+   person's name (same approach as the OJT Coordinator dropdown). Exposed
+   as window.fitPrefContactFull so the placement script can re-run it when
+   the field's value changes.
+   ============================================================ */
+(function() {
+    var canvas = document.createElement('canvas');
+    var ctx = canvas.getContext('2d');
+    window.fitPrefContactFull = function() {
+        var inp = document.getElementById('prefContactFull');
+        if (!inp) return;
+        var cs   = window.getComputedStyle(inp);
+        ctx.font = cs.fontStyle + ' ' + cs.fontWeight + ' ' + cs.fontSize + ' ' + cs.fontFamily;
+        var text = inp.value || inp.placeholder || '';
+        var extra = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight)
+                  + parseFloat(cs.borderLeftWidth) + parseFloat(cs.borderRightWidth) + 6;
+        inp.style.width = Math.ceil(ctx.measureText(text).width + extra) + 'px';
+    };
+    document.addEventListener('DOMContentLoaded', window.fitPrefContactFull);
+    window.addEventListener('resize', window.fitPrefContactFull);
+})();
+
+/* ============================================================
+   ADJUSTMENT: PREFERENCE FOR PLACEMENT — VERIFIED COMPANY DROPDOWN
+   ------------------------------------------------------------
+   Choosing a verified company shows the placement fields auto-filled with
+   that company's details and locked (read-only). Ticking "Other company"
+   disables the dropdown and makes the fields editable so the student can
+   type their own company; unticking locks/re-fills them from the selected
+   verified company again (or hides them if none is selected). Whatever was
+   typed is remembered while the page stays open.
+   ============================================================ */
+document.addEventListener('DOMContentLoaded', function() {
+    var sel   = document.getElementById('prefCompanySelect');
+    var chk   = document.getElementById('prefOtherCheck');
+    var wrap  = document.getElementById('prefOtherFields');
+    var form  = document.getElementById('profileInfoForm');
+    if (!sel || !chk || !wrap || !form) return;
+
+    var locked = sel.getAttribute('data-locked') === '1';
+    var names  = ['company_name', 'company_address', 'telephone',
+                  'contact_person_first', 'contact_person_middle', 'contact_person_last', 'position'];
+    var stash  = null;
+
+    function field(n) { return form.querySelector('[name="' + n + '"]'); }
+    function readFields() {
+        var o = {};
+        names.forEach(function(n) { var f = field(n); o[n] = f ? f.value : ''; });
+        return o;
+    }
+    function writeFields(o) {
+        names.forEach(function(n) { var f = field(n); if (f) f.value = (o && o[n]) ? o[n] : ''; });
+    }
+    function fromOption() {
+        var opt = sel.options[sel.selectedIndex];
+        if (!opt || !opt.value) return null;
+        return {
+            company_name:          opt.getAttribute('data-name')     || '',
+            company_address:       opt.getAttribute('data-address')  || '',
+            telephone:             opt.getAttribute('data-tel')      || '',
+            contact_person_first:  opt.getAttribute('data-first')    || '',
+            contact_person_middle: opt.getAttribute('data-middle')   || '',
+            contact_person_last:   opt.getAttribute('data-last')     || '',
+            position:              opt.getAttribute('data-position') || ''
+        };
+    }
+
+    if (locked) return; /* already registered/deployed — fields stay locked & visible */
+
+    /* Applies the right look for the current state:
+       - "Other company" ticked      -> fields visible + editable
+       - verified company selected   -> fields visible + auto-filled + locked (read-only)
+       - nothing selected            -> fields hidden */
+    function applyState() {
+        var hasCompany = !!sel.value;
+        if (chk.checked) {
+            wrap.style.display = '';
+            setReadonly(false);
+        } else if (hasCompany) {
+            wrap.style.display = '';
+            setReadonly(true);
+        } else {
+            wrap.style.display = 'none';
+            setReadonly(false);
+        }
+    }
+    function setReadonly(on) {
+        names.forEach(function(n) {
+            var f = field(n);
+            if (!f) return;
+            if (on) { f.setAttribute('readonly', 'readonly'); } else { f.removeAttribute('readonly'); }
+        });
+        showContactMode(on);
+    }
+    /* Contact Person: one full-name field while the details come from a
+       verified company (locked); first/middle/last inputs for "Other company". */
+    function showContactMode(fullName) {
+        var fullWrap   = document.getElementById('prefContactFullWrap');
+        var atomicWrap = document.getElementById('prefContactAtomicWrap');
+        var fullInput  = document.getElementById('prefContactFull');
+        if (!fullWrap || !atomicWrap) return;
+        if (fullName) {
+            var parts = ['contact_person_first', 'contact_person_middle', 'contact_person_last']
+                .map(function(n) { var f = field(n); return f ? f.value.trim() : ''; })
+                .filter(function(v) { return v !== ''; });
+            if (fullInput) fullInput.value = parts.join(' ');
+            fullWrap.style.display   = '';
+            atomicWrap.style.display = 'none';
+        } else {
+            fullWrap.style.display   = 'none';
+            atomicWrap.style.display = '';
+        }
+        var grp = document.getElementById('prefContactPerson');
+        if (grp) { grp.classList.toggle('is-fullname', !!fullName); }
+        if (window.fitPrefContactFull) window.fitPrefContactFull();
+    }
+
+    if (!chk.checked && sel.value) writeFields(fromOption());
+    applyState();
+
+    sel.addEventListener('change', function() {
+        if (!chk.checked) {
+            writeFields(fromOption());   /* auto-fill with the selected company's data (blank if none) */
+            applyState();
+        }
+    });
+
+    chk.addEventListener('change', function() {
+        if (chk.checked) {
+            sel.disabled = true;
+            writeFields(stash);          /* restore what was typed before, or start blank */
+        } else {
+            stash = readFields();
+            sel.disabled = false;
+            writeFields(fromOption());   /* back to the selected verified company (or blank) */
+        }
+        applyState();
+    });
+});
+
+/* ADJUSTMENT: any picture format counts (image/* MIME type, or a picture file extension when the browser reports no type) */
+function isPictureFile(file) {
+    return (file.type || '').indexOf('image/') === 0 ||
+           /\.(jpe?g|png|gif|webp|bmp|tiff?|svg|heic|heif|avif|ico)$/i.test(file.name || '');
+}
+
+/* ADJUSTMENT: PDF upload limit (same rule and popup wording as company_register.php) —
+   a requirement accepts ONE PDF at most, and a PDF cannot be mixed with pictures. */
+function isPdfFile(file) {
+    return file.type === 'application/pdf' || /\.pdf$/i.test(file.name || '');
+}
+function checkPdfLimit(files) {
+    var pdfs = files.filter(isPdfFile).length;
+    if (pdfs > 1) {
+        return { title: 'Only One PDF Allowed',
+                 msg: 'Only one PDF file can be selected for this document. Please choose a single PDF file, or switch to picture files if you need to upload multiple files.' };
+    }
+    if (pdfs === 1 && files.length > 1) {
+        return { title: 'Mixed File Formats Not Allowed',
+                 msg: 'Please select files of the same format only — either all pictures or a single PDF, not a mix of both, for this document.' };
+    }
+    return null;
+}
+
+/* ADJUSTMENT: PDF-limit popup — same popup, page-matching neutral look */
+function showPdfLimitPopup(title, message, errorList) {
+    showValidationError(title, message, errorList);
+    var vbox = document.querySelector('#validationModal .notif-modal-box');
+    if (vbox) vbox.classList.add('neutral-modal');
+}
+
+function validateFileInput(input) {
+    var files = input.files ? Array.prototype.slice.call(input.files) : [];
+    if (!files.length) return true;
+    var label = input.dataset.label || input.name || 'File';
+    var isPhoto = input.id === 'profilePhotoInput';
+    if (!isPhoto) {
+        var pdfIssue = checkPdfLimit(files);
+        if (pdfIssue) {
+            showPdfLimitPopup(pdfIssue.title, pdfIssue.msg, ['"' + label + '"']);
+            input.value = '';
+            return false;
+        }
+    }
+    for (var i = 0; i < files.length; i++) {
+        var file = files[i];
+        var okType = isPhoto ? ALLOWED_PHOTO_TYPES.includes(file.type) : (isPictureFile(file) || isPdfFile(file));
+        if (!okType) {
+            showValidationError('Invalid File Type',
+                isPhoto
+                    ? 'Only JPEG (JPG) image files are allowed for the 2x2 photo.'
+                    : 'Only picture files (JPG, PNG, GIF, WEBP, BMP, ...) or a single PDF are allowed for this requirement.',
+                isPhoto
+                    ? ['"' + label + '" — uploaded file type (' + (file.type || 'unknown') + ') is not supported. Please upload a JPEG (.jpg/.jpeg) file.']
+                    : ['"' + label + '" — "' + file.name + '" (' + (file.type || 'unknown') + ') is not a picture file. Please choose picture files only.']);
+            input.value = '';
+            return false;
+        }
+        if (file.size > MAX_FILE_SIZE) {
+            var sizeMB = (file.size / (1024 * 1024)).toFixed(2);
+            showValidationError('File Too Large', 'Each file must be ' + MAX_FILE_SIZE_MB + ' MB or smaller.',
+                ['"' + label + '"' + (files.length > 1 ? ' — "' + file.name + '"' : '') + ' is ' + sizeMB + ' MB — please compress or choose a smaller file.']);
+            input.value = '';
+            return false;
+        }
     }
     return true;
+}
+
+/* ADJUSTMENT: ALL FIELDS REQUIRED — a requirement upload is "needed" while its
+   upload controls are visible (no file on record yet, or the last one was Denied).
+   Requirements already uploaded and not denied are not asked for again. */
+function requirementNeedsUpload(input) {
+    var wrap = input.closest('[id^="rceUploadControls_"]') || input.closest('[id^="rceUploadRow_"]');
+    if (!wrap) return true;
+    return window.getComputedStyle(wrap).display !== 'none';
 }
 
 document.addEventListener('DOMContentLoaded', function() {
@@ -3822,22 +5131,49 @@ document.addEventListener('DOMContentLoaded', function() {
     form.addEventListener('submit', function(e) {
         var fileInputs = form.querySelectorAll('input[type="file"].rce-file-input-hidden');
         var errors = [];
+        var selectedCount = 0;
         fileInputs.forEach(function(input) {
-            var file = input.files[0];
-            if (!file) return;
+            var files = input.files ? Array.prototype.slice.call(input.files) : [];
             var label = input.dataset.label || input.name || 'File';
-            if (!ALLOWED_TYPES.includes(file.type)) {
-                errors.push('"' + label + '" — invalid file type (' + (file.type || 'unknown') + '). Only JPEG is allowed.');
-            } else if (file.size > MAX_FILE_SIZE) {
-                var sizeMB = (file.size / (1024 * 1024)).toFixed(2);
-                errors.push('"' + label + '" — file is ' + sizeMB + ' MB, exceeds the 5 MB limit.');
-            }
+            /* ADJUSTMENT: requirements can be submitted one at a time or in a batch (like CompanyForm.php):
+               a requirement with nothing selected is simply left as it is. */
+            if (!files.length) return;
+            selectedCount++;
+            var pdfIssue = checkPdfLimit(files);
+            if (pdfIssue) { errors.push('"' + label + '" — ' + pdfIssue.msg); return; }
+            files.forEach(function(file) {
+                if (!isPictureFile(file) && !isPdfFile(file)) {
+                    errors.push('"' + label + '" — "' + file.name + '" is not a picture file (' + (file.type || 'unknown') + ').');
+                } else if (file.size > MAX_FILE_SIZE) {
+                    var sizeMB = (file.size / (1024 * 1024)).toFixed(2);
+                    errors.push('"' + label + '" — "' + file.name + '" is ' + sizeMB + ' MB, exceeds the ' + MAX_FILE_SIZE_MB + ' MB limit.');
+                }
+            });
         });
+        if (errors.length === 0 && selectedCount === 0) {
+            e.preventDefault();
+            showValidationError('Nothing to Submit', 'Choose a picture for at least one requirement, then submit.',
+                ['You can submit a single requirement or several at once — only the requirements you chose a file for are sent.']);
+            return;
+        }
         if (errors.length > 0) {
             e.preventDefault();
             showValidationError('Please Fix the Following', 'Some files could not be submitted. See details below:', errors);
         }
     });
+
+    /* ADJUSTMENT: the submit button shows how many requirements are queued for this submit */
+    var submitBtn = form.querySelector('button.submit-all');
+    function refreshBatchLabel() {
+        if (!submitBtn) return;
+        var n = 0;
+        form.querySelectorAll('input[type="file"].rce-file-input-hidden').forEach(function(i) { if (i.files && i.files.length) n++; });
+        submitBtn.textContent = n > 0 ? ('Submit ' + n + ' Selected Requirement' + (n > 1 ? 's' : '')) : 'Submit Requirements';
+    }
+    form.addEventListener('change', function(ev) {
+        if (ev.target && ev.target.matches && ev.target.matches('input[type="file"].rce-file-input-hidden')) refreshBatchLabel();
+    });
+    refreshBatchLabel();
 });
 
 document.addEventListener('DOMContentLoaded', function() {
@@ -3877,6 +5213,64 @@ document.addEventListener('DOMContentLoaded', function() {
    before: it posts normally and the page redirects back with
    ?msg=profile_saved.
    ============================================================ */
+/* ============================================================
+   ADJUSTMENT: ALL FIELDS REQUIRED — CLIENT-SIDE CHECK (Student Info)
+   ------------------------------------------------------------
+   Every field carrying data-req-label must be filled before the form
+   is sent. Fields that are disabled, read-only (auto-filled / locked
+   company details) or currently hidden (e.g. the Guardian "Other"
+   name fields, or the placement details before a company is chosen)
+   are skipped. Missing fields are outlined in red and listed in the
+   existing validation popup. Middle names remain optional.
+   ============================================================ */
+function reqTargetOf(el) {
+    if (el.type === 'hidden') {
+        var dd = el.closest('.sched-dd');
+        var b  = dd ? dd.querySelector('.sched-dd-btn') : null;
+        return b || el;
+    }
+    if (el.type === 'file') {
+        return document.getElementById('profilePhotoBtnLabel') || el;
+    }
+    return el;
+}
+
+function collectMissingProfileFields(form) {
+    var missing = [];
+    form.querySelectorAll('.field-missing').forEach(function(n) { n.classList.remove('field-missing'); });
+    document.querySelectorAll('.field-missing').forEach(function(n) { n.classList.remove('field-missing'); });
+    form.querySelectorAll('[data-req-label]').forEach(function(el) {
+        if (el.disabled || el.readOnly) return;
+        if (el.type !== 'hidden' && el.offsetParent === null) return;
+        if (String(el.value || '').trim() !== '') return;
+        var target = reqTargetOf(el);
+        target.classList.add('field-missing');
+        missing.push({ label: el.getAttribute('data-req-label'), el: target });
+    });
+    return missing;
+}
+
+document.addEventListener('DOMContentLoaded', function() {
+    var f = document.getElementById('profileInfoForm');
+    if (!f) return;
+    function clearMark(e) {
+        var t = e.target;
+        if (t && t.classList) t.classList.remove('field-missing');
+        var dd = t && t.closest ? t.closest('.sched-dd') : null;
+        if (dd) {
+            var b = dd.querySelector('.sched-dd-btn');
+            if (b) b.classList.remove('field-missing');
+        }
+        if (t && t.id === 'profilePhotoInput') {
+            var pl = document.getElementById('profilePhotoBtnLabel');
+            if (pl) pl.classList.remove('field-missing');
+        }
+    }
+    f.addEventListener('input',  clearMark);
+    f.addEventListener('change', clearMark);
+    f.addEventListener('click',  clearMark);
+});
+
 function updatePhotoSectionAfterSave(hasNewPhoto, newStatus) {
     if (!hasNewPhoto) return;
 
@@ -3907,6 +5301,22 @@ document.addEventListener('DOMContentLoaded', function() {
     profileForm.addEventListener('submit', function(e) {
         e.preventDefault();
 
+        var missingFields = collectMissingProfileFields(profileForm);
+        if (missingFields.length > 0) {
+            showValidationError(
+                'Required Fields Missing',
+                'Please complete all required fields before saving.',
+                missingFields.map(function(m) { return m.label; })
+            );
+            try { missingFields[0].el.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch (err) {}
+            return;
+        }
+
+        if (schedBothNone()) {
+            showValidationError(SCHED_BOTH_NONE_TITLE, SCHED_BOTH_NONE_MSG, []);
+            return;
+        }
+
         var formData = new FormData(profileForm);
         var submitBtn = profileForm.querySelector('.pinfo-save-btn');
         var originalBtnHtml = submitBtn ? submitBtn.innerHTML : '';
@@ -3935,7 +5345,11 @@ document.addEventListener('DOMContentLoaded', function() {
                 updatePhotoSectionAfterSave(!!data.has_new_photo, 'Pending');
                 showNotifModal('profileSavedModal');
             } else {
-                showValidationError('Save Failed', 'We couldn\'t save your information. Please try again.', []);
+                showValidationError(
+                    (data && data.title) ? data.title : ((data && data.message) ? 'Schedule Required' : 'Save Failed'),
+                    (data && data.message) ? data.message : 'We couldn\'t save your information. Please try again.',
+                    (data && data.errors) ? data.errors : []
+                );
             }
         })
         .catch(function() {
@@ -4181,6 +5595,27 @@ setInterval(_anbWatch, 30000);
         _lastStatus[k] = card.getAttribute('data-status') || 'Pending';
     });
 
+    /* ADJUSTMENT: recount the cards for the summary line + progress bar (mirrors administrator.php) */
+    function refreshReqSummary() {
+        var box = document.getElementById('reqSummary');
+        if (!box) return;
+        var v = 0, p = 0, a = 0, total = 0;
+        document.querySelectorAll('.req-card-e[data-req-type]').forEach(function(c) {
+            total++;
+            var pv = c.querySelector('.rce-preview-container');
+            var hasFile = !!(pv && pv.style.display !== 'none' && pv.firstElementChild);
+            if (c.getAttribute('data-status') === 'Verified') v++;
+            else if (!hasFile) a++;
+            else p++;
+        });
+        var set = function(sel, val) { var el = box.querySelector(sel); if (el) el.textContent = val; };
+        set('.cv-n-total', total); set('.cv-n-verified', v); set('.cv-n-pending', p); set('.cv-n-awaiting', a);
+        var pct = total ? Math.round(v / total * 100) : 0;
+        set('.cv-progress-pct', pct + '% verified');
+        var fill = box.querySelector('.cv-progress-fill');
+        if (fill) fill.style.width = pct + '%';
+    }
+
     function applyCardStatus(key, info) {
         var card = document.getElementById('reqCard_' + key);
         if (!card) return;
@@ -4217,6 +5652,10 @@ setInterval(_anbWatch, 30000);
                 previewEl.style.display = '';
                 if (isPdf) {
                     previewEl.innerHTML = '<div class="rce-pdf-thumb"><i class="fas fa-file-pdf"></i><span>PDF</span></div>';
+                } else if (info.file_ids && info.file_ids.length > 1) {
+                    /* ADJUSTMENT: several pictures saved → the card stack instead of only the first picture */
+                    previewEl.innerHTML = '';
+                    previewEl.appendChild(buildSavedReqStack(info.file_ids, REQ_LABELS[key] || key));
                 } else if (imgSrc) {
                     previewEl.innerHTML = '<img src="' + imgSrc + '" class="rce-preview-img" onclick="openPreview(this.src)" title="Click to view full size">';
                 }
@@ -4238,9 +5677,13 @@ setInterval(_anbWatch, 30000);
             }
         }
 
-        var reuploadEl = document.getElementById('rceReupload_' + key);
-        if (reuploadEl) {
-            reuploadEl.style.display = status === 'Denied' ? '' : 'none';
+        /* ADJUSTMENT: a rejected requirement's button label reads "Re-upload required" (red) —
+           the separate "Re-upload required" line above the button was removed. */
+        var upLabel = document.querySelector('label.rce-upload-label[for="fileInput_' + key + '"]');
+        var upInput = document.getElementById('fileInput_' + key);
+        if (upLabel && !(upInput && upInput.files && upInput.files.length)) {
+            if (status === 'Denied') { upLabel.setAttribute('data-reupload', '1'); upLabel.textContent = 'Re-upload'; }
+            else { upLabel.removeAttribute('data-reupload'); upLabel.textContent = 'Click to upload'; }
         }
 
         var uploadRow = document.getElementById('rceUploadRow_' + key);
@@ -4264,6 +5707,7 @@ setInterval(_anbWatch, 30000);
         }
 
         card.setAttribute('data-status', status);
+        refreshReqSummary(); /* ADJUSTMENT: keep the summary line / progress bar in step with the cards */
 
         card.classList.remove('rce-status-updated');
         void card.offsetWidth;
@@ -4273,9 +5717,11 @@ setInterval(_anbWatch, 30000);
 
     function notifyStatusChange(key, newStatus) {
         var label = REQ_LABELS[key] || key;
-        /* UPDATED (design adjustment): Font Awesome icon instead of an emoji */
-        var icon  = newStatus === 'Verified' ? 'fas fa-check-circle' : newStatus === 'Denied' ? 'fas fa-times-circle' : 'fas fa-clock';
-        var title = label + ' — ' + newStatus;
+        /* ADJUSTMENT: the popup no longer repeats the document name in the title or shows a status
+           icon — the title is the plain status and the message names the document once. */
+        var title = newStatus === 'Verified' ? 'Requirement Verified'
+                  : newStatus === 'Denied'   ? 'Requirement Denied'
+                  : 'Requirement Updated';
         var msg   = newStatus === 'Verified'
             ? 'Your "' + label + '" has been verified by the administrator.'
             : newStatus === 'Denied'
@@ -4283,8 +5729,8 @@ setInterval(_anbWatch, 30000);
             : '"' + label + '" status changed to ' + newStatus + '.';
 
         var statusIconEl = document.getElementById('statusChangedIcon');
-        statusIconEl.className = 'notif-modal-icon' + (newStatus === 'Denied' ? ' icon-denied' : newStatus === 'Verified' ? '' : ' icon-pending');
-        statusIconEl.innerHTML = '<i class="' + icon + '"></i>';
+        statusIconEl.className = 'notif-modal-icon';
+        statusIconEl.innerHTML = '';
         document.getElementById('statusChangedTitle').textContent = title;
         document.getElementById('statusChangedMsg').textContent   = msg;
         showNotifModal('statusChangedModal');
