@@ -3049,7 +3049,7 @@ $company_total = ($companies instanceof mysqli_result) ? (int)$companies->num_ro
         .endo-remark-box b { color: var(--grid-red); }
         .endo-batch-note { border-radius: 0; }
         .endo-empty { color: var(--grid-muted); }
-        .endo-empty i { width: 100%; text-align: center; color: #A3AFC7; }
+        .endo-empty i { color: #A3AFC7; }
         #endoToast { border-radius: 0; box-shadow: none; border: 1px solid #55668C; border-left-width: 4px; background: var(--grid-navy); font-family: inherit; }
         #endoToast button { border-radius: 0; }
 
