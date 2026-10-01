@@ -5254,14 +5254,14 @@ document.getElementById('endoLetterModal').addEventListener('click', function (e
 });
 
 /* ADJUSTMENT: the notifications of the signed-letter upload use the same popup as the letter notifications
-   (the navy .cv-top-toast bar at the top: icon, company name in bold, "View ›" opening the Inbox). Falls back to the
+   (the navy .cv-top-toast bar at the top: icon, company name in bold; no "View ›" because the Inbox is already open). Falls back to the
    old bottom toast if the popup helper is not available, so an upload is never left unreported. */
 function endoUploadNotice(id, message, isError) {
     try {
         if (typeof clShowTopToast === 'function') {
             if (isError) { clShowTopToast('', message, 'fa-circle-xmark', true); return; }
             var l = _endoLetters.find(function (x) { return x.id === id; });
-            clShowTopToast(l ? l.company_name : '', '\u2014 ' + message, 'fa-envelope-circle-check', false, 'inbox');
+            clShowTopToast(l ? l.company_name : '', '\u2014 ' + message, 'fa-envelope-circle-check', false);   // no "View ›": the Inbox is already open
             return;
         }
     } catch (e) {}
