@@ -5675,45 +5675,6 @@ $cfLiveState = [
                 </div><!-- /#cfCompanyInfoRegion -->
                 <?php endif; ?>
 
-                <?php if ($moa_needs_initial_creation): ?>
-
-                <!-- ═══════════════════════════════════════════════
-                     NEW (this adjustment) — CREATE MOA action. Saves the
-                     fields above (all required) and generates the MOA
-                     from them — see submitMoaCreation() and the
-                     submit_moa_creation handler near the top of this
-                     file. Deliberately a plain type="button" + fetch()
-                     rather than this page's native form submit, so it can
-                     run independently of submit_compliance_docs (the file
-                     upload submit further down) without interfering with
-                     it. On success the page reloads: $moa_file is then
-                     populated, $moa_needs_initial_creation naturally goes
-                     false, and every field above locks back down exactly
-                     like it does for any other company.
-
-                     NEW (this adjustment) — PREVIEW MOA action, placed
-                     alongside it: lets the company see what their MOA
-                     will actually look like, built live from whatever
-                     they've currently typed above, before committing to
-                     "Create MOA" — see openMoaCreatePreview() and the
-                     #moaCreatePreviewModal modal further down. Mirrors
-                     company_register.php's own Step 2 "Preview MOA"
-                     button exactly (same hidden-form-into-iframe
-                     technique, same preview_new_moa endpoint pattern,
-                     now added near the top of this file).
-                     ═══════════════════════════════════════════════ -->
-                <div class="moa-creation-actions">
-                    <div id="moaCreationFeedback" class="moa-revision-feedback"></div>
-                    <button type="button" class="moa-creation-preview-btn" onclick="openMoaCreatePreview()">
-                        <i class="fas fa-eye"></i> Preview MOA
-                    </button>
-                    <button type="button" class="moa-creation-submit-btn" id="moaCreationSubmitBtn" onclick="submitMoaCreation()">
-                        <span class="moa-revision-spinner" id="moaCreationSpinner" style="display:none;"></span>
-                        <i class="fas fa-file-signature"></i> Create MOA
-                    </button>
-                </div>
-                <?php endif; ?>
-
                 <?php // ADJUSTMENT: MOA Document Status — moved here from the Requirements page so it sits right below Company Profile / Brief Description. Markup, ids and logic are unchanged; it is still shown only for "New" request-type companies ($showMoaSection). ?>
                 <?php if ($showMoaSection): ?>
                 <!-- ═══════════════════════════════════════════════
@@ -6051,6 +6012,46 @@ $cfLiveState = [
                     <?php endif; ?>
                 </div>
                 <?php endif; // end $showMoaSection ?>
+
+                <?php // ADJUSTMENT: Preview MOA / Create MOA actions moved here, below the MOA Document Status section (same markup, ids and handlers). ?>
+                <?php if ($moa_needs_initial_creation): ?>
+
+                <!-- ═══════════════════════════════════════════════
+                     NEW (this adjustment) — CREATE MOA action. Saves the
+                     fields above (all required) and generates the MOA
+                     from them — see submitMoaCreation() and the
+                     submit_moa_creation handler near the top of this
+                     file. Deliberately a plain type="button" + fetch()
+                     rather than this page's native form submit, so it can
+                     run independently of submit_compliance_docs (the file
+                     upload submit further down) without interfering with
+                     it. On success the page reloads: $moa_file is then
+                     populated, $moa_needs_initial_creation naturally goes
+                     false, and every field above locks back down exactly
+                     like it does for any other company.
+
+                     NEW (this adjustment) — PREVIEW MOA action, placed
+                     alongside it: lets the company see what their MOA
+                     will actually look like, built live from whatever
+                     they've currently typed above, before committing to
+                     "Create MOA" — see openMoaCreatePreview() and the
+                     #moaCreatePreviewModal modal further down. Mirrors
+                     company_register.php's own Step 2 "Preview MOA"
+                     button exactly (same hidden-form-into-iframe
+                     technique, same preview_new_moa endpoint pattern,
+                     now added near the top of this file).
+                     ═══════════════════════════════════════════════ -->
+                <div class="moa-creation-actions">
+                    <div id="moaCreationFeedback" class="moa-revision-feedback"></div>
+                    <button type="button" class="moa-creation-preview-btn" onclick="openMoaCreatePreview()">
+                        <i class="fas fa-eye"></i> Preview MOA
+                    </button>
+                    <button type="button" class="moa-creation-submit-btn" id="moaCreationSubmitBtn" onclick="submitMoaCreation()">
+                        <span class="moa-revision-spinner" id="moaCreationSpinner" style="display:none;"></span>
+                        <i class="fas fa-file-signature"></i> Create MOA
+                    </button>
+                </div>
+                <?php endif; ?>
 
                 <?php if (!$moa_needs_initial_creation): ?>
                 <?php // ADJUSTMENT: the info page's own submit button — saves the editable profile fields (same submit_compliance_docs handler as before). ?>
