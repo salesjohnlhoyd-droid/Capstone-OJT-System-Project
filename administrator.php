@@ -1,4 +1,20 @@
 <?php
+
+// ── CLEAN-UP (project audit): ONE definition of the `archived_students` table. It used to be written out 2 times in
+//    this file (2 different version(s)). CREATE TABLE IF NOT EXISTS only acts once, so whichever copy ran
+//    first decided the columns; every former copy now calls this complete definition instead. ──
+function cv_ensure_archived_students_table($conn) {
+    $conn->query("CREATE TABLE IF NOT EXISTS archived_students ( id INT AUTO_INCREMENT PRIMARY KEY, batch_label VARCHAR(200), user_id INT, first_name VARCHAR(100), middle_name VARCHAR(100), last_name VARCHAR(100), course VARCHAR(200), deploy_status VARCHAR(50), validation_status VARCHAR(50), photo_status VARCHAR(50), company VARCHAR(200), supervisor VARCHAR(200), archived_at DATETIME, archived_by VARCHAR(200) )");
+}
+
+
+// ── CLEAN-UP (project audit): ONE definition of the `admin_application_approvals` table. It used to be written out 2 times in
+//    this file (1 different version(s)). CREATE TABLE IF NOT EXISTS only acts once, so whichever copy ran
+//    first decided the columns; every former copy now calls this complete definition instead. ──
+function cv_ensure_admin_application_approvals_table($conn) {
+    $conn->query("CREATE TABLE IF NOT EXISTS admin_application_approvals ( id INT AUTO_INCREMENT PRIMARY KEY, student_id INT NOT NULL, company_id INT NOT NULL, phase VARCHAR(20) NOT NULL DEFAULT 'pending', skill1 TEXT, skill2 TEXT, skill3 TEXT, exp1 TEXT, exp2 TEXT, submitted_at DATETIME DEFAULT CURRENT_TIMESTAMP, UNIQUE KEY unique_application (student_id, company_id) )");
+}
+
 session_start();
 // ── NEW (this adjustment): LOGOUT + BACK BUTTON — never let the browser keep a copy of this page.
 // After the admin logs out, pressing the browser's Back arrow used to show this page again from the
@@ -38,6 +54,91 @@ if (
     header("Location: admin_login.php");
     exit;
 }
+
+// ============================================================================
+// NEW (this adjustment): NO NOTIFICATIONS LEFT BEHIND BY DELETED ACCOUNTS
+// ----------------------------------------------------------------------------
+// When a student or company account is deleted (Student List, Company List or
+// Manage Accounts), its notifications must disappear from the inboxes of
+// administrator.php / company_validation.php and from every side-menu
+// indicator. The company delete paths now remove them directly; this sweep also
+// clears any that were already left behind (or come from any other path). It
+// removes ONLY notification rows whose account no longer exists in `users`:
+//   • company_requirement_upload_notifications  (Company Requirements inbox + badge)
+//   • admin_application_approvals              (Application Requests inbox + badge)
+//   • moa_requests                             (MOA notifications — rows tied to an account)
+//   • email_recovery_requests, Pending only    (Manage Accounts indicator)
+// Archiving never deletes an account, so archived students / companies are never
+// touched. Runs at most once every 15 seconds per admin; fully guarded.
+// ============================================================================
+if (!function_exists('cv_sweep_orphan_notifications')) {
+    function cv_sweep_orphan_notifications($conn) {
+        $has = function ($t) use ($conn) {
+            try { $r = $conn->query("SHOW TABLES LIKE '" . $conn->real_escape_string($t) . "'"); return $r && $r->num_rows > 0; }
+            catch (\Throwable $e) { return false; }
+        };
+        $run = function ($sql) use ($conn) { try { $conn->query($sql); } catch (\Throwable $e) { /* never affects the page */ } };
+        if (!$has('users')) return;
+        if ($has('company_requirement_upload_notifications'))
+            $run("DELETE n FROM company_requirement_upload_notifications n LEFT JOIN users u ON u.id = n.user_id WHERE u.id IS NULL");
+        if ($has('admin_application_approvals'))
+            $run("DELETE a FROM admin_application_approvals a LEFT JOIN users s ON s.id = a.student_id LEFT JOIN users c ON c.id = a.company_id WHERE s.id IS NULL OR c.id IS NULL");
+        if ($has('moa_requests'))
+            $run("DELETE m FROM moa_requests m LEFT JOIN users u ON u.id = m.user_id WHERE m.user_id > 0 AND u.id IS NULL");
+        if ($has('email_recovery_requests'))
+            $run("DELETE r FROM email_recovery_requests r WHERE r.status = 'Pending' AND NOT EXISTS (SELECT 1 FROM users u WHERE u.email = r.old_email OR u.email = r.new_email)");
+        // NEW (this adjustment): student requirement submissions of deleted students
+        if ($has('student_requirement_upload_notifications'))
+            $run("DELETE n FROM student_requirement_upload_notifications n LEFT JOIN users u ON u.id = n.user_id WHERE u.id IS NULL");
+        if ($has('student_requirement_upload_watch'))
+            $run("DELETE w FROM student_requirement_upload_watch w LEFT JOIN users u ON u.id = w.user_id WHERE u.id IS NULL");
+    }
+}
+try {
+    $cvSweepNow = time();
+    if (!isset($_SESSION['cv_orphan_sweep_at']) || $cvSweepNow - (int)$_SESSION['cv_orphan_sweep_at'] >= 15) {
+        $_SESSION['cv_orphan_sweep_at'] = $cvSweepNow;
+        cv_sweep_orphan_notifications($conn);
+    }
+} catch (\Throwable $e) { /* never affects the page */ }
+
+// ============================================================================
+// NEW (this adjustment): STUDENT REQUIREMENT SUBMISSIONS — shared helpers.
+// A student's new / re-uploaded requirement (or profile photo) is recorded as a
+// notification (administrator.php detects it — see cv_sru_detect() there) and it
+// counts toward the Student Validation side-menu indicator on every page, next to
+// the application requests, exactly like company_validation.php's "Requirement
+// Uploaded" notifications count toward the Company Requirements indicator.
+// These tables are created here (once per session) so every page can count them.
+// ============================================================================
+if (!function_exists('cv_sru_ensure')) {
+    function cv_sru_ensure($conn) {
+        if (!empty($_SESSION['cv_sru_ready'])) return true;
+        try {
+            $conn->query("CREATE TABLE IF NOT EXISTS student_requirement_upload_notifications (
+                id INT AUTO_INCREMENT PRIMARY KEY, user_id INT NOT NULL, detail TEXT NULL,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                admin_viewed TINYINT(1) NOT NULL DEFAULT 0, KEY idx_sru_viewed (admin_viewed), KEY idx_sru_user (user_id))");
+            $conn->query("CREATE TABLE IF NOT EXISTS student_requirement_upload_watch (
+                user_id INT NOT NULL, requirement_type VARCHAR(100) NOT NULL, file_len BIGINT NOT NULL DEFAULT 0,
+                PRIMARY KEY (user_id, requirement_type))");
+            $conn->query("CREATE TABLE IF NOT EXISTS student_requirement_upload_meta (id TINYINT NOT NULL PRIMARY KEY, initialized TINYINT(1) NOT NULL DEFAULT 0)");
+            $_SESSION['cv_sru_ready'] = 1;
+            return true;
+        } catch (\Throwable $e) { return false; }
+    }
+    // unviewed submissions of active (not archived) students
+    function cv_sru_count($conn) {
+        try {
+            if (!cv_sru_ensure($conn)) return 0;
+            $r = $conn->query("SELECT COUNT(*) AS total FROM student_requirement_upload_notifications n
+                               INNER JOIN users u ON u.id = n.user_id WHERE n.admin_viewed = 0 AND COALESCE(u.is_archived, 0) = 0");
+            $row = $r ? $r->fetch_assoc() : null;
+            return (int)($row['total'] ?? 0);
+        } catch (\Throwable $e) { return 0; }
+    }
+}
+try { cv_sru_ensure($conn); } catch (\Throwable $e) {}
 
 // ── NEW (this adjustment): EMAIL RECOVERY REQUESTS side-menu indicator ─────────
 // Number of Pending rows in email_recovery_requests (the requests handled in
@@ -113,7 +214,7 @@ if (!function_exists('cv_alog_capture')) {
     function cv_alog_status_word($status) {
         $s = strtolower(trim((string)$status));
         $map = ['verified' => 'Verified', 'approved' => 'Approved', 'rejected' => 'Rejected', 'pending' => 'Set to Pending', 'complied' => 'Complied'];
-        return $map[$s] ?? ($s !== '' ? ucwords($s) : 'Updated');
+        return $map[$s] ?? ($s !== '' ? ucwords($s ?? '') : 'Updated');
     }
     function cv_alog_performer($conn) {
         $n = trim((string)($GLOBALS['adminFullName'] ?? ''));
@@ -233,19 +334,7 @@ cv_alog_capture($conn, [
 
 
 // Pending application requests count for navbar badge
-$conn->query("CREATE TABLE IF NOT EXISTS admin_application_approvals (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    student_id INT NOT NULL,
-    company_id INT NOT NULL,
-    phase VARCHAR(20) NOT NULL DEFAULT 'pending',
-    skill1 TEXT,
-    skill2 TEXT,
-    skill3 TEXT,
-    exp1 TEXT,
-    exp2 TEXT,
-    submitted_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE KEY unique_application (student_id, company_id)
-)");
+cv_ensure_admin_application_approvals_table($conn);   // CLEAN-UP (audit): shared definition, see cv_ensure_admin_application_approvals_table()
 /* ── FIX: widen skill1/skill2/skill3 on any table that already existed
    before this change. CREATE TABLE IF NOT EXISTS above only applies to
    brand-new tables — it does nothing to a table that was already created
@@ -261,7 +350,7 @@ $conn->query("CREATE TABLE IF NOT EXISTS admin_application_approvals (
 $conn->query("ALTER TABLE admin_application_approvals MODIFY COLUMN skill1 TEXT");
 $conn->query("ALTER TABLE admin_application_approvals MODIFY COLUMN skill2 TEXT");
 $conn->query("ALTER TABLE admin_application_approvals MODIFY COLUMN skill3 TEXT");
-$app_request_count_res = $conn->query("SELECT COUNT(*) as total FROM admin_application_approvals");
+$app_request_count_res = $conn->query("SELECT (SELECT COUNT(*) FROM admin_application_approvals aaa_c INNER JOIN users aaa_u ON aaa_u.id = aaa_c.student_id) + (SELECT COUNT(*) FROM student_requirement_upload_notifications srun INNER JOIN users srun_u ON srun_u.id = srun.user_id WHERE srun.admin_viewed = 0 AND COALESCE(srun_u.is_archived, 0) = 0) as total");
 $app_request_count = (int)(($app_request_count_res ? $app_request_count_res->fetch_assoc()['total'] : 0));
 // Ungraded faculty_grade count for sidebar badge
 $stmt_all_ug = $conn->prepare("
@@ -357,6 +446,244 @@ $reqLabels = [
     "psych_result"=>"Psych Test Result",
     "medical_result"=>"Medical result"
 ];
+
+// ============================================================================
+// NEW (this adjustment): DETECT NEW STUDENT REQUIREMENT SUBMISSIONS
+// ----------------------------------------------------------------------------
+// Same idea as company_validation.php's detectAndNotifyRequirementUploads(), for
+// students. A student's requirement lives in ONE `requirements` row (and the ID
+// photo in student_information), so a (re-)upload replaces the file rather than
+// adding a row — a new submission is therefore spotted by the stored file's size
+// changing to a non-empty file. The last size seen per student + requirement is
+// kept in student_requirement_upload_watch, and each change is claimed with a
+// conditional UPDATE / INSERT IGNORE, so it is announced exactly ONCE even with
+// several admins / tabs open. The very first run only remembers what is already
+// there (nothing old is announced). Files from the same student within 20 seconds
+// go into one notification. An item the admin has already reviewed (Verified /
+// Denied) or that no longer has a file drops out of its notification by itself,
+// and a notification with nothing left is removed. Runs at most every 2 seconds
+// per admin; any error is swallowed so it can never affect the page.
+// ============================================================================
+function cv_sru_label($key, $labels) {
+    if ($key === '__photo') return 'Profile Photo (ID)';
+    return (string)($labels[$key] ?? $key);
+}
+function cv_sru_detect($conn, $labels) {
+    try {
+        if (!cv_sru_ensure($conn)) return;
+        // UPDATED (this adjustment): one check every 2 seconds for ALL admins / tabs together (claimed in the
+        // database), instead of per admin session — and it no longer touches the session at all.
+        $conn->query("CREATE TABLE IF NOT EXISTS student_requirement_upload_meta (id TINYINT NOT NULL PRIMARY KEY, initialized TINYINT(1) NOT NULL DEFAULT 0)");
+        $conn->query("ALTER TABLE student_requirement_upload_meta ADD COLUMN IF NOT EXISTS last_run DATETIME NULL");
+        $conn->query("INSERT IGNORE INTO student_requirement_upload_meta (id, initialized) VALUES (1, 0)");
+        $conn->query("UPDATE student_requirement_upload_meta SET last_run = NOW() WHERE id = 1 AND (last_run IS NULL OR last_run <= NOW() - INTERVAL 2 SECOND)");
+        if ($conn->affected_rows !== 1) return;
+
+        // 1) what is on file right now (active students only)
+        $cur = [];
+        $r = $conn->query("SELECT r.user_id, r.requirement_type, COALESCE(LENGTH(r.file_name), 0) AS len
+                           FROM requirements r INNER JOIN users u ON u.id = r.user_id
+                           WHERE u.role = 'student' AND COALESCE(u.is_archived, 0) = 0");
+        if ($r) while ($x = $r->fetch_assoc()) $cur[(int)$x['user_id'] . '|' . $x['requirement_type']] = (int)$x['len'];
+        $r = $conn->query("SELECT si.user_id, COALESCE(LENGTH(si.student_photo), 0) AS len
+                           FROM student_information si INNER JOIN users u ON u.id = si.user_id
+                           WHERE u.role = 'student' AND COALESCE(u.is_archived, 0) = 0");
+        if ($r) while ($x = $r->fetch_assoc()) $cur[(int)$x['user_id'] . '|__photo'] = (int)$x['len'];
+
+        // 2) what was seen before
+        $seen = [];
+        $r = $conn->query("SELECT user_id, requirement_type, file_len FROM student_requirement_upload_watch");
+        if ($r) while ($x = $r->fetch_assoc()) $seen[(int)$x['user_id'] . '|' . $x['requirement_type']] = (int)$x['file_len'];
+
+        // 3) the first run ever only remembers
+        $conn->query("INSERT IGNORE INTO student_requirement_upload_meta (id, initialized) VALUES (1, 0)");
+        $conn->query("UPDATE student_requirement_upload_meta SET initialized = 1 WHERE id = 1 AND initialized = 0");
+        $firstRun = ($conn->affected_rows === 1);
+
+        // 4) claim each change once
+        $ins = $conn->prepare("INSERT IGNORE INTO student_requirement_upload_watch (user_id, requirement_type, file_len) VALUES (?, ?, ?)");
+        $upd = $conn->prepare("UPDATE student_requirement_upload_watch SET file_len = ? WHERE user_id = ? AND requirement_type = ? AND file_len = ?");
+        $new = [];
+        foreach ($cur as $k => $len) {
+            $parts = explode('|', $k, 2); $uid = (int)$parts[0]; $type = $parts[1];
+            if (!array_key_exists($k, $seen)) {
+                $ins->bind_param('isi', $uid, $type, $len); $ins->execute(); $won = ($ins->affected_rows === 1);
+            } elseif ($seen[$k] !== $len) {
+                $old = $seen[$k];
+                $upd->bind_param('iisi', $len, $uid, $type, $old); $upd->execute(); $won = ($upd->affected_rows === 1);
+            } else continue;
+            if ($won && !$firstRun && $len > 0) $new[$uid][$type] = true;
+        }
+        $ins->close(); $upd->close();
+
+        // NEW (this adjustment): a requirement row that was DELETED (placement replaced → Application SIT removed)
+        // goes back to "nothing on file", so the student's next upload is announced even if the file has the
+        // same size as the deleted one. Only active students are touched.
+        $gone = [];
+        foreach ($seen as $k => $len) {
+            if ($len > 0 && !array_key_exists($k, $cur)) $gone[$k] = true;
+        }
+        if ($gone) {
+            $active = [];
+            $ar = $conn->query("SELECT id FROM users WHERE role = 'student' AND COALESCE(is_archived, 0) = 0");
+            if ($ar) while ($x = $ar->fetch_assoc()) $active[(int)$x['id']] = true;
+            $rst = $conn->prepare("UPDATE student_requirement_upload_watch SET file_len = 0 WHERE user_id = ? AND requirement_type = ?");
+            foreach ($gone as $k => $_) {
+                $parts = explode('|', $k, 2); $uid = (int)$parts[0]; $type = $parts[1];
+                if (!isset($active[$uid])) continue;
+                $rst->bind_param('is', $uid, $type); $rst->execute();
+            }
+            $rst->close();
+        }
+
+        // 5) announce (merge into a still-unviewed notification from the last 20 seconds)
+        foreach ($new as $uid => $types) {
+            $detail = [];
+            foreach (array_keys($types) as $t) $detail[$t] = ['key' => $t, 'label' => cv_sru_label($t, $labels)];
+            $mq = $conn->prepare("SELECT id, detail FROM student_requirement_upload_notifications
+                                  WHERE user_id = ? AND admin_viewed = 0 AND updated_at >= (NOW() - INTERVAL 20 SECOND) ORDER BY id DESC LIMIT 1");
+            $mq->bind_param('i', $uid); $mq->execute(); $existing = $mq->get_result()->fetch_assoc(); $mq->close();
+            if ($existing) {
+                $prev = json_decode($existing['detail'] ?? '', true);
+                if (is_array($prev)) foreach ($prev as $p) if (!empty($p['key']) && !isset($detail[$p['key']])) $detail[$p['key']] = $p;
+                $json = json_encode(array_values($detail)); $eid = (int)$existing['id'];
+                $u2 = $conn->prepare("UPDATE student_requirement_upload_notifications SET detail = ?, updated_at = NOW() WHERE id = ?");
+                $u2->bind_param('si', $json, $eid); $u2->execute(); $u2->close();
+            } else {
+                $json = json_encode(array_values($detail));
+                $i2 = $conn->prepare("INSERT INTO student_requirement_upload_notifications (user_id, detail, admin_viewed) VALUES (?, ?, 0)");
+                $i2->bind_param('is', $uid, $json); $i2->execute(); $i2->close();
+            }
+        }
+
+        // 6) drop items the admin has already reviewed (or whose file is gone)
+        $r = $conn->query("SELECT id, user_id, detail FROM student_requirement_upload_notifications WHERE admin_viewed = 0");
+        $rows = []; if ($r) while ($x = $r->fetch_assoc()) $rows[] = $x;
+        foreach ($rows as $n) {
+            $items = json_decode($n['detail'] ?? '', true); if (!is_array($items)) $items = [];
+            $keep = []; $uid = (int)$n['user_id'];
+            foreach ($items as $it) {
+                $key = (string)($it['key'] ?? ''); if ($key === '') continue;
+                if ($key === '__photo') {
+                    $q = $conn->prepare("SELECT photo_status AS st, COALESCE(LENGTH(student_photo), 0) AS len FROM student_information WHERE user_id = ?");
+                    $q->bind_param('i', $uid);
+                } else {
+                    $q = $conn->prepare("SELECT status AS st, COALESCE(LENGTH(file_name), 0) AS len FROM requirements WHERE user_id = ? AND requirement_type = ?");
+                    $q->bind_param('is', $uid, $key);
+                }
+                $q->execute(); $st = $q->get_result()->fetch_assoc(); $q->close();
+                $reviewed = !$st || (int)$st['len'] === 0 || in_array((string)($st['st'] ?? ''), ['Verified', 'Denied'], true);
+                if (!$reviewed) $keep[] = $it;
+            }
+            $nid = (int)$n['id'];
+            if (!$keep) {
+                $d = $conn->prepare("DELETE FROM student_requirement_upload_notifications WHERE id = ?"); $d->bind_param('i', $nid); $d->execute(); $d->close();
+            } elseif (count($keep) !== count($items)) {
+                $json = json_encode(array_values($keep));
+                $u3 = $conn->prepare("UPDATE student_requirement_upload_notifications SET detail = ? WHERE id = ?"); $u3->bind_param('si', $json, $nid); $u3->execute(); $u3->close();
+            }
+        }
+    } catch (\Throwable $e) { /* never affects the page */ }
+}
+// the unviewed submissions, newest first (for the popup and the inbox)
+function cv_sru_list($conn) {
+    $out = [];
+    try {
+        if (!cv_sru_ensure($conn)) return $out;
+        $r = $conn->query("SELECT n.id, n.user_id, n.detail, n.created_at, n.updated_at, u.first_name, u.middle_name, u.last_name, u.email
+                           FROM student_requirement_upload_notifications n INNER JOIN users u ON u.id = n.user_id
+                           WHERE n.admin_viewed = 0 AND COALESCE(u.is_archived, 0) = 0
+                           ORDER BY n.updated_at DESC, n.id DESC");
+        if ($r) while ($x = $r->fetch_assoc()) {
+            $items = json_decode($x['detail'] ?? '', true);
+            $out[] = [
+                'id'        => (int)$x['id'],
+                'user_id'   => (int)$x['user_id'],
+                'full_name' => trim(preg_replace('/\s+/', ' ', ($x['first_name'] ?? '') . ' ' . ($x['middle_name'] ?? '') . ' ' . ($x['last_name'] ?? ''))),
+                'email'     => (string)($x['email'] ?? ''),
+                'items'     => is_array($items) ? array_values($items) : [],
+                'sig'       => (string)$x['updated_at'],
+                'when'      => $x['updated_at'] ? date('M d, Y h:i A', strtotime($x['updated_at'])) : '',
+            ];
+        }
+    } catch (\Throwable $e) {}
+    return $out;
+}
+function cv_inbox_total($conn) {   // application requests + unviewed submissions (the Student Validation indicator)
+    try {
+        $r = $conn->query("SELECT COUNT(*) AS total FROM admin_application_approvals aaa_c INNER JOIN users aaa_u ON aaa_u.id = aaa_c.student_id");
+        $row = $r ? $r->fetch_assoc() : null;
+        return (int)($row['total'] ?? 0) + cv_sru_count($conn);
+    } catch (\Throwable $e) { return cv_sru_count($conn); }
+}
+// ============================================================================
+// NEW (this adjustment): PREFERRED PLACEMENT REPLACED → NEW APPLICATION SIT NEEDS VALIDATION
+// ----------------------------------------------------------------------------
+// When a student replaces the Preference for Placement on company_list.php, the
+// Application SIT requirement is deleted and the application is put on hold
+// (placement_hold_applications) until the NEW Application SIT is verified. The
+// student's overall validation_status was left at 'Verified', so this page (which
+// only lists students that are not verified) never showed them again.
+// cv_ph_reconcile() puts every such student back to 'Pending' — the same value
+// recomputeValidationStatus() stores while a requirement is not verified — so the
+// student is listed again here, with Application SIT waiting for the new upload.
+// It only touches students that are on hold AND whose Application SIT is not
+// verified, so every other student is left exactly as it was. When the new
+// Application SIT is verified the normal save recomputes the status as before.
+// Returns the ids of the students currently on hold (for the live check). Any
+// error (e.g. the hold table does not exist yet) is swallowed.
+// ============================================================================
+function cv_ph_reconcile($conn) {
+    $held = [];
+    try {
+        $t = $conn->query("SHOW TABLES LIKE 'placement_hold_applications'");
+        if (!$t || $t->num_rows === 0) return $held;
+        $conn->query("UPDATE users u
+                      INNER JOIN placement_hold_applications h ON h.student_id = u.id
+                      SET u.validation_status = 'Pending'
+                      WHERE u.role = 'student' AND COALESCE(u.is_archived, 0) = 0 AND u.validation_status = 'Verified'
+                        AND NOT EXISTS (SELECT 1 FROM requirements r WHERE r.user_id = u.id AND r.requirement_type = 'application_sit'
+                                        AND r.status = 'Verified' AND r.file_name IS NOT NULL AND r.file_name <> '')");
+        $r = $conn->query("SELECT DISTINCT h.student_id FROM placement_hold_applications h
+                           INNER JOIN users u ON u.id = h.student_id
+                           WHERE u.role = 'student' AND COALESCE(u.is_archived, 0) = 0");
+        if ($r) while ($x = $r->fetch_assoc()) $held[] = (int)$x['student_id'];
+    } catch (\Throwable $e) { /* never affects the page */ }
+    return $held;
+}
+// UPDATED (this adjustment): detection no longer runs on every request (it used to run here, on page load and
+// on every save) — only in the submissions check below and when the Inbox is opened.
+
+/* NEW (this adjustment): submissions list — polled by every page's popup, and read by the Inbox */
+if (isset($_GET['student_upload_list']) && $_GET['student_upload_list'] == '1') {
+    header('Content-Type: application/json');
+    session_write_close();   // FIX (this adjustment): read-only check — never keep this admin's other requests waiting
+    cv_ph_reconcile($conn);   // NEW (this adjustment): placement replaced → student needs validation again
+    cv_sru_detect($conn, $reqLabels);
+    echo json_encode(['success' => true, 'rows' => cv_sru_list($conn), 'count' => cv_inbox_total($conn)]);
+    exit;
+}
+/* NEW (this adjustment): "View Requirements" — the submission leaves the Inbox (and the indicator) */
+if (isset($_POST['ajax_student_upload_viewed'])) {
+    header('Content-Type: application/json');
+    try {
+        cv_sru_ensure($conn);
+        $nid = (int)($_POST['id'] ?? 0);
+        $q = $conn->prepare("SELECT user_id, detail FROM student_requirement_upload_notifications WHERE id = ?");
+        $q->bind_param('i', $nid); $q->execute(); $row = $q->get_result()->fetch_assoc(); $q->close();
+        if ($row) {
+            $u = $conn->prepare("UPDATE student_requirement_upload_notifications SET admin_viewed = 1 WHERE id = ?");
+            $u->bind_param('i', $nid); $u->execute(); $u->close();
+        }
+        $items = $row ? json_decode($row['detail'] ?? '', true) : [];
+        echo json_encode(['success' => true, 'user_id' => $row ? (int)$row['user_id'] : (int)($_POST['user_id'] ?? 0),
+                          'keys' => array_values(array_map(function ($i) { return (string)($i['key'] ?? ''); }, is_array($items) ? $items : [])),
+                          'count' => cv_inbox_total($conn)]);
+    } catch (\Throwable $e) {
+        echo json_encode(['success' => false, 'message' => 'The submission could not be opened. Please try again.']);
+    }
+    exit;
+}
 
 $remarks = [
     "Blurry Image",
@@ -553,6 +880,78 @@ if (isset($_POST['ajax_update_photo'])) {
     exit;
 }
 
+/* ================= HELPER: SAVE EVERY FILE OF A VERIFIED REQUIREMENT =============
+   NEW (this adjustment) — MULTIPLE-FILE REQUIREMENTS. A requirement the student uploaded
+   several files for is stored as several `requirements` rows (one file each) under the same
+   user_id + requirement_type. Verifying used to read only the FIRST row, so only one file was
+   written to the student's uploads/<folder>. This copies ALL of them, oldest first.
+   - Files are read one at a time (by row id), so many large documents are never in memory together.
+   - A single-file requirement keeps its original name:  <Label>_verified_<time>.<ext>
+     Several files get a position number:               <Label>_<n>_verified_<time>.<ext>
+   - Extension follows the real content (pdf / png / gif / webp), jpg otherwise (the old default).
+   - A name that already exists is never overwritten.
+   - Never throws: a file that cannot be written is logged and skipped so the verification itself,
+     the undo, and the e-mail are never broken. Returns the number of files written.
+   (Self-contained: the other svBlob* helpers are defined further down the file, after this runs.)
+================================================================= */
+if (!function_exists('svSaveVerifiedRequirementFiles')) {
+    function svSaveVerifiedRequirementFiles($conn, $user_id, $type, $dir, $safeLabel) {
+        $saved = 0;
+        try {
+            $ids = [];
+            $st = $conn->prepare("SELECT id FROM requirements WHERE user_id = ? AND requirement_type = ? AND file_name IS NOT NULL AND file_name <> '' ORDER BY id ASC");
+            if (!$st) return 0;
+            $st->bind_param("is", $user_id, $type);
+            $st->execute();
+            $rs = $st->get_result();
+            while ($r = $rs->fetch_assoc()) { $ids[] = (int) $r['id']; }
+            $st->close();
+            if (!$ids) return 0;
+            if (!is_dir($dir) || !is_writable($dir)) {
+                error_log("administrator.php: cannot save verified files, folder not writable: " . $dir);
+                return 0;
+            }
+
+            $multi = count($ids) > 1;
+            $stamp = time();
+            $n = 0;
+            foreach ($ids as $rid) {
+                $n++;
+                try {
+                    $fq = $conn->prepare("SELECT file_name FROM requirements WHERE id = ? AND user_id = ? AND requirement_type = ?");
+                    if (!$fq) continue;
+                    $fq->bind_param("iis", $rid, $user_id, $type);
+                    $fq->execute();
+                    $row = $fq->get_result()->fetch_assoc();
+                    $fq->close();
+                    $blob = $row['file_name'] ?? '';
+                    if (!is_string($blob) || $blob === '') continue;
+
+                    $head = substr($blob, 0, 16);
+                    $ext  = 'jpg';
+                    if (strpos(substr($blob, 0, 2048), '%PDF-') !== false)                        $ext = 'pdf';
+                    elseif (substr($head, 0, 8) === "\x89PNG\r\n\x1a\n")                           $ext = 'png';
+                    elseif (substr($head, 0, 3) === 'GIF')                                         $ext = 'gif';
+                    elseif (substr($head, 0, 4) === 'RIFF' && substr($head, 8, 4) === 'WEBP')      $ext = 'webp';
+
+                    $base = $multi ? ($safeLabel . "_" . $n . "_verified_" . $stamp) : ($safeLabel . "_verified_" . $stamp);
+                    $file = $dir . "/" . $base . "." . $ext;
+                    $dup  = 1;
+                    while (file_exists($file)) { $file = $dir . "/" . $base . "_" . $dup . "." . $ext; $dup++; }
+
+                    if (file_put_contents($file, $blob) !== false) { $saved++; }
+                    else { error_log("administrator.php: could not write verified file " . $file); }
+                } catch (\Throwable $e) {
+                    error_log("administrator.php: verified file save failed (row " . $rid . "): " . $e->getMessage());
+                }
+            }
+        } catch (\Throwable $e) {
+            error_log("administrator.php: verified requirement files save failed: " . $e->getMessage());
+        }
+        return $saved;
+    }
+}
+
 /* ================= AJAX: IMMEDIATE REQUIREMENT UPDATE ================= */
 if (isset($_POST['ajax_update_requirement'])) {
     header('Content-Type: application/json');
@@ -626,13 +1025,9 @@ if (isset($_POST['ajax_update_requirement'])) {
             if (!file_exists("uploads")) mkdir("uploads",0777,true);
             $path = "uploads/".$folder;
             if (!file_exists($path)) mkdir($path,0777,true);
-            $fq = $conn->prepare("SELECT file_name FROM requirements WHERE user_id=? AND requirement_type=?");
-            $fq->bind_param("is",$user_id,$type); $fq->execute();
-            $fd2 = $fq->get_result()->fetch_assoc(); $fq->close();
-            if (!empty($fd2['file_name'])) {
-                $safeLabel = preg_replace("/[^a-zA-Z0-9]/","_",$reqLabels[$type] ?? $type);
-                file_put_contents($path."/".$safeLabel."_verified_".time().".jpg",$fd2['file_name']);
-            }
+            // UPDATED (this adjustment): save EVERY file of the requirement (it used to save only the first row's file)
+            $safeLabel = preg_replace("/[^a-zA-Z0-9]/","_",$reqLabels[$type] ?? $type);
+            svSaveVerifiedRequirementFiles($conn, $user_id, $type, $path, $safeLabel);
         } else {
             $stmt = $conn->prepare("UPDATE requirements SET status = ?, remark = NULL WHERE user_id = ? AND requirement_type = ?");
             $stmt->bind_param("sis", $status, $user_id, $type);
@@ -711,14 +1106,17 @@ if (isset($_POST['ajax_commit_denied'])) {
         recomputeValidationStatus($conn, $d['user_id']);
     }
 
-    // Send the deferred email
-    if (!empty($_SESSION['pending_emails'][$token])) {
-        $p = $_SESSION['pending_emails'][$token];
-        sendStatusEmail($p['email'], $p['name'], $p['label'], $p['status'], $p['remark']);
-        unset($_SESSION['pending_emails'][$token]);
-    }
-
+    /* FIX (this adjustment): the email is taken out of the session and the session lock is released BEFORE the
+       mail server is contacted. PHP lets only one request per session run at a time, so while an email was being
+       sent (seconds — or until the mail server timed out) every other request from this admin waited, e.g. the
+       next Deny's save, which left the "Processing" loading page on screen. Same emails, same conditions. */
+    $mailToSend = !empty($_SESSION['pending_emails'][$token]) ? $_SESSION['pending_emails'][$token] : null;
+    unset($_SESSION['pending_emails'][$token]);
     unset($_SESSION['undo_stack'][$token]);
+    session_write_close();
+    if ($mailToSend) {
+        sendStatusEmail($mailToSend['email'], $mailToSend['name'], $mailToSend['label'], $mailToSend['status'], $mailToSend['remark']);
+    }
     echo json_encode(['success' => true]);
     exit;
 }
@@ -809,15 +1207,22 @@ if (isset($_POST['ajax_undo'])) {
 if (isset($_POST['ajax_confirm_send'])) {
     header('Content-Type: application/json');
     $token = trim($_POST['undo_token'] ?? '');
+    /* FIX (this adjustment): the email is taken out of the session and the session lock is released BEFORE the
+       mail server is contacted. PHP lets only one request per session run at a time, so while an email was being
+       sent (seconds — or until the mail server timed out) every other request from this admin waited, e.g. the
+       next Deny's save, which left the "Processing" loading page on screen. Same emails, same conditions. */
+    $mailToSend = null;
     if (!empty($token) && !empty($_SESSION['pending_emails'][$token])) {
         $p = $_SESSION['pending_emails'][$token];
-        if ((time() - $p['ts']) < 600) {
-            sendStatusEmail($p['email'], $p['name'], $p['label'], $p['status'], $p['remark']);
-        }
+        if ((time() - $p['ts']) < 600) $mailToSend = $p;
         unset($_SESSION['pending_emails'][$token]);
     }
     if (!empty($token) && isset($_SESSION['undo_stack'][$token])) {
         unset($_SESSION['undo_stack'][$token]);
+    }
+    session_write_close();
+    if ($mailToSend) {
+        sendStatusEmail($mailToSend['email'], $mailToSend['name'], $mailToSend['label'], $mailToSend['status'], $mailToSend['remark']);
     }
     echo json_encode(['success'=>true]);
     exit;
@@ -826,15 +1231,24 @@ if (isset($_POST['ajax_confirm_send'])) {
 /* ================= AJAX: FLUSH EXPIRED PENDING EMAILS ================= */
 if (isset($_POST['ajax_flush_emails'])) {
     header('Content-Type: application/json');
+    /* FIX (this adjustment): the email is taken out of the session and the session lock is released BEFORE the
+       mail server is contacted. PHP lets only one request per session run at a time, so while an email was being
+       sent (seconds — or until the mail server timed out) every other request from this admin waited, e.g. the
+       next Deny's save, which left the "Processing" loading page on screen. Same emails, same conditions. */
+    $mailsToSend = [];
     if (!empty($_SESSION['pending_emails'])) {
         foreach ($_SESSION['pending_emails'] as $tk => $p) {
             if ((time() - $p['ts']) >= 300 && (time() - $p['ts']) < 600) {
-                sendStatusEmail($p['email'], $p['name'], $p['label'], $p['status'], $p['remark']);
+                $mailsToSend[] = $p;
                 unset($_SESSION['pending_emails'][$tk]);
             } elseif ((time() - $p['ts']) >= 600) {
                 unset($_SESSION['pending_emails'][$tk]);
             }
         }
+    }
+    session_write_close();
+    foreach ($mailsToSend as $p) {
+        sendStatusEmail($p['email'], $p['name'], $p['label'], $p['status'], $p['remark']);
     }
     echo json_encode(['success'=>true]);
     exit;
@@ -885,22 +1299,7 @@ if (isset($_POST['ajax_archive_batch'])) {
     $conn->query("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_archived TINYINT(1) NOT NULL DEFAULT 0");
     $conn->query("UPDATE users SET is_archived = 0 WHERE is_archived IS NULL");
 
-    $conn->query("CREATE TABLE IF NOT EXISTS archived_students (
-        id INT AUTO_INCREMENT PRIMARY KEY,
-        batch_label VARCHAR(200),
-        user_id INT,
-        first_name VARCHAR(100),
-        middle_name VARCHAR(100),
-        last_name VARCHAR(100),
-        course VARCHAR(200),
-        deploy_status VARCHAR(50),
-        validation_status VARCHAR(50),
-        photo_status VARCHAR(50),
-        company VARCHAR(200),
-        supervisor VARCHAR(200),
-        archived_at DATETIME,
-        archived_by VARCHAR(200)
-    )");
+    cv_ensure_archived_students_table($conn);   // CLEAN-UP (audit): shared definition, see cv_ensure_archived_students_table()
 
     $students = $conn->query("
         SELECT u.id, u.first_name, u.middle_name, u.last_name, u.course,
@@ -1045,24 +1444,7 @@ if (isset($_POST['ajax_unarchive_batch'])) {
 if (isset($_POST['ajax_fetch_archive'])) {
     header('Content-Type: application/json');
 
-    $conn->query("
-        CREATE TABLE IF NOT EXISTS archived_students (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            batch_label VARCHAR(100),
-            user_id INT,
-            first_name VARCHAR(100),
-            middle_name VARCHAR(100),
-            last_name VARCHAR(100),
-            course VARCHAR(200),
-            deploy_status VARCHAR(50),
-            validation_status VARCHAR(50),
-            photo_status VARCHAR(50),
-            company VARCHAR(200),
-            supervisor VARCHAR(200),
-            archived_at DATETIME,
-            archived_by VARCHAR(200)
-        )
-    ");
+    cv_ensure_archived_students_table($conn);   // CLEAN-UP (audit): shared definition, see cv_ensure_archived_students_table()
 
     $rows = [];
     $batches = [];
@@ -1078,7 +1460,7 @@ if (isset($_POST['ajax_fetch_archive'])) {
                 'deploy'     => $r['deploy_status'],
                 'company'    => $r['company'],
                 'supervisor' => $r['supervisor'],
-                'archived'   => date('M d, Y', strtotime($r['archived_at'])),
+                'archived'   => date('M d, Y', strtotime($r['archived_at'] ?? '')),
                 'by'         => $r['archived_by'],
             ];
             if (!in_array($r['batch_label'], $batches)) $batches[] = $r['batch_label'];
@@ -1115,6 +1497,7 @@ if (isset($_GET['ungraded_count']) && $_GET['ungraded_count'] == '1') {
 if (isset($_POST['ajax_check_submissions'])) {
     header('Content-Type: application/json');
 
+    $heldIds = cv_ph_reconcile($conn);   // NEW (this adjustment): placement replaced → student needs validation again
     $state = [];
 
     $uRes = $conn->query("
@@ -1152,8 +1535,123 @@ if (isset($_POST['ajax_check_submissions'])) {
         }
     }
 
-    echo json_encode(['success' => true, 'state' => $state]);
+    // NEW (this adjustment): the students that are not verified (name for the popup) and the ones on hold after a
+    // placement replacement, so the page can bring a missing / outdated student row back without a reload.
+    $needs = [];
+    try {
+        $nRes = $conn->query("SELECT id, first_name, middle_name, last_name FROM users
+                              WHERE role = 'student' AND COALESCE(is_archived, 0) = 0 AND COALESCE(validation_status, 'Pending') <> 'Verified'");
+        if ($nRes) while ($n = $nRes->fetch_assoc()) {
+            $needs[] = ['id' => (int)$n['id'],
+                        'name' => trim(preg_replace('/\s+/', ' ', ($n['first_name'] ?? '') . ' ' . ($n['middle_name'] ?? '') . ' ' . ($n['last_name'] ?? '')))];
+        }
+    } catch (\Throwable $e) {}
+
+    echo json_encode(['success' => true, 'state' => $state, 'needs_validation' => $needs, 'held' => $heldIds]);
     exit;
+}
+
+/* ================= HELPER: IS THIS STORED FILE A PDF? =========================
+   NEW (this adjustment) — PDF DISPLAY + PREVIEW, ported from company_validation.php.
+   Students may upload a JPG, PNG or a PDF (submit_requirements.php), all stored in the
+   same BLOB column, so the Requirements gallery has to tell them apart: an image is
+   drawn as a thumbnail exactly as before, a PDF as a PDF tile that opens the preview
+   modal. Only the first 2 KB is inspected. Safe on empty / non-string values.
+================================================================= */
+if (!function_exists('svBlobIsPdf')) {
+    function svBlobIsPdf($blob) {
+        if (!is_string($blob) || $blob === '') return false;
+        $head = substr($blob, 0, 2048);
+        if (strpos($head, '%PDF-') !== false) return true;
+        try {
+            if (class_exists('finfo')) {
+                $fi = new finfo(FILEINFO_MIME_TYPE);
+                return strpos((string) $fi->buffer($head), 'pdf') !== false;
+            }
+        } catch (\Throwable $e) { /* fall through: not a PDF */ }
+        return false;
+    }
+}
+
+/* ================= HELPER: EVERY STORED FILE OF ONE REQUIREMENT ===================
+   NEW (this adjustment) — MULTIPLE-FILE (stacked card) DISPLAY, ported from
+   company_validation.php's $cvFetchEntries(): returns one {id, isPdf} per stored file
+   (one `requirements` row each, oldest first) under a requirement_type. Only the first
+   2 KB of each file is read (enough to tell a PDF from an image), so the documents are
+   never loaded just to draw a card; they are streamed on demand by stream_student_file
+   (&file_id=…). Rows with no file are not entries. Fully guarded: any failure returns
+   an empty list, i.e. the card simply keeps its normal single-file display.
+================================================================= */
+if (!function_exists('svFetchFileEntries')) {
+    function svFetchFileEntries($conn, $uid, $type) {
+        $entries = [];
+        try {
+            $st = $conn->prepare("SELECT id, LEFT(file_name, 2048) AS head FROM requirements WHERE user_id = ? AND requirement_type = ? AND file_name IS NOT NULL AND file_name <> '' ORDER BY id ASC");
+            if (!$st) return $entries;
+            $st->bind_param("is", $uid, $type);
+            $st->execute();
+            $rs = $st->get_result();
+            while ($er = $rs->fetch_assoc()) {
+                $entries[] = ['id' => (int) $er['id'], 'isPdf' => svBlobIsPdf((string) $er['head'])];
+            }
+            $st->close();
+        } catch (\Throwable $e) { return []; }
+        return $entries;
+    }
+}
+
+/* ================= STREAM A STUDENT'S SUBMITTED FILE (inline) ====================
+   NEW (this adjustment) — the same idea as company_validation.php's stream_req_blob:
+   serves ONE stored file (a requirement, or the profile photo with type=photo) with
+   its real content type so the browser can show a PDF in an <iframe> and an image in
+   the preview viewer, instead of base64-embedding whole documents in the page.
+   Only reachable with the admin session guard at the top of this file. Prepared
+   statements only; the content type is whitelisted and sent with nosniff, so a
+   stored file can never be served as HTML / script.
+================================================================= */
+if (isset($_GET['stream_student_file'])) {
+    $sf_uid  = intval($_GET['stream_student_file']);
+    $sf_type = trim((string) ($_GET['type'] ?? ''));
+    if ($sf_uid <= 0 || $sf_type === '' || strlen($sf_type) > 100) { http_response_code(400); echo "Bad request."; exit; }
+
+    // optional file_id: streams ONE specific entry when a requirement holds several files (one `requirements`
+    // row each). It is always cross-checked against BOTH user_id and requirement_type, so it can only ever
+    // return a file that really belongs to that student's requirement. Without it the query is the original one.
+    $sf_fid  = ($sf_type !== 'photo') ? intval($_GET['file_id'] ?? 0) : 0;
+    $sf_blob = null;
+    if ($sf_type === 'photo') {
+        $sf_st = $conn->prepare("SELECT student_photo AS blob_data FROM student_information WHERE user_id = ?");
+    } elseif ($sf_fid > 0) {
+        $sf_st = $conn->prepare("SELECT file_name AS blob_data FROM requirements WHERE id = ? AND user_id = ? AND requirement_type = ?");
+    } else {
+        $sf_st = $conn->prepare("SELECT file_name AS blob_data FROM requirements WHERE user_id = ? AND requirement_type = ?");
+    }
+    if (!$sf_st) { http_response_code(500); echo "Could not read the file."; exit; }
+    if ($sf_type === 'photo')  { $sf_st->bind_param("i", $sf_uid); }
+    elseif ($sf_fid > 0)       { $sf_st->bind_param("iis", $sf_fid, $sf_uid, $sf_type); }
+    else                       { $sf_st->bind_param("is", $sf_uid, $sf_type); }
+    $sf_st->execute();
+    $sf_row = $sf_st->get_result()->fetch_assoc();
+    $sf_st->close();
+    $sf_blob = $sf_row['blob_data'] ?? null;
+    if (!is_string($sf_blob) || $sf_blob === '') { http_response_code(404); echo "No file found."; exit; }
+
+    $sf_mime = '';
+    try { $sf_fi = new finfo(FILEINFO_MIME_TYPE); $sf_mime = (string) $sf_fi->buffer($sf_blob); } catch (\Throwable $e) { $sf_mime = ''; }
+    if ($sf_mime === 'application/pdf' || svBlobIsPdf($sf_blob)) { $sf_mime = 'application/pdf'; }
+    elseif (!in_array($sf_mime, ['image/jpeg', 'image/png', 'image/gif', 'image/webp'], true)) {
+        http_response_code(415); echo "Unsupported file type."; exit;
+    }
+    $sf_ext = ['application/pdf' => 'pdf', 'image/jpeg' => 'jpg', 'image/png' => 'png', 'image/gif' => 'gif', 'image/webp' => 'webp'][$sf_mime];
+
+    session_write_close();   // a large file must not hold the session lock while it streams
+    while (ob_get_level() > 0) { @ob_end_clean(); }
+    header('Content-Type: ' . $sf_mime);
+    header('X-Content-Type-Options: nosniff');
+    header('Content-Disposition: inline; filename="' . preg_replace('/[^a-zA-Z0-9_-]/', '_', $sf_type) . '_' . $sf_uid . ($sf_fid > 0 ? '_' . $sf_fid : '') . '.' . $sf_ext . '"');
+    header('Content-Length: ' . strlen($sf_blob));
+    header('Cache-Control: private, no-cache, must-revalidate');   // a re-upload under the same URL must never show the old file
+    echo $sf_blob; exit;
 }
 
 /* ================= AJAX: FETCH A SINGLE SUBMISSION FILE ========================
@@ -1172,6 +1670,7 @@ if (isset($_POST['ajax_get_file'])) {
         $row = $q->get_result()->fetch_assoc();
         $q->close();
         $b64 = (!empty($row['student_photo'])) ? base64_encode($row['student_photo']) : null;
+        $isPdfFile = svBlobIsPdf($row['student_photo'] ?? null);   // NEW (this adjustment)
     } else {
         $q = $conn->prepare("SELECT file_name FROM requirements WHERE user_id = ? AND requirement_type = ?");
         $q->bind_param("is", $user_id, $type);
@@ -1179,9 +1678,11 @@ if (isset($_POST['ajax_get_file'])) {
         $row = $q->get_result()->fetch_assoc();
         $q->close();
         $b64 = (!empty($row['file_name'])) ? base64_encode($row['file_name']) : null;
+        $isPdfFile = svBlobIsPdf($row['file_name'] ?? null);   // NEW (this adjustment)
+        $filesMeta = svFetchFileEntries($conn, $user_id, $type);   // NEW (this adjustment): every file of this requirement (stacked-card display)
     }
 
-    echo json_encode(['success' => true, 'file' => $b64]);
+    echo json_encode(['success' => true, 'file' => $b64, 'isPdf' => !empty($isPdfFile), 'files' => $filesMeta ?? []]);
     exit;
 }
 
@@ -1274,19 +1775,7 @@ if(isset($_POST['update_requirement'])){
     exit;
 }
 /* ================= ENSURE ADMIN APPROVALS TABLE ================= */
-$conn->query("CREATE TABLE IF NOT EXISTS admin_application_approvals (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    student_id INT NOT NULL,
-    company_id INT NOT NULL,
-    phase VARCHAR(20) NOT NULL DEFAULT 'pending',
-    skill1 TEXT,
-    skill2 TEXT,
-    skill3 TEXT,
-    exp1 TEXT,
-    exp2 TEXT,
-    submitted_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE KEY unique_application (student_id, company_id)
-)");
+cv_ensure_admin_application_approvals_table($conn);   // CLEAN-UP (audit): shared definition, see cv_ensure_admin_application_approvals_table()
 
 /* ================= NEW (endorsement flow): ENDORSEMENT LETTERS TABLE + BUILDER =================
    Application flow (this adjustment):
@@ -1675,6 +2164,7 @@ if (isset($_POST['ajax_endorsement_preview'])) {
 
 /* ================= AJAX: FETCH PENDING APPLICATION REQUESTS ================= */
 if (isset($_POST['ajax_fetch_app_requests'])) {
+    cv_sru_detect($conn, $reqLabels);   // NEW (this adjustment): new student submissions
     header('Content-Type: application/json');
     $rows = [];
     $res = $conn->query("
@@ -1839,7 +2329,7 @@ if (isset($_POST['ajax_fetch_app_requests'])) {
             ];
         }
     }
-    echo json_encode(['success' => true, 'rows' => $rows, 'count' => count($rows)]);
+    echo json_encode(['success' => true, 'rows' => $rows, 'count' => count($rows) + cv_sru_count($conn)]);   // UPDATED (this adjustment): the Inbox also holds new submissions
     exit;
 }
 
@@ -2059,7 +2549,7 @@ if (isset($_POST['ajax_approve_app_request'])) {
     $del->execute();
     $del->close();
 
-    $remaining = $conn->query("SELECT COUNT(*) as total FROM admin_application_approvals")->fetch_assoc()['total'] ?? 0;
+    $remaining = $conn->query("SELECT (SELECT COUNT(*) FROM admin_application_approvals aaa_c INNER JOIN users aaa_u ON aaa_u.id = aaa_c.student_id) + (SELECT COUNT(*) FROM student_requirement_upload_notifications srun INNER JOIN users srun_u ON srun_u.id = srun.user_id WHERE srun.admin_viewed = 0 AND COALESCE(srun_u.is_archived, 0) = 0) as total")->fetch_assoc()['total'] ?? 0;
 
     $emailQ = $conn->prepare("SELECT u.first_name, u.last_name, u.email, ci.company FROM users u LEFT JOIN company_information ci ON ci.user_id = ? WHERE u.id = ?");
     $emailQ->bind_param("ii", $app['company_id'], $app['student_id']);
@@ -2092,7 +2582,7 @@ if (isset($_POST['ajax_deny_app_request'])) {
     $del->execute();
     $del->close();
 
-    $remaining = $conn->query("SELECT COUNT(*) as total FROM admin_application_approvals")->fetch_assoc()['total'] ?? 0;
+    $remaining = $conn->query("SELECT (SELECT COUNT(*) FROM admin_application_approvals aaa_c INNER JOIN users aaa_u ON aaa_u.id = aaa_c.student_id) + (SELECT COUNT(*) FROM student_requirement_upload_notifications srun INNER JOIN users srun_u ON srun_u.id = srun.user_id WHERE srun.admin_viewed = 0 AND COALESCE(srun_u.is_archived, 0) = 0) as total")->fetch_assoc()['total'] ?? 0;
 
     if (!empty($preData['email'])) {
         $studentName = trim($preData['first_name'] . ' ' . $preData['last_name']);
@@ -2107,7 +2597,7 @@ if (isset($_POST['ajax_deny_app_request'])) {
 /* ================= AJAX: GET PENDING APP REQUEST COUNT ================= */
 if (isset($_GET['app_request_count']) && $_GET['app_request_count'] == '1') {
     header('Content-Type: application/json');
-    $total = $conn->query("SELECT COUNT(*) as total FROM admin_application_approvals")->fetch_assoc()['total'] ?? 0;
+    $total = $conn->query("SELECT (SELECT COUNT(*) FROM admin_application_approvals aaa_c INNER JOIN users aaa_u ON aaa_u.id = aaa_c.student_id) + (SELECT COUNT(*) FROM student_requirement_upload_notifications srun INNER JOIN users srun_u ON srun_u.id = srun.user_id WHERE srun.admin_viewed = 0 AND COALESCE(srun_u.is_archived, 0) = 0) as total")->fetch_assoc()['total'] ?? 0;
     echo json_encode(['count' => (int)$total]);
     exit;
 }
@@ -2124,7 +2614,7 @@ if (isset($_GET['app_request_list']) && $_GET['app_request_list'] == '1') {
     $lr = $conn->query("
         SELECT aaa.id, u.first_name, u.middle_name, u.last_name, ci.company AS company_name
         FROM admin_application_approvals aaa
-        LEFT JOIN users u ON u.id = aaa.student_id
+        INNER JOIN users u ON u.id = aaa.student_id   /* FIX (audit): only requests whose student still exists — same as the inbox */
         LEFT JOIN company_information ci ON ci.user_id = aaa.company_id
         ORDER BY aaa.submitted_at ASC, aaa.id ASC
     ");
@@ -2137,7 +2627,7 @@ if (isset($_GET['app_request_list']) && $_GET['app_request_list'] == '1') {
             ];
         }
     }
-    $total = $conn->query("SELECT COUNT(*) as total FROM admin_application_approvals")->fetch_assoc()['total'] ?? 0;
+    $total = $conn->query("SELECT (SELECT COUNT(*) FROM admin_application_approvals aaa_c INNER JOIN users aaa_u ON aaa_u.id = aaa_c.student_id) + (SELECT COUNT(*) FROM student_requirement_upload_notifications srun INNER JOIN users srun_u ON srun_u.id = srun.user_id WHERE srun.admin_viewed = 0 AND COALESCE(srun_u.is_archived, 0) = 0) as total")->fetch_assoc()['total'] ?? 0;
     echo json_encode(['count' => (int)$total, 'rows' => $list]);
     exit;
 }
@@ -2157,6 +2647,7 @@ if (isset($_GET['moa_notif_count']) && $_GET['moa_notif_count'] == '1') {
 $conn->query("ALTER TABLE users ADD COLUMN IF NOT EXISTS validation_status VARCHAR(20) DEFAULT 'Pending'");
 $conn->query("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_archived TINYINT(1) NOT NULL DEFAULT 0");
 $conn->query("UPDATE users SET is_archived = 0 WHERE is_archived IS NULL");
+cv_ph_reconcile($conn);   // NEW (this adjustment): students who replaced their preferred placement are validated again
 
 $students = $conn->query("
     SELECT u.id, u.first_name, u.middle_name, u.last_name, u.course, u.deploy_status, u.validation_status,
@@ -3505,6 +3996,65 @@ if (!$courseOfferingsLoaded) {
         .cv-gallery .cv-card-preview img.profile-img-large { position: absolute; top: 0; left: 0; width: 100%; height: 100%; margin: 0; border: none; border-radius: 0; object-fit: cover; object-position: top center; display: block; cursor: pointer; }
         .cv-no-file { position: absolute; top: 14px; right: 14px; bottom: 14px; left: 14px; border: 1px dashed #A3AFC7; border-radius: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; color: #3E4963; font-size: 12px; font-weight: 600; }
         .cv-no-file i { font-size: 20px; }
+
+        /* ══════════════════════════════════════════════════════════════════
+           NEW (this adjustment) — PDF DISPLAY + PREVIEW, ported from
+           company_validation.php: a submitted PDF shows as a PDF tile in the
+           Requirements gallery and opens a full-bleed dark viewer (PDF in an
+           iframe, image in the image viewer). Additive: every rule is scoped
+           to new class names, so no existing card, ribbon, form or modal is
+           affected.
+           ══════════════════════════════════════════════════════════════════ */
+        .cv-preview-trigger { cursor:pointer; }
+        .cv-gallery .req-item img.cv-thumb-img.cv-preview-trigger { transition:filter 0.15s; }
+        .cv-gallery .req-item img.cv-thumb-img.cv-preview-trigger:hover { filter:brightness(0.93); }
+
+        /* A single PDF — a tile that fills the preview area, in the same red used by the stacked PDF layers */
+        .cv-pdf-tile { position:absolute; top:14px; right:14px; bottom:14px; left:14px; box-sizing:border-box; border:1px solid #D49A94; border-radius:0; background:#F2D5D1; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:6px; color:#A02A2A; font-size:12px; font-weight:700; transition:transform 0.15s, box-shadow 0.15s, background 0.15s; }
+        .cv-pdf-tile i { font-size:46px; color:#A02A2A; }
+        .cv-pdf-tile:hover { background:#F2D5D1; transform:translateY(-2px); box-shadow:0 6px 16px rgba(27,42,74,0.12); }
+
+        /* Requirement document preview modal — the same full-bleed dark viewer CompanyForm.php uses */
+        .cv-doc-modal { display:none; position:fixed; inset:0; box-sizing:border-box; background:#0F1A33; z-index:10030; flex-direction:column; overflow:hidden; }
+        .cv-doc-modal-bar { width:100%; box-sizing:border-box; background:#1B2A4A; padding:14px 20px; display:flex; align-items:center; justify-content:space-between; gap:16px; flex-shrink:0; box-shadow:0 2px 12px rgba(0,0,0,0.4); }
+        .cv-doc-modal-title { color:#ffffff; font-size:14px; font-weight:700; display:flex; align-items:center; gap:10px; overflow:hidden; white-space:nowrap; min-width:0; }
+        .cv-doc-modal-icon { color:var(--neust-gold); font-size:16px; flex-shrink:0; }
+        .cv-doc-modal-name { color:var(--neust-gold); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+        .cv-doc-modal-counter { color:#A3AFC7; font-size:12px; font-weight:600; flex-shrink:0; }
+        .cv-doc-modal-close { background:rgba(255,255,255,0.15); border:1px solid rgba(255,255,255,0.25); color:#ffffff; font-size:20px; font-weight:400; width:34px; height:34px; border-radius:0; cursor:pointer; line-height:1; flex-shrink:0; display:flex; align-items:center; justify-content:center; transition:background 0.15s; }
+        .cv-doc-modal-close:hover { background:rgba(255,255,255,0.28); }
+        .cv-doc-modal-viewer { position:relative; flex:1; min-height:0; background:#ffffff; display:flex; align-items:stretch; justify-content:stretch; overflow:hidden; }
+        .cv-doc-modal-viewer iframe { width:100%; height:100%; border:none; display:block; background:#ffffff; }
+        .cv-doc-modal-viewer.image-mode { background:#000000; align-items:center; justify-content:center; padding:26px; }
+        .cv-doc-modal-image { max-width:100%; max-height:100%; border-radius:0; box-shadow:0 8px 40px rgba(0,0,0,0.6); display:block; margin:auto; }
+        .cv-doc-modal-unavailable { color:#C3CADA; font-size:14px; font-weight:600; display:flex; flex-direction:column; align-items:center; gap:10px; margin:auto; }
+        .cv-doc-modal-unavailable i { font-size:40px; color:#3E4963; }
+        .cv-doc-nav-btn { position:absolute; top:50%; transform:translateY(-50%); background:rgba(27,42,74,0.55); color:#ffffff; border:none; width:40px; height:40px; border-radius:0; font-size:15px; cursor:pointer; display:flex; align-items:center; justify-content:center; transition:background 0.15s; z-index:5; }
+        .cv-doc-nav-btn:hover { background:rgba(27,42,74,0.82); }
+        .cv-doc-nav-prev { left:16px; }
+        .cv-doc-nav-next { right:16px; }
+
+        /* 2+ files — ONE overlaying "stacked card" (max 3 layers shown) with a count badge */
+        .cv-file-stack-wrap { flex-shrink:0; text-align:center; }
+        .cv-file-stack { position:relative; width:112px; height:104px; margin:0 auto 4px; }
+        .cv-file-stack .cv-stack-layer { position:absolute; top:8px; left:12px; width:88px; height:88px; box-sizing:border-box; border-radius:0; border:2px solid #A3AFC7; background-color:#ffffff; box-shadow:0 2px 5px rgba(0,0,0,0.12); overflow:hidden; transition:transform 0.15s; }
+        .cv-file-stack .cv-stack-layer img { width:100%; height:100%; object-fit:cover; object-position:top center; display:block; }
+        .cv-file-stack .cv-stack-layer.layer-1 { transform:rotate(0deg) translate(0, 0); z-index:3; }
+        .cv-file-stack .cv-stack-layer.layer-2 { transform:rotate(7deg) translate(5px, 3px); z-index:2; }
+        .cv-file-stack .cv-stack-layer.layer-3 { transform:rotate(-9deg) translate(-5px, 4px); z-index:1; }
+        .cv-file-stack-wrap:hover .cv-stack-layer.layer-1 { transform:rotate(0deg) translate(0, -2px); }
+        .cv-file-stack-wrap:hover .cv-stack-layer.layer-2 { transform:rotate(9deg) translate(6px, 0px); }
+        .cv-file-stack-wrap:hover .cv-stack-layer.layer-3 { transform:rotate(-11deg) translate(-6px, 1px); }
+        .cv-stack-layer.cv-stack-layer-pdf { display:flex; align-items:center; justify-content:center; background-color:#F2D5D1; border-color:#D49A94; }
+        .cv-stack-layer.cv-stack-layer-pdf i { font-size:36px; color:#A02A2A; }
+        /* a stacked file that can no longer be loaded reads as an explicit "unavailable" tile, not a blank one */
+        .cv-stack-layer.cv-stack-layer-missing { background-color:#E4EAF4; border-style:dashed; border-color:#A3AFC7; display:flex; align-items:center; justify-content:center; }
+        .cv-stack-layer.cv-stack-layer-missing i { font-size:28px; color:#66718D; }
+        .cv-file-stack .cv-stack-count-badge { position:absolute; bottom:2px; right:2px; z-index:4; background:var(--neust-maroon); color:var(--neust-gold); font-size:11px; font-weight:700; border-radius:0; min-width:22px; height:22px; display:flex; align-items:center; justify-content:center; padding:0 6px; border:2px solid #ffffff; box-sizing:border-box; }
+        .cv-file-stack-label { font-size:11px; color:#3E4963; font-weight:700; }
+
+        .fv-doc-thumb.fv-doc-thumb-pdf { align-items:center; justify-content:center; background:#F2D5D1; border-color:#D49A94; }
+        .fv-doc-thumb.fv-doc-thumb-pdf i { font-size:16px; color:#A02A2A; }
         .cv-card-ribbon { position: absolute; top: 10px; right: 10px; z-index: 6; display: flex; gap: 6px; pointer-events: none; }
         .cv-rb { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 700; padding: 3px 9px; border-radius: 0; white-space: nowrap; box-shadow: 0 1px 2px rgba(0,0,0,0.12); }
         .cv-rb-verified { background: #D9E8D2; color: #2C5A2C; }
@@ -3716,12 +4266,81 @@ if (!$courseOfferingsLoaded) {
      unchanged; fetch / XMLHttpRequest keep working exactly as before.
      ══════════════════════════════════════════════════════════════════════ -->
 <style>
-    html.cv-booting::before { content: ''; position: fixed; left: 50%; top: 50%; width: 54px; height: 54px; margin: -44px 0 0 -32px; border-radius: 50%;
-        border: 5px solid #A3AFC7; border-top-color: #1B2A4A; z-index: 20002; animation: cvBootSpin 0.85s linear infinite; }
+    /* the first-paint ring: exactly where the page's own spinner is; its size and look come from the shared ring rule below,
+       and it carries on from the previous page's loading page (--cv-ring-delay). CLEAN-UP (audit): two rules merged into one. */
+    html.cv-booting::before { content: ''; position: fixed; left: 50%; top: 50%; margin: -47.5px 0 0 -32px; z-index: 20002;
+        animation: cvRingSpin 1s steps(12, end) infinite; animation-delay: var(--cv-ring-delay, 0s); }
     html.cv-booting::after { content: 'LOADING'; position: fixed; inset: 0; z-index: 20001; display: flex; align-items: center; justify-content: center;
-        padding-top: 70px; box-sizing: border-box; background: rgba(238, 241, 246, 0.92); color: #1B2A4A;
+        padding: 80px 20.7px 0 0; box-sizing: border-box; background: rgba(238, 241, 246, 0.92); color: #1B2A4A;   /* UPDATED (this adjustment): label exactly where the page's own label is */
         font: 700 13px 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; letter-spacing: 0.6px; }
-    @keyframes cvBootSpin { to { transform: rotate(360deg); } }
+    /* NEW (this adjustment): ENHANCED LOADING RING — instead of one solid arc sweeping round, 12 rounded segments
+       in the site's navy that fade from dark to light around the circle and tick round (like a classic activity
+       indicator). Same 64 px footprint and position as before, so nothing else moves. Used by the first-paint
+       cover AND by this page's own loading page, so both always look identical. */
+    html.cv-booting::before,
+    #globalLoadingOverlay .global-loading-spinner {
+        width: 64px; height: 64px; border: 0; border-radius: 50%; box-sizing: border-box;
+        background: conic-gradient(from 0deg, rgba(27,42,74,0.12) 0deg, rgba(27,42,74,0.35) 120deg, rgba(27,42,74,0.7) 240deg, #1B2A4A 330deg, #1B2A4A 360deg);
+        -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 9px), #000 calc(100% - 8px)),
+                      repeating-conic-gradient(from 5deg, #000 0deg 20deg, transparent 20deg 30deg);
+        -webkit-mask-composite: source-in;
+                mask: radial-gradient(farthest-side, transparent calc(100% - 9px), #000 calc(100% - 8px)),
+                      repeating-conic-gradient(from 5deg, #000 0deg 20deg, transparent 20deg 30deg);
+                mask-composite: intersect;
+        will-change: transform;   /* FIX: the ring keeps turning on the compositor while this large page is busy loading (no pause) */
+    }
+    #globalLoadingOverlay .global-loading-spinner { animation: cvRingSpin 1s steps(12, end) infinite; }
+    @keyframes cvRingSpin { to { transform: rotate(360deg); } }
+    /* NEW (this adjustment): the animated dots after "LOADING", like the page's own loading page, so nothing changes
+       when the page's loading page takes over */
+    /* UPDATED (this adjustment): the three dots fade one after another exactly like the page's own dots
+       (same 1.2 s cycle, 0.2 s apart), so they simply carry on when the page's loading page takes over */
+    html.cv-booting body::before { content: '.'; position: fixed; left: calc(50% + 29.75px); top: calc(50% + 32.5px); z-index: 20003;
+        font: 700 13px/15px 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; letter-spacing: 0.6px; color: rgba(27,42,74,0);
+        animation: cvBootDots 1.2s linear infinite; animation-delay: var(--cv-dots-delay, 0s); pointer-events: none; }
+    @keyframes cvBootDots {
+        0.0% { color: rgba(27,42,74,0.0); text-shadow: 4.23px 0 rgba(27,42,74,0.075), 8.47px 0 rgba(27,42,74,0.424); }
+        2.5% { color: rgba(27,42,74,0.0); text-shadow: 4.23px 0 rgba(27,42,74,0.052), 8.47px 0 rgba(27,42,74,0.342); }
+        5.0% { color: rgba(27,42,74,0.0); text-shadow: 4.23px 0 rgba(27,42,74,0.034), 8.47px 0 rgba(27,42,74,0.273); }
+        7.5% { color: rgba(27,42,74,0.0); text-shadow: 4.23px 0 rgba(27,42,74,0.02), 8.47px 0 rgba(27,42,74,0.215); }
+        10.0% { color: rgba(27,42,74,0.0); text-shadow: 4.23px 0 rgba(27,42,74,0.01), 8.47px 0 rgba(27,42,74,0.166); }
+        12.5% { color: rgba(27,42,74,0.0); text-shadow: 4.23px 0 rgba(27,42,74,0.004), 8.47px 0 rgba(27,42,74,0.126); }
+        15.0% { color: rgba(27,42,74,0.0); text-shadow: 4.23px 0 rgba(27,42,74,0.001), 8.47px 0 rgba(27,42,74,0.094); }
+        17.5% { color: rgba(27,42,74,0.0); text-shadow: 4.23px 0 rgba(27,42,74,0.0), 8.47px 0 rgba(27,42,74,0.067); }
+        20.0% { color: rgba(27,42,74,0.0); text-shadow: 4.23px 0 rgba(27,42,74,0.0), 8.47px 0 rgba(27,42,74,0.046); }
+        22.5% { color: rgba(27,42,74,0.071); text-shadow: 4.23px 0 rgba(27,42,74,0.0), 8.47px 0 rgba(27,42,74,0.029); }
+        25.0% { color: rgba(27,42,74,0.221); text-shadow: 4.23px 0 rgba(27,42,74,0.0), 8.47px 0 rgba(27,42,74,0.017); }
+        27.5% { color: rgba(27,42,74,0.409); text-shadow: 4.23px 0 rgba(27,42,74,0.0), 8.47px 0 rgba(27,42,74,0.008); }
+        30.0% { color: rgba(27,42,74,0.576); text-shadow: 4.23px 0 rgba(27,42,74,0.0), 8.47px 0 rgba(27,42,74,0.002); }
+        32.5% { color: rgba(27,42,74,0.706); text-shadow: 4.23px 0 rgba(27,42,74,0.0), 8.47px 0 rgba(27,42,74,0.0); }
+        35.0% { color: rgba(27,42,74,0.802); text-shadow: 4.23px 0 rgba(27,42,74,0.0), 8.47px 0 rgba(27,42,74,0.0); }
+        37.5% { color: rgba(27,42,74,0.874); text-shadow: 4.23px 0 rgba(27,42,74,0.015), 8.47px 0 rgba(27,42,74,0.0); }
+        40.0% { color: rgba(27,42,74,0.925); text-shadow: 4.23px 0 rgba(27,42,74,0.113), 8.47px 0 rgba(27,42,74,0.0); }
+        42.5% { color: rgba(27,42,74,0.96); text-shadow: 4.23px 0 rgba(27,42,74,0.283), 8.47px 0 rgba(27,42,74,0.0); }
+        45.0% { color: rgba(27,42,74,0.983); text-shadow: 4.23px 0 rgba(27,42,74,0.468), 8.47px 0 rgba(27,42,74,0.0); }
+        47.5% { color: rgba(27,42,74,0.996); text-shadow: 4.23px 0 rgba(27,42,74,0.623), 8.47px 0 rgba(27,42,74,0.0); }
+        50.0% { color: rgba(27,42,74,1.0); text-shadow: 4.23px 0 rgba(27,42,74,0.741), 8.47px 0 rgba(27,42,74,0.0); }
+        52.5% { color: rgba(27,42,74,0.967); text-shadow: 4.23px 0 rgba(27,42,74,0.829), 8.47px 0 rgba(27,42,74,0.0); }
+        55.0% { color: rgba(27,42,74,0.905); text-shadow: 4.23px 0 rgba(27,42,74,0.893), 8.47px 0 rgba(27,42,74,0.038); }
+        57.5% { color: rgba(27,42,74,0.815); text-shadow: 4.23px 0 rgba(27,42,74,0.938), 8.47px 0 rgba(27,42,74,0.163); }
+        60.0% { color: rgba(27,42,74,0.705); text-shadow: 4.23px 0 rgba(27,42,74,0.969), 8.47px 0 rgba(27,42,74,0.346); }
+        62.5% { color: rgba(27,42,74,0.591); text-shadow: 4.23px 0 rgba(27,42,74,0.989), 8.47px 0 rgba(27,42,74,0.524); }
+        65.0% { color: rgba(27,42,74,0.487); text-shadow: 4.23px 0 rgba(27,42,74,0.998), 8.47px 0 rgba(27,42,74,0.666); }
+        67.5% { color: rgba(27,42,74,0.395); text-shadow: 4.23px 0 rgba(27,42,74,0.992), 8.47px 0 rgba(27,42,74,0.773); }
+        70.0% { color: rgba(27,42,74,0.317); text-shadow: 4.23px 0 rgba(27,42,74,0.95), 8.47px 0 rgba(27,42,74,0.852); }
+        72.5% { color: rgba(27,42,74,0.252); text-shadow: 4.23px 0 rgba(27,42,74,0.878), 8.47px 0 rgba(27,42,74,0.91); }
+        75.0% { color: rgba(27,42,74,0.198); text-shadow: 4.23px 0 rgba(27,42,74,0.779), 8.47px 0 rgba(27,42,74,0.95); }
+        77.5% { color: rgba(27,42,74,0.152); text-shadow: 4.23px 0 rgba(27,42,74,0.667), 8.47px 0 rgba(27,42,74,0.977); }
+        80.0% { color: rgba(27,42,74,0.115); text-shadow: 4.23px 0 rgba(27,42,74,0.555), 8.47px 0 rgba(27,42,74,0.993); }
+        82.5% { color: rgba(27,42,74,0.084); text-shadow: 4.23px 0 rgba(27,42,74,0.455), 8.47px 0 rgba(27,42,74,1.0); }
+        85.0% { color: rgba(27,42,74,0.059); text-shadow: 4.23px 0 rgba(27,42,74,0.368), 8.47px 0 rgba(27,42,74,0.981); }
+        87.5% { color: rgba(27,42,74,0.04); text-shadow: 4.23px 0 rgba(27,42,74,0.294), 8.47px 0 rgba(27,42,74,0.929); }
+        90.0% { color: rgba(27,42,74,0.024); text-shadow: 4.23px 0 rgba(27,42,74,0.233), 8.47px 0 rgba(27,42,74,0.848); }
+        92.5% { color: rgba(27,42,74,0.013); text-shadow: 4.23px 0 rgba(27,42,74,0.182), 8.47px 0 rgba(27,42,74,0.743); }
+        95.0% { color: rgba(27,42,74,0.006); text-shadow: 4.23px 0 rgba(27,42,74,0.139), 8.47px 0 rgba(27,42,74,0.629); }
+        97.5% { color: rgba(27,42,74,0.001); text-shadow: 4.23px 0 rgba(27,42,74,0.104), 8.47px 0 rgba(27,42,74,0.52); }
+        100.0% { color: rgba(27,42,74,0.0); text-shadow: 4.23px 0 rgba(27,42,74,0.075), 8.47px 0 rgba(27,42,74,0.424); }
+    }
 </style>
 <script>
 (function () {
@@ -3733,13 +4352,140 @@ if (!$courseOfferingsLoaded) {
     // ── 1) first paint: covered until this page's own loading overlay exists ──
     root.classList.add('cv-booting');
     function releaseBoot() { root.classList.remove('cv-booting'); }
+    /* NEW (this adjustment): the loading animation no longer starts over midway. When the page's own loading page
+       takes over from this cover, its spinner continues from the same angle, its dots continue in the same rhythm,
+       and its pop-in is not replayed (it is already on screen). Only for this one hand-over, and only if the cover
+       was actually painted; any later showing of the loading page (e.g. "Saving") animates exactly as before. */
+    var cvBootStart = (window.performance && performance.now) ? performance.now() : Date.now();
+    var cvCoverPainted = false;
+    /* NEW (this adjustment): ONE loading page from the side-menu click / refresh until the new page is ready.
+       The page being left saves the moment its loading page appeared (see "pagehide" below); this page picks it
+       up and simply carries on from there — same ring position, same dots, no second pop-in, nothing drawn twice.
+       Used once, only if recent (15 s); a first visit (nothing saved) behaves as before. */
+    var CV_LOADER_KEY = 'cvLoaderEpoch', cvCarriedOver = false;
+    var CV_PHASE_KEY = 'cvLoaderPhase', cvRingAt0 = null, cvDotsAt0 = null, cvPhaseReadAt = 0;   // NEW (loader sync fix)
+    try {
+        var cvEpoch = parseInt(sessionStorage.getItem(CV_LOADER_KEY) || '', 10);
+        sessionStorage.removeItem(CV_LOADER_KEY);
+        var cvSince = cvEpoch ? Date.now() - cvEpoch : -1;
+        if (cvSince >= 0 && cvSince < 15000) {
+            cvCarriedOver = true; cvCoverPainted = true;
+            cvBootStart = cvBootStart - cvSince;
+            root.style.setProperty('--cv-ring-delay', (-((cvSince / 1000) % 1)).toFixed(3) + 's');
+            root.style.setProperty('--cv-dots-delay', (-((cvSince / 1000) % 1.2)).toFixed(3) + 's');
+            /* NEW (loader sync fix): the previous page also handed over where its ring and dots REALLY were in their
+               turn (read from the running animations — see "pagehide" below). The old way assumed the ring started
+               turning the moment the loading page was shown, which is only true for the first loading page after a
+               page opens; a loading page shown later (a link click) had its ring at any angle, so the next page
+               continued from the wrong one — a visible jump. With the real positions it continues exactly. */
+            try {
+                var cvPh = JSON.parse(sessionStorage.getItem(CV_PHASE_KEY) || 'null');
+                if (cvPh && typeof cvPh.ring === 'number' && typeof cvPh.dots === 'number' && Date.now() - cvPh.t >= 0 && Date.now() - cvPh.t < 15000) {
+                    var cvGap = Date.now() - cvPh.t;
+                    cvRingAt0 = (cvPh.ring + cvGap) / 1000; cvDotsAt0 = (cvPh.dots + cvGap) / 1000;
+                    cvPhaseReadAt = (window.performance && performance.now) ? performance.now() : Date.now();
+                    root.style.setProperty('--cv-ring-delay', (-(cvRingAt0 % 1)).toFixed(3) + 's');
+                    root.style.setProperty('--cv-dots-delay', (-(cvDotsAt0 % 1.2)).toFixed(3) + 's');
+                }
+            } catch (e) {}
+        }
+        sessionStorage.removeItem(CV_PHASE_KEY);
+    } catch (e) {}
+    function cvLoaderStartedAt() { return Date.now() - (((window.performance && performance.now) ? performance.now() : Date.now()) - cvBootStart); }
+    if (window.requestAnimationFrame) requestAnimationFrame(function () { requestAnimationFrame(function () { cvCoverPainted = root.classList.contains('cv-booting'); }); });
+    function continueCoverAnimation(ov) {
+        try {
+            if (!cvCoverPainted || !ov || ov.classList.contains('hidden')) return;
+            var now = (window.performance && performance.now) ? performance.now() : Date.now();
+            var elapsed = (now - cvBootStart) / 1000;
+            var elapsedRing = (cvRingAt0 !== null) ? cvRingAt0 + (now - cvPhaseReadAt) / 1000 : elapsed;   // NEW (loader sync fix): the real position, when handed over
+            var elapsedDots = (cvDotsAt0 !== null) ? cvDotsAt0 + (now - cvPhaseReadAt) / 1000 : elapsed;
+            var spinner = ov.querySelector('.global-loading-spinner');
+            if (spinner) spinner.style.animationDelay = (-(elapsedRing % 1)).toFixed(3) + 's';   // UPDATED (this adjustment): the ring's 1 s turn
+            var dots = ov.querySelectorAll('.global-loading-dots span');
+            for (var i = 0; i < dots.length; i++) dots[i].style.animationDelay = (-((elapsedDots - i * 0.2) % 1.2 + 1.2) % 1.2).toFixed(3) + 's';
+            var box = ov.querySelector('.global-loading-box');
+            if (box) {
+                box.style.animation = 'none';   // no second pop-in
+                var restore = new MutationObserver(function () {   // later showings get their pop-in back, as before
+                    if (ov.classList.contains('hidden')) {
+                        restore.disconnect();
+                        setTimeout(function () { box.style.animation = ''; if (spinner) spinner.style.animationDelay = ''; for (var j = 0; j < dots.length; j++) dots[j].style.animationDelay = ''; }, 400);
+                    }
+                });
+                restore.observe(ov, { attributes: true, attributeFilter: ['class'] });
+            }
+        } catch (e) { /* never affects the page */ }
+    }
+    // UPDATED (this adjustment): the cover gives way the instant the page's loading page is in the page (before the
+    // next frame is drawn), so the two are never drawn at the same time
+    var cvHandedOver = false;
+    function cvHandOver(ovEl) {
+        if (cvHandedOver) return;
+        cvHandedOver = true;
+        continueCoverAnimation(ovEl);
+        releaseBoot();
+    }
+    if (window.MutationObserver) {
+        var cvOvWatch = new MutationObserver(function () {
+            var o = document.getElementById('globalLoadingOverlay');
+            if (o) { cvOvWatch.disconnect(); cvHandOver(o); }
+        });
+        cvOvWatch.observe(root, { childList: true, subtree: true });
+        document.addEventListener('DOMContentLoaded', function () { cvOvWatch.disconnect(); });
+    }
     (function waitForOverlay() {
-        if (document.getElementById('globalLoadingOverlay')) { releaseBoot(); return; }
+        var ovEl = document.getElementById('globalLoadingOverlay');
+        if (ovEl) { cvHandOver(ovEl); return; }
         if (document.readyState !== 'loading') { releaseBoot(); return; }   // page without an overlay: never keep it covered
         setTimeout(waitForOverlay, 16);
     })();
     document.addEventListener('DOMContentLoaded', function () { setTimeout(releaseBoot, 0); });
     window.addEventListener('pageshow', function (e) { if (e.persisted) releaseBoot(); });
+
+    /* NEW (this adjustment): remember when this page's loading page appeared, and hand that moment to the next
+       page when this one is left (side-menu link, refresh, redirect) while it is showing — so the next page
+       carries on the same loading page instead of starting a second one. Downloads never leave the page, so
+       they never hand anything over. */
+    var cvShownSince = null;
+    function cvWatchOverlay() {
+        var ov = document.getElementById('globalLoadingOverlay');
+        if (!ov) return;
+        var mark = function () {
+            var shown = !ov.classList.contains('hidden');
+            if (shown && cvShownSince === null) cvShownSince = Date.now();
+            if (!shown) cvShownSince = null;
+        };
+        if (!ov.classList.contains('hidden')) cvShownSince = cvLoaderStartedAt();   // the page's first loading page
+        new MutationObserver(mark).observe(ov, { attributes: true, attributeFilter: ['class'] });
+    }
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', cvWatchOverlay); else cvWatchOverlay();
+    // NEW (loader sync fix): milliseconds into the current turn of an element's running CSS animation (null if unknown)
+    function cvAnimPhase(el, period) {
+        try {
+            if (!el || !el.getAnimations) return null;
+            var list = el.getAnimations();
+            for (var i = 0; i < list.length; i++) {
+                var a = list[i], ct = a.currentTime;
+                if (typeof ct !== 'number' || !a.effect || !a.effect.getComputedTiming) continue;
+                var delay = a.effect.getComputedTiming().delay || 0;
+                return (((ct - delay) % period) + period) % period;
+            }
+        } catch (e) {}
+        return null;
+    }
+    window.addEventListener('pagehide', function () {
+        try {
+            var ov = document.getElementById('globalLoadingOverlay');
+            if (ov && !ov.classList.contains('hidden') && !ov.classList.contains('success-state')) {
+                sessionStorage.setItem(CV_LOADER_KEY, String(cvShownSince !== null ? cvShownSince : Date.now()));
+                // NEW (loader sync fix): where the ring and the dots really are in their turn right now
+                var ringMs = cvAnimPhase(ov.querySelector('.global-loading-spinner'), 1000);
+                var dotsMs = cvAnimPhase(ov.querySelector('.global-loading-dots span'), 1200);
+                if (ringMs !== null && dotsMs !== null) sessionStorage.setItem(CV_PHASE_KEY, JSON.stringify({ t: Date.now(), ring: ringMs, dots: dotsMs }));
+            }
+        } catch (e) {}
+    });
 
     // ── shared: this page's loading overlay ──
     var LABEL = 'Processing', MIN_MS = 350, SAFETY_MS = 30000;
@@ -3852,6 +4598,39 @@ if (!$courseOfferingsLoaded) {
     });
 })();
 </script>
+<!-- NEW (this adjustment): button tooltips can now hold a short description, so they may wrap onto a second line -->
+<style>
+    #cvBtnTip { white-space: normal; max-width: 300px; text-align: center; }
+</style>
+<!-- NEW (this adjustment): the "New upload" tag — same design as company_validation.php (.cv-new-upload-tag) -->
+<style>
+    .cv-new-upload-tag { position:absolute; top:10px; left:10px; z-index:6; display:inline-flex; align-items:center; gap:5px; background:#1B2A4A; color:#ffffff; font-size:11px; font-weight:700; padding:3px 9px; border-radius:0; box-shadow:0 1px 2px rgba(0,0,0,0.18); pointer-events:none; white-space:nowrap; }
+</style>
+<!-- NEW (this adjustment): Inbox — new requirement submission cards, same design as company_validation.php's notification cards -->
+<style>
+    #studentUploadInbox { flex-shrink: 0; max-height: 45vh; overflow-y: auto; border-bottom: 1px solid #A3AFC7; background: #fff; }
+    .sru-section-title { display: flex; align-items: center; gap: 8px; padding: 10px 20px; background: #E4EAF4; color: #1B2A4A;
+        font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.5px; flex-shrink: 0; }
+    .sru-section-title .sru-count { margin-left: auto; background: #1B2A4A; color: #fff; padding: 1px 8px; font-size: 10.5px; }
+    #studentUploadInbox .moa-card { border-bottom:1px solid #A3AFC7; padding:18px 20px; transition:background 0.15s; }
+    #studentUploadInbox .moa-card:hover { background:#E4EAF4; }
+    #studentUploadInbox .moa-card:last-child { border-bottom:none; }
+    #studentUploadInbox .moa-card-top { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:8px; }
+    #studentUploadInbox .moa-card-info { flex:1; min-width:0; }
+    #studentUploadInbox .moa-card-company { font-size:15px; font-weight:700; color:#1B2A4A; margin-bottom:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    #studentUploadInbox .moa-card-meta { font-size:12px; color:#3E4963; display:flex; flex-wrap:wrap; gap:10px; margin-bottom:4px; }
+    #studentUploadInbox .moa-card-meta span { display:flex; align-items:center; gap:4px; }
+    #studentUploadInbox .moa-notif-type-badge { display:inline-flex; align-items:center; gap:5px; font-size:10.5px; font-weight:700; padding:3px 9px; border-radius:0; margin:0; width:fit-content; flex-shrink:0; white-space:nowrap; }
+    #studentUploadInbox .moa-notif-type-badge.notif-uploaded { background:#E4EAF4; color:#1B2A4A; }
+    #studentUploadInbox .moa-card-detail-row { display:flex; align-items:center; justify-content:space-between; gap:14px; }
+    #studentUploadInbox .moa-card-address { font-size:12px; color:#66718D; }
+    #studentUploadInbox .moa-card-address.moa-notif-upload-detail { white-space:normal; color:#1B2A4A; font-weight:600; line-height:1.4; margin-top:3px; }
+    #studentUploadInbox .moa-card-actions { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+    #studentUploadInbox .moa-action-btn { display:inline-flex; align-items:center; gap:5px; padding:7px 14px; border-radius:0; font-size:12px; font-weight:700; cursor:pointer; border:none; transition:opacity 0.15s,transform 0.1s; font-family:'Segoe UI',Tahoma,Geneva,Verdana,sans-serif; white-space:nowrap; }
+    #studentUploadInbox .moa-action-btn:hover { opacity:0.85; transform:translateY(-1px); }
+    #studentUploadInbox .moa-action-btn:disabled { opacity:0.4; cursor:not-allowed; transform:none; }
+    #studentUploadInbox .moa-action-btn.accept-btn { background:#2C5A2C; color:white; }
+</style>
 </head>
 <body>
 
@@ -4082,7 +4861,7 @@ if (!$courseOfferingsLoaded) {
     <div class="sidebar-header">
         <!-- UPDATED (this adjustment — design from company_validation.php): admin name + role label, same markup/id as there -->
         <div class="sidebar-header-titles">
-            <h2 id="sidebarTitle"><?= htmlspecialchars($adminFullName) ?></h2>
+            <h2 id="sidebarTitle"><?= htmlspecialchars($adminFullName ?? '') ?></h2>
             <span class="sidebar-role-label">Administrator</span>
         </div>
         <button id="toggleBtn" class="toggle-btn"><i class="fas fa-bars"></i></button>
@@ -4150,11 +4929,14 @@ if (!$courseOfferingsLoaded) {
                 <div id="appRequestHeader">
                     <h3>
                         <i class="fas fa-envelope-open-text"></i>
-                        Application Requests
+                        Inbox<!-- UPDATED (this adjustment): application requests + new requirement submissions -->
                         <span id="appRequestNewBadge" style="background:#dc2626;color:white;font-size:0.7rem;padding:2px 9px;border-radius:20px;font-weight:700;display:none;"></span>
                     </h3>
                     <button id="appRequestClose" onclick="closeAppInbox()">&#x2715;</button>
                 </div>
+                <!-- NEW (this adjustment): new requirement submissions (filled by cvRenderStudentUploads) -->
+                <div id="studentUploadInbox" style="display:none;"></div>
+                <div id="appRequestSectionTitle" class="sru-section-title" style="display:none;"><i class="fas fa-envelope-open-text"></i> Application Requests</div>
                 <div id="appRequestBody">
                     <div class="ar-empty" id="arEmpty" style="display:none;">
                         <i class="fas fa-inbox"></i>
@@ -4170,7 +4952,7 @@ if (!$courseOfferingsLoaded) {
                 <option value="All">All Courses</option>
                 <?php /* UPDATED: options now come from course_offerings (see $courseFilterOptions above) */ ?>
                 <?php foreach ($courseFilterOptions as $coOpt): ?>
-                <option value="<?= htmlspecialchars($coOpt) ?>" title="<?= htmlspecialchars($coOpt) ?>"><?= htmlspecialchars($coOpt) ?></option>
+                <option value="<?= htmlspecialchars($coOpt ?? '') ?>" title="<?= htmlspecialchars($coOpt ?? '') ?>"><?= htmlspecialchars($coOpt ?? '') ?></option>
                 <?php endforeach; ?>
             </select>
             <?php /* REMOVED (this adjustment): the "All Status" filter (#statusFilter) was taken out of the filter bar. */ ?>
@@ -4279,9 +5061,9 @@ if (!$courseOfferingsLoaded) {
             <div class="student-row" id="student-row-<?= $user_id ?>" data-group="pending">
                 <input type="checkbox" id="user_<?= $user_id ?>" class="toggle-input" style="display:none;">
                 <label for="user_<?= $user_id ?>" class="row-summary" id="row-summary-<?= $user_id ?>">
-                    <span><?= htmlspecialchars($fullName) ?></span>
-                    <span style="color:#718096; font-size:13px;"><?= htmlspecialchars($student['course']) ?></span>
-                    <span class="overall-status-dot" style="color:<?= $dot ?>; font-weight:bold; --vs-pct:<?= $svPct ?>;" data-vpct="<?= $svPct ?>" data-vinfo="<?= htmlspecialchars($vsInfoText) ?>">● <?= $overallStatus ?></span>
+                    <span><?= htmlspecialchars($fullName ?? '') ?></span>
+                    <span style="color:#718096; font-size:13px;"><?= htmlspecialchars($student['course'] ?? '') ?></span>
+                    <span class="overall-status-dot" style="color:<?= $dot ?>; font-weight:bold; --vs-pct:<?= $svPct ?>;" data-vpct="<?= $svPct ?>" data-vinfo="<?= htmlspecialchars($vsInfoText ?? '') ?>">● <?= $overallStatus ?></span>
                 </label>
 
                 <div class="details-pane">
@@ -4312,7 +5094,10 @@ if (!$courseOfferingsLoaded) {
                                 <!-- Profile photo card (was the "Profile Photo" side card) -->
                                 <div class="req-item cv-req-card profile-card sv-photo-card" id="photo-card-<?= $user_id ?>" data-state="<?= $svPhotoState ?>" data-rejected="<?= $svPhotoRejected ? '1' : '0' ?>">
                                     <div class="cv-card-preview">
-                                        <?php if($student['student_photo']): ?>
+                                        <?php if($student['student_photo'] && svBlobIsPdf($student['student_photo'])): ?>
+                                            <!-- NEW (this adjustment): a PDF is shown as a PDF tile that opens the document preview modal (#cvReqDocPreviewModal), like company_validation.php -->
+                                            <div class="cv-pdf-tile cv-preview-trigger" data-uid="<?= (int) $user_id ?>" data-req-key="photo" data-req-label="Profile Photo (ID)" title="Preview Profile Photo (ID)"><i class="fas fa-file-pdf"></i><span>PDF document</span></div>
+                                        <?php elseif($student['student_photo']): ?>
                                             <img src="data:image/jpeg;base64,<?= base64_encode($student['student_photo']) ?>" class="profile-img-large cv-thumb-img" onclick="openPreview(this.src)" style="cursor:pointer;" alt="" title="Click to preview">
                                         <?php else: ?>
                                             <div class="cv-no-file"><i class="fas fa-hourglass-half"></i><span>No file yet</span></div>
@@ -4369,10 +5154,38 @@ if (!$courseOfferingsLoaded) {
                                     $isReqVerified = $svCard['verified'];
                                     $hasNoFile     = $svCard['noFile'];
                                     $showLock      = $isReqVerified;
+                                    // NEW (this adjustment): every file stored under this requirement (2+ => the stacked card below)
+                                    $svEnts        = svFetchFileEntries($conn, $user_id, $type);
+                                    $svEntCount    = count($svEnts);
+                                    $svStreamBase  = htmlspecialchars('?stream_student_file=' . (int) $user_id . '&type=' . urlencode($type), ENT_QUOTES);
+                                    $svReqLabel    = strip_tags($label ?? '');
                                 ?>
                                 <div class="req-item cv-req-card" id="req-item-<?= $user_id ?>-<?= $type ?>" data-state="<?= $svCard['state'] ?>" data-rejected="<?= $svCard['rejected'] ? '1' : '0' ?>">
                                     <div class="cv-card-preview">
-                                        <?php if($res && $res['file_name']): ?>
+                                        <?php if($svEntCount > 1): ?>
+                                            <!-- NEW (this adjustment): MULTIPLE FILES — ONE overlaying "stacked card" (max 3 layers shown) with a count badge,
+                                                 ported from company_validation.php. Clicking it opens the preview modal, which pages through every file. -->
+                                            <div class="cv-file-stack-wrap cv-preview-trigger" data-uid="<?= (int) $user_id ?>" data-req-key="<?= htmlspecialchars($type ?? '', ENT_QUOTES) ?>" data-req-label="<?= htmlspecialchars($svReqLabel, ENT_QUOTES) ?>" data-req-files="<?= htmlspecialchars(json_encode($svEnts), ENT_QUOTES) ?>" title="Preview all <?= (int) $svEntCount ?> files for <?= htmlspecialchars($svReqLabel, ENT_QUOTES) ?>">
+                                                <div class="cv-file-stack">
+                                                    <?php
+                                                    $svLayerCount = min(3, $svEntCount);
+                                                    for ($svLi = $svLayerCount - 1; $svLi >= 0; $svLi--):
+                                                        $svLayerMeta = $svEnts[$svLi];
+                                                    ?>
+                                                    <?php if ($svLayerMeta['isPdf']): ?>
+                                                        <div class="cv-stack-layer cv-stack-layer-pdf layer-<?= $svLi + 1 ?>"><i class="fas fa-file-pdf"></i></div>
+                                                    <?php else: ?>
+                                                        <div class="cv-stack-layer layer-<?= $svLi + 1 ?>"><img src="<?= $svStreamBase ?>&amp;file_id=<?= (int) $svLayerMeta['id'] ?>" alt="" onerror="this.onerror=null;var p=this.parentNode;if(p){p.classList.add('cv-stack-layer-missing');var i=document.createElement('i');i.className='fas fa-file-circle-xmark';p.replaceChild(i,this);}"></div>
+                                                    <?php endif; ?>
+                                                    <?php endfor; ?>
+                                                    <span class="cv-stack-count-badge"><?= (int) $svEntCount ?></span>
+                                                </div>
+                                                <div class="cv-file-stack-label"><?= (int) $svEntCount ?> files</div>
+                                            </div>
+                                        <?php elseif($res && $res['file_name'] && svBlobIsPdf($res['file_name'])): ?>
+                                            <!-- NEW (this adjustment): a PDF is shown as a PDF tile that opens the document preview modal (#cvReqDocPreviewModal), like company_validation.php -->
+                                            <div class="cv-pdf-tile cv-preview-trigger" data-uid="<?= (int) $user_id ?>" data-req-key="<?= htmlspecialchars($type ?? '', ENT_QUOTES) ?>" data-req-label="<?= htmlspecialchars(strip_tags($label ?? ''), ENT_QUOTES) ?>" title="Preview <?= htmlspecialchars(strip_tags($label ?? ''), ENT_QUOTES) ?>"><i class="fas fa-file-pdf"></i><span>PDF document</span></div>
+                                        <?php elseif($res && $res['file_name']): ?>
                                             <img src="data:image/jpeg;base64,<?= base64_encode($res['file_name']) ?>" class="cv-thumb-img" onclick="openPreview(this.src)" style="cursor:pointer;" alt="" title="Click to preview">
                                         <?php else: ?>
                                             <div class="cv-no-file"><i class="fas fa-hourglass-half"></i><span>No file yet</span></div>
@@ -4407,7 +5220,7 @@ if (!$courseOfferingsLoaded) {
                                                 <form class="update-form ajax-req-form"
                                                       data-user-id="<?= $user_id ?>"
                                                       data-req-type="<?= $type ?>"
-                                                      data-label="<?= htmlspecialchars($label, ENT_QUOTES) ?>">
+                                                      data-label="<?= htmlspecialchars($label ?? '', ENT_QUOTES) ?>">
                                                     <input type="hidden" name="user_id" value="<?= $user_id ?>">
                                                     <input type="hidden" name="requirement_type" value="<?= $type ?>">
                                                     <select name="status" onchange="toggleRemark(this,'rem_<?= $user_id.$type ?>')">
@@ -4461,6 +5274,23 @@ if (!$courseOfferingsLoaded) {
 <div id="imagePreviewModal" style="display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.9);justify-content:center;align-items:center;z-index:10020;">
     <span onclick="this.parentElement.style.display='none'" style="position:absolute;top:20px;right:40px;font-size:40px;color:white;cursor:pointer;">&times;</span>
     <img id="previewImage" style="max-width:90%; max-height:90%; border-radius:4px;">
+</div>
+
+<!-- ── NEW (this adjustment): DOCUMENT PREVIEW MODAL. Ported from company_validation.php's #cvReqDocPreviewModal:
+     the same full-bleed dark viewer. A PDF renders in an iframe, an image in the image viewer; when more than one
+     file is queued (Full View's submitted documents) prev / next (or the arrow keys) page through them. Opened from
+     a PDF tile in the Requirements gallery (.cv-preview-trigger) or a PDF icon in Full View. Driven by
+     cvOpenDocPreview() in the script below. -->
+<div id="cvReqDocPreviewModal" class="cv-doc-modal">
+    <div class="cv-doc-modal-bar">
+        <div class="cv-doc-modal-title">
+            <i class="fas fa-file-alt cv-doc-modal-icon" id="cvReqDocPreviewIcon"></i>
+            <span class="cv-doc-modal-name" id="cvReqDocPreviewName">Document</span>
+            <span class="cv-doc-modal-counter" id="cvReqDocPreviewCounter"></span>
+        </div>
+        <button type="button" onclick="closeCvReqDocPreview()" class="cv-doc-modal-close" title="Close">&times;</button>
+    </div>
+    <div class="cv-doc-modal-viewer" id="cvReqDocPreviewViewerWrap"></div>
 </div>
 
 <!-- ── ARCHIVE VIEWER FAB ── -->
@@ -4777,6 +5607,143 @@ if (!$courseOfferingsLoaded) {
 
     // ── EXISTING UTILITIES ────────────────────────────────────────────────
     function openPreview(src){ document.getElementById("previewImage").src = src; document.getElementById("imagePreviewModal").style.display="flex"; }
+
+    // ════════════════════════════════════════════════════════════════════════
+    //  NEW (this adjustment) — DOCUMENT PREVIEW (PDF + IMAGE), ported from
+    //  company_validation.php's openCvReqDocPreview()/renderCvReqDocPreview().
+    //  A PDF tile in the Requirements gallery carries data-uid / data-req-key /
+    //  data-req-label; clicking it opens the dark viewer, which streams that one
+    //  file by ?stream_student_file=…&type=… (a PDF in an iframe, an image in the
+    //  image viewer). Full View passes its own list of PDFs (base64) instead,
+    //  and prev / next (or the left / right arrow keys) page through the list.
+    //  The click handler is delegated on `document`, so it also covers tiles
+    //  inserted live by refreshThumb().
+    // ════════════════════════════════════════════════════════════════════════
+    var cvPrevItems = [], cvPrevIndex = 0, cvPrevBodyOverflow = '', cvPrevBlobUrl = null;
+    function cvRevokePrevBlob() { if (cvPrevBlobUrl) { try { URL.revokeObjectURL(cvPrevBlobUrl); } catch (e) {} cvPrevBlobUrl = null; } }
+    function cvOpenDocPreview(items, index) {
+        if (!items || !items.length) return;
+        cvPrevItems = items;
+        cvPrevIndex = (index >= 0 && index < items.length) ? index : 0;
+        renderCvDocPreview();
+        document.getElementById('cvReqDocPreviewModal').style.display = 'flex';
+        if (!cvPrevBodyOverflow) cvPrevBodyOverflow = document.body.style.overflow || ' ';
+        document.body.style.overflow = 'hidden';
+    }
+    function cvStepDocPreview(delta) {
+        if (cvPrevItems.length < 2) return;
+        cvPrevIndex = (cvPrevIndex + delta + cvPrevItems.length) % cvPrevItems.length;
+        renderCvDocPreview();
+    }
+    function cvDocItemSrc(item) {
+        if (item.src) return item.src;
+        if (item.b64) {   // a file held in the page as base64 (Full View) -> a temporary blob URL
+            try {
+                var bin = atob(item.b64), len = bin.length, bytes = new Uint8Array(len);
+                for (var i = 0; i < len; i++) bytes[i] = bin.charCodeAt(i);
+                cvPrevBlobUrl = URL.createObjectURL(new Blob([bytes], { type: item.isPdf ? 'application/pdf' : 'image/jpeg' }));
+                return cvPrevBlobUrl;
+            } catch (e) { return ''; }
+        }
+        return '';
+    }
+    function renderCvDocPreview() {
+        var item = cvPrevItems[cvPrevIndex]; if (!item) return;
+        var viewerWrap = document.getElementById('cvReqDocPreviewViewerWrap');
+        var nameLabel  = document.getElementById('cvReqDocPreviewName');
+        var iconEl     = document.getElementById('cvReqDocPreviewIcon');
+        var counterEl  = document.getElementById('cvReqDocPreviewCounter');
+        var label = item.label || 'Document';
+        cvRevokePrevBlob();
+        if (nameLabel) nameLabel.textContent = label;
+        viewerWrap.innerHTML = '';
+        viewerWrap.classList.remove('image-mode');
+        var src = cvDocItemSrc(item);
+
+        function unavailable() {
+            viewerWrap.classList.remove('image-mode');
+            viewerWrap.innerHTML = '';
+            var msg = document.createElement('div');
+            msg.className = 'cv-doc-modal-unavailable';
+            msg.innerHTML = '<i class="fas fa-file-circle-xmark"></i><span>Preview unavailable</span>';
+            viewerWrap.appendChild(msg);
+        }
+        if (!src) {
+            if (iconEl) iconEl.className = 'fas fa-file-circle-xmark cv-doc-modal-icon';
+            unavailable();
+        } else if (item.isPdf) {
+            if (iconEl) iconEl.className = 'fas fa-file-pdf cv-doc-modal-icon';
+            var iframe = document.createElement('iframe');
+            iframe.title = label;
+            iframe.src = src;
+            viewerWrap.appendChild(iframe);
+        } else {
+            if (iconEl) iconEl.className = 'fas fa-image cv-doc-modal-icon';
+            viewerWrap.classList.add('image-mode');
+            var img = document.createElement('img');
+            img.className = 'cv-doc-modal-image';
+            img.alt = label;
+            // a file that can no longer be streamed back (e.g. removed after a denial) gets a clear message instead of a broken image
+            img.onerror = function () { img.onerror = null; unavailable(); };
+            img.src = src;
+            viewerWrap.appendChild(img);
+        }
+        if (cvPrevItems.length > 1) {
+            var prevBtn = document.createElement('button');
+            prevBtn.type = 'button'; prevBtn.className = 'cv-doc-nav-btn cv-doc-nav-prev'; prevBtn.title = 'Previous file';
+            prevBtn.innerHTML = '<i class="fas fa-chevron-left"></i>';
+            prevBtn.addEventListener('click', function (e) { e.stopPropagation(); cvStepDocPreview(-1); });
+            var nextBtn = document.createElement('button');
+            nextBtn.type = 'button'; nextBtn.className = 'cv-doc-nav-btn cv-doc-nav-next'; nextBtn.title = 'Next file';
+            nextBtn.innerHTML = '<i class="fas fa-chevron-right"></i>';
+            nextBtn.addEventListener('click', function (e) { e.stopPropagation(); cvStepDocPreview(1); });
+            viewerWrap.appendChild(prevBtn);
+            viewerWrap.appendChild(nextBtn);
+        }
+        if (counterEl) counterEl.textContent = cvPrevItems.length > 1 ? ((cvPrevIndex + 1) + ' / ' + cvPrevItems.length) : '';
+    }
+    function closeCvReqDocPreview() {
+        var modal = document.getElementById('cvReqDocPreviewModal');
+        var viewerWrap = document.getElementById('cvReqDocPreviewViewerWrap');
+        if (!modal) return;
+        modal.style.display = 'none';
+        if (viewerWrap) viewerWrap.innerHTML = '';
+        cvRevokePrevBlob();
+        document.body.style.overflow = (cvPrevBodyOverflow === ' ') ? '' : cvPrevBodyOverflow;
+        cvPrevBodyOverflow = '';
+        cvPrevItems = [];
+    }
+    document.addEventListener('click', function (e) {
+        var trig = e.target.closest ? e.target.closest('.cv-preview-trigger') : null;
+        if (trig) {
+            var uid = trig.getAttribute('data-uid'), key = trig.getAttribute('data-req-key');
+            if (!uid || !key) return;
+            // NEW (this adjustment): a stacked card lists its files in data-req-files ({id, isPdf} each) — page through all of them
+            var filesMeta = [];
+            try { filesMeta = JSON.parse(trig.getAttribute('data-req-files') || '[]'); } catch (err) { filesMeta = []; }
+            if (filesMeta && filesMeta.length) {
+                var base = window.location.pathname + '?stream_student_file=' + encodeURIComponent(uid) + '&type=' + encodeURIComponent(key) + '&file_id=';
+                var lblMulti = trig.getAttribute('data-req-label') || 'Document';
+                cvOpenDocPreview(filesMeta.map(function (m) { return { src: base + encodeURIComponent(m.id) + '&_=' + Date.now(), isPdf: !!m.isPdf, label: lblMulti }; }), 0);
+                return;
+            }
+            cvOpenDocPreview([{
+                src: window.location.pathname + '?stream_student_file=' + encodeURIComponent(uid) + '&type=' + encodeURIComponent(key) + '&_=' + Date.now(),
+                isPdf: true,
+                label: trig.getAttribute('data-req-label') || 'Document'
+            }], 0);
+            return;
+        }
+        // clicking the dark backdrop (outside the bar / viewer) closes it
+        if (e.target === document.getElementById('cvReqDocPreviewModal')) closeCvReqDocPreview();
+    });
+    document.addEventListener('keydown', function (e) {
+        var modal = document.getElementById('cvReqDocPreviewModal');
+        if (!modal || modal.style.display !== 'flex') return;
+        if (e.key === 'Escape') closeCvReqDocPreview();
+        else if (e.key === 'ArrowLeft') cvStepDocPreview(-1);
+        else if (e.key === 'ArrowRight') cvStepDocPreview(1);
+    });
     function toggleRemark(sel,id){ document.getElementById(id).style.display = (sel.value==="Denied") ? "inline-block" : "none"; }
 
     // ══════════════════════════════════════════════════════════════════════
@@ -4990,19 +5957,39 @@ if (!$courseOfferingsLoaded) {
     const ring         = document.getElementById('undoRingProgress');
     const ringCircumference = 88;
 
+    /* FIX (Denied card flashing back to "New submission"): a Denied save is only written to the database when the
+       Undo toast ends (so Undo can cancel it). Until then the database still holds the student's file as Pending,
+       and the live submission poll (pollNewSubmissions) took that for a brand-new upload — it swapped the card's
+       "Rejected / awaiting re-submission" view back to the review form + "New submission" for a moment. Cards with
+       a Denied action still waiting on its toast are tracked here (key "userId|type", photo = "photo") and the poll
+       leaves them alone; the key is released only once the commit / undo request has finished. */
+    var _deniedPendingKeys = {};
+    function svDeniedKey(ctx) {
+        if (!ctx) return null;
+        return ctx.userId + '|' + (ctx.type === 'photo' ? 'photo' : ctx.reqType);
+    }
+    function svHoldDenied(ctx) { var k = svDeniedKey(ctx); if (k) _deniedPendingKeys[k] = (_deniedPendingKeys[k] || 0) + 1; return k; }
+    function svReleaseDenied(k) {
+        if (!k || !_deniedPendingKeys[k]) return;
+        if (--_deniedPendingKeys[k] <= 0) delete _deniedPendingKeys[k];
+    }
+    function svIsDeniedPending(userId, type) { return !!_deniedPendingKeys[userId + '|' + type]; }
+
+    let undoKey       = null;   // hold key of the toast currently showing a Denied action
     let undoContext   = null;
     let _fvAllApps    = [];
     let _fvCurrentApp = null;
 
     function startUndoToast(token, label, context, isDenied) {
         if (undoToken && undoToken !== token) {
-            if (undoIsDenied) { commitDenied(undoToken); }
+            if (undoIsDenied) { commitDenied(undoToken, undoKey); }
             else              { sendEmailForToken(undoToken); }
         }
 
         undoToken     = token;
         undoContext   = context || null;
         undoIsDenied  = !!isDenied;
+        undoKey       = isDenied ? svHoldDenied(undoContext) : null;
         undoCountdown = UNDO_DURATION;
 
         document.getElementById('undoToastLabel').textContent = label;
@@ -5053,12 +6040,14 @@ if (!$courseOfferingsLoaded) {
         fetch(window.location.pathname, { method: 'POST', body: fd }).catch(function(){});
     }
 
-    function commitDenied(token) {
-        if (!token) return;
+    function commitDenied(token, heldKey) {
+        if (!token) { svReleaseDenied(heldKey); return; }
         var fd = new FormData();
         fd.append('ajax_commit_denied', '1');
         fd.append('undo_token', token);
-        fetch(window.location.pathname, { method: 'POST', body: fd }).catch(function(){});
+        fetch(window.location.pathname, { method: 'POST', body: fd })
+            .catch(function(){})
+            .then(function () { setTimeout(function () { svReleaseDenied(heldKey); }, 3000); });   // short grace for a poll already in flight   // the database now says Denied — safe for the poll to read it
     }
 
     function dismissUndo(commit) {
@@ -5070,9 +6059,12 @@ if (!$courseOfferingsLoaded) {
         document.getElementById('undoToastStatus').classList.remove('denied-mode');
 
         if (commit && undoToken) {
-            if (undoIsDenied) { commitDenied(undoToken); }
+            if (undoIsDenied) { commitDenied(undoToken, undoKey); }
             else              { sendEmailForToken(undoToken); }
+        } else if (undoIsDenied) {
+            svReleaseDenied(undoKey);   // cancelled (Undo) — nothing to commit
         }
+        undoKey      = null;
         undoToken    = null;
         undoContext  = null;
         undoIsDenied = false;
@@ -5128,13 +6120,34 @@ if (!$courseOfferingsLoaded) {
 
     // ── IN-PLACE UI UPDATE HELPERS ────────────────────────────────────────
 
+    /* NEW (this adjustment): a requirement's title, read back from its card WITHOUT any badge text. The card's
+       title line used to also hold the "NEW SUBMISSION" badge, so reading it back (after a save, or when the next
+       file arrived) copied "NEW SUBMISSION" into the title — again on every new upload ("… NEW SUBMISSION NEW
+       SUBMISSION"). This also cleans titles that already picked it up. */
+    function svCleanReqLabel(text) {
+        return String(text || '').replace(/✓\s*VERIFIED/g, '').replace(/\bNEW\s+SUBMISSION\b/gi, '').replace(/\s+/g, ' ').trim();
+    }
+    /* NEW (this adjustment): the "New upload" tag — the same one company_validation.php shows — on the card's
+       preview for a few seconds, instead of a "NEW SUBMISSION" badge inside the title. */
+    function svFlagNewUpload(cardEl) {
+        var pv = cardEl ? cardEl.querySelector('.cv-card-preview') : null;
+        if (!pv) return;
+        var old = pv.querySelector('.cv-new-upload-tag');   // already flagged: show it again for the full time
+        if (old && old.parentNode) old.parentNode.removeChild(old);
+        var tag = document.createElement('span');
+        tag.className = 'cv-new-upload-tag';
+        tag.innerHTML = '<i class="fas fa-file-arrow-up"></i> New upload';
+        pv.appendChild(tag);
+        setTimeout(function () { if (tag.parentNode) tag.parentNode.removeChild(tag); }, 8000);
+    }
+
     function applyReqStatusUI(userId, reqType, newStatus, newRemark) {
         var contentEl = document.getElementById('req-content-' + userId + '-' + reqType);
         var itemEl    = document.getElementById('req-item-' + userId + '-' + reqType);
         if (!contentEl) return;
 
         var labelDiv  = contentEl.querySelector('div[style*="font-weight:600"]');
-        var labelText = labelDiv ? labelDiv.textContent.replace('✓ VERIFIED','').trim() : reqType;
+        var labelText = labelDiv ? svCleanReqLabel(labelDiv.textContent) : reqType;   // UPDATED (this adjustment): badge text never becomes part of the title
 
         var remarksOptions = <?= json_encode($remarks) ?>;
 
@@ -5370,7 +6383,7 @@ if (!$courseOfferingsLoaded) {
     function svSyncReqCard(userId, reqType, status, remark) {
         var item = document.getElementById('req-item-' + userId + '-' + reqType);
         if (!item) return;
-        var hasFile = !!item.querySelector('.cv-card-preview img');
+        var hasFile = !!item.querySelector('.cv-card-preview img, .cv-card-preview .cv-pdf-tile, .cv-card-preview .cv-file-stack-wrap');
         var state = (status === 'Verified') ? 'verified' : ((status === 'Denied') ? 'awaiting' : (hasFile ? 'pending' : 'awaiting'));
         svSetCardState(item, state, status === 'Denied', remark);
     }
@@ -5378,7 +6391,7 @@ if (!$courseOfferingsLoaded) {
     function svSyncPhotoCard(userId, status, remark) {
         var item = document.getElementById('photo-card-' + userId);
         if (!item) return;
-        var hasFile = !!item.querySelector('.cv-card-preview img');
+        var hasFile = !!item.querySelector('.cv-card-preview img, .cv-card-preview .cv-pdf-tile, .cv-card-preview .cv-file-stack-wrap');
         var state = (status === 'Verified') ? 'verified' : ((status === 'Denied') ? 'awaiting' : (hasFile ? 'pending' : 'awaiting'));
         svSetCardState(item, state, status === 'Denied', remark);
     }
@@ -5560,6 +6573,7 @@ if (!$courseOfferingsLoaded) {
             .then(function (r) { return r.json(); })
             .then(function (data) {
                 if (!data.success || !data.state) return;
+                svSyncPlacementReplaced(data);   // NEW (this adjustment): placement replaced → bring the student back
                 Object.keys(data.state).forEach(function (uid) {
                     var s = data.state[uid];
 
@@ -5575,12 +6589,156 @@ if (!$courseOfferingsLoaded) {
             .catch(function () {});
     }
 
+    /* ══════════════════════════════════════════════════════════════════════
+       NEW (this adjustment) — PREFERRED PLACEMENT REPLACED → STUDENT COMES BACK FOR VALIDATION
+       When a student replaces the Preference for Placement on company_list.php, the Application SIT is
+       deleted and has to be validated again. The server (cv_ph_reconcile) puts such a student back to
+       "Pending"; the live check above then reports who is not verified (data.needs_validation) and who is on
+       hold (data.held). Here the page reacts without a reload:
+         • a student who is missing from the list (verified earlier) gets a fresh row inserted;
+         • a student whose open row still shows the OLD Application SIT as received / verified gets that row
+           refreshed so the card shows "Awaiting student submission" for the new one.
+       The fresh row is taken from this same page (same markup, same PHP), so nothing is duplicated.
+       ══════════════════════════════════════════════════════════════════════ */
+    var _svRowBusy = {};          // uid → true while a row is being fetched
+    var _svRowFailedAt = {};      // uid → time of the last failed fetch (retry after a pause, not every poll)
+
+    function svFetchFreshRow(uid) {
+        return fetch(window.location.pathname, { credentials: 'same-origin', cache: 'no-store' })
+            .then(function (r) { if (!r.ok) throw new Error('http'); return r.text(); })
+            .then(function (html) {
+                var doc = new DOMParser().parseFromString(html, 'text/html');
+                var fresh = doc.getElementById('student-row-' + uid);
+                if (!fresh) return null;
+                // remember where it sits in the server's order: the next row that is already on this page
+                var next = fresh.nextElementSibling;
+                while (next && !(next.classList && next.classList.contains('student-row') && document.getElementById(next.id))) next = next.nextElementSibling;
+                return { row: document.importNode(fresh, true), nextId: next ? next.id : null };
+            });
+    }
+
+    function svRowMatchesFilters(row) {
+        var si = document.getElementById('searchInput'), cf = document.getElementById('courseFilter');
+        var search = si ? si.value.toLowerCase() : '';
+        var course = cf ? cf.value : 'All';
+        var norm = function (c) { return String(c || '').replace(/\s+/g, ' ').trim().toLowerCase(); };
+        var sum = row.querySelector('.row-summary');
+        var courseEl = row.querySelector('.row-summary span:nth-child(2)');
+        return (!sum || sum.textContent.toLowerCase().indexOf(search) !== -1) &&
+               (course === 'All' || norm(courseEl ? courseEl.textContent : '') === norm(course));
+    }
+
+    // Put a freshly fetched row on the page (inserting it, or swapping it for the outdated one).
+    function svPlaceFreshRow(uid, fetched) {
+        var wrapper = document.getElementById('pendingListWrapper');
+        if (!wrapper || !fetched) return null;
+        var row = fetched.row;
+        var old = document.getElementById('student-row-' + uid);
+        var wasOpen = false;
+
+        if (old) {
+            var oldToggle = old.querySelector('.toggle-input');
+            wasOpen = !!(oldToggle && oldToggle.checked);
+            old.replaceWith(row);
+            var oi = _filteredPending.indexOf(old);
+            if (oi !== -1) _filteredPending[oi] = row;
+        } else {
+            var emptyEl = wrapper.querySelector('.section-empty');
+            if (emptyEl) emptyEl.remove();
+            var nextEl = fetched.nextId ? document.getElementById(fetched.nextId) : null;
+            if (nextEl && nextEl.parentNode === wrapper) wrapper.insertBefore(row, nextEl); else wrapper.appendChild(row);
+            if (svRowMatchesFilters(row) && _filteredPending.indexOf(row) === -1) _filteredPending.push(row);
+        }
+        delete _graduatedRows[uid];   // any in-memory copy of this row is outdated now
+        row.dataset.group = 'pending';
+        if (wasOpen) { var nt = row.querySelector('.toggle-input'); if (nt) nt.checked = true; }
+        row.querySelectorAll('.ajax-req-form').forEach(attachReqFormListener);
+        row.querySelectorAll('.ajax-photo-form').forEach(attachPhotoFormListener);
+
+        _filteredPending.sort(function (a, b) {
+            return (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING) ? -1 : 1;
+        });
+        renderPage('pending');
+        var badge = document.getElementById('pendingCountBadge');
+        if (badge) badge.textContent = _filteredPending.length;
+        return row;
+    }
+
+    // Resolves with the student's row (fetching it when it is not on the page); null if it cannot be shown.
+    function svEnsureStudentRow(uid, forceRefresh) {
+        var existing = document.getElementById('student-row-' + uid);
+        if (existing && !forceRefresh) return Promise.resolve(existing);
+        if (_svRowBusy[uid]) return Promise.resolve(existing || null);
+        _svRowBusy[uid] = true;
+        return svFetchFreshRow(uid)
+            .then(function (fetched) {
+                if (!fetched) return existing || null;
+                return svPlaceFreshRow(uid, fetched) || existing || null;
+            })
+            .catch(function () { _svRowFailedAt[uid] = Date.now(); return existing || null; })
+            .then(function (res) { delete _svRowBusy[uid]; return res; });
+    }
+
+    function showPlacementReplacedToast(studentName, uid) {
+        var div = document.createElement('div');
+        div.className = 'cv-top-toast';
+        div.setAttribute('role', 'status');
+        div.innerHTML = '<i class="fas fa-right-left"></i><span><strong>' + escHtml(studentName) + '</strong> replaced the preferred placement — the new Application SIT needs validation.</span>';
+        document.body.appendChild(div);
+        cvLayoutTopToasts();
+        requestAnimationFrame(function () { div.classList.add('show'); });
+        setTimeout(function () {
+            div.classList.remove('show');
+            setTimeout(function () { div.remove(); cvLayoutTopToasts(); }, 400);
+        }, 6000);
+    }
+
+    var _svAnnouncedHold = {};
+    function svSyncPlacementReplaced(data) {
+        var needs = Array.isArray(data.needs_validation) ? data.needs_validation : [];
+        var held  = {};
+        (Array.isArray(data.held) ? data.held : []).forEach(function (id) { held[String(id)] = true; });
+
+        needs.forEach(function (n) {
+            var uid = String(n.id);
+            if (_svRowBusy[uid]) return;
+            if (_svRowFailedAt[uid] && Date.now() - _svRowFailedAt[uid] < 30000) return;
+            var row = document.getElementById('student-row-' + uid);
+            var st  = data.state ? data.state[uid] : null;
+            var sit = st && st.reqs ? st.reqs['application_sit'] : null;
+            var hasSit = !!(sit && sit.has_file);
+
+            if (!row) {
+                // not on the page (verified earlier): bring the student back — only a student on hold is a placement
+                // replacement, any other not-verified student not shown here is left to the normal page load.
+                if (!held[uid]) return;
+                svEnsureStudentRow(uid).then(function (r) {
+                    if (r && !_svAnnouncedHold[uid]) { _svAnnouncedHold[uid] = true; showPlacementReplacedToast(n.name || 'A student', uid); }
+                });
+                return;
+            }
+            if (!held[uid] || hasSit) return;
+            // row is on the page: refresh it only while it still shows the OLD Application SIT as received / verified
+            var card = document.getElementById('req-item-' + uid + '-application_sit');
+            var cardState = card ? card.getAttribute('data-state') : null;
+            if (card && cardState && cardState !== 'awaiting' && !svIsDeniedPending(uid, 'application_sit')) {
+                _svRowFailedAt[uid] = Date.now();   // at most one refresh per 30 seconds for the same student
+                svEnsureStudentRow(uid, true).then(function (r) {
+                    if (r && !_svAnnouncedHold[uid]) { _svAnnouncedHold[uid] = true; showPlacementReplacedToast(n.name || 'A student', uid); }
+                });
+            }
+        });
+        // forget students no longer on hold, so a later replacement is announced again
+        Object.keys(_svAnnouncedHold).forEach(function (uid) { if (!held[uid]) delete _svAnnouncedHold[uid]; });
+    }
+
     // Swap a requirement's "Awaiting student submission" placeholder for the
     // live review form the instant a file becomes available. It only acts
     // on items that are still showing that placeholder, so it never touches
     // a row the admin is already reviewing, has verified, or has denied.
     function liveActivateReqItem(userId, type, curReq, isDeployed) {
         if (!curReq || !curReq.has_file) return;
+        if (svIsDeniedPending(userId, type)) return;   // Denied, waiting for its Undo toast to end — not a new upload
         var contentEl = document.getElementById('req-content-' + userId + '-' + type);
         if (!contentEl) return;
         var placeholder = contentEl.querySelector('.awaiting-submission-block');
@@ -5588,7 +6746,7 @@ if (!$courseOfferingsLoaded) {
 
         var itemEl    = document.getElementById('req-item-' + userId + '-' + type);
         var labelDiv  = contentEl.querySelector('div[style*="font-weight:600"]');
-        var labelText = labelDiv ? labelDiv.textContent.trim() : type;
+        var labelText = labelDiv ? svCleanReqLabel(labelDiv.textContent) : type;   // UPDATED (this adjustment)
 
         if (isDeployed) {
             contentEl.innerHTML =
@@ -5602,8 +6760,7 @@ if (!$courseOfferingsLoaded) {
             }).join('');
 
             contentEl.innerHTML =
-                '<div style="font-weight:600; font-size:13px; margin-bottom:4px;">' + labelText +
-                ' <span style="background:#dbeafe; color:#1d4ed8; font-size:9px; padding:2px 6px; border-radius:8px; margin-left:6px; font-weight:700;">NEW SUBMISSION</span></div>' +
+                '<div style="font-weight:600; font-size:13px; margin-bottom:4px;">' + labelText + '</div>' +   // UPDATED (this adjustment): the title only — the "New upload" tag goes on the preview
                 '<form class="update-form ajax-req-form" data-user-id="' + userId + '" data-req-type="' + type + '" data-label="' + labelText + '">' +
                     '<input type="hidden" name="user_id" value="' + userId + '">' +
                     '<input type="hidden" name="requirement_type" value="' + type + '">' +
@@ -5628,12 +6785,14 @@ if (!$courseOfferingsLoaded) {
         }
 
         svSetCardState(itemEl, 'pending', false, '');   // NEW (this adjustment): a new file is in — card shows "Pending"
+        if (!isDeployed) svFlagNewUpload(itemEl);        // NEW (this adjustment): same "New upload" tag as company_validation.php
         refreshThumb(userId, type);
     }
 
     // Same idea, for the profile photo control.
     function liveActivatePhotoItem(userId, curPhoto, isDeployed) {
         if (!curPhoto || !curPhoto.has_file) return;
+        if (svIsDeniedPending(userId, 'photo')) return;   // Denied, waiting for its Undo toast to end — not a new upload
         var ctrlEl = document.getElementById('photo-ctrl-' + userId);
         if (!ctrlEl) return;
         var placeholder = ctrlEl.querySelector('.awaiting-submission-block');
@@ -5648,8 +6807,7 @@ if (!$courseOfferingsLoaded) {
                 return '<option value="' + r + '"' + (r === curPhoto.remark ? ' selected' : '') + '>' + r + '</option>';
             }).join('');
 
-            ctrlEl.innerHTML =
-                '<div style="text-align:center; margin-bottom:6px;"><span style="background:#dbeafe; color:#1d4ed8; font-size:10px; padding:3px 9px; border-radius:10px; font-weight:700;">NEW SUBMISSION</span></div>' +
+            ctrlEl.innerHTML =   // UPDATED (this adjustment): no "NEW SUBMISSION" line — the "New upload" tag goes on the photo card's preview
                 '<form class="update-form ajax-photo-form" data-user-id="' + userId + '" style="justify-content:center;">' +
                     '<input type="hidden" name="user_id" value="' + userId + '">' +
                     '<select name="photo_status" onchange="toggleRemark(this,\'photo_rem_' + userId + '\')">' +
@@ -5663,6 +6821,7 @@ if (!$courseOfferingsLoaded) {
                     '<button type="submit" style="display:block; width:100%; margin-top:10px;">Update ID</button>' +
                 '</form>';
             attachPhotoFormListener(ctrlEl.querySelector('.ajax-photo-form'));
+            svFlagNewUpload(ctrlEl.closest('.profile-card') || (document.getElementById('student-row-' + userId) || document).querySelector('.profile-card'));   // NEW (this adjustment)
         }
 
         svSetCardState(document.getElementById('photo-card-' + userId), 'pending', false, '');   // NEW (this adjustment)
@@ -5682,6 +6841,60 @@ if (!$courseOfferingsLoaded) {
                 if (!data.success || !data.file) return;
                 var src = 'data:image/jpeg;base64,' + data.file;
 
+                // NEW (this adjustment): the requirement now holds 2+ files — show (or refresh) the stacked card
+                var stackHost = (type !== 'photo') ? document.getElementById('req-item-' + userId + '-' + type) : null;
+                var stackPv   = stackHost ? stackHost.querySelector('.cv-card-preview') : null;
+                var curStack  = stackPv ? stackPv.querySelector('.cv-file-stack-wrap') : null;
+                if (stackPv && data.files && data.files.length > 1) {
+                    var wrap = document.createElement('div');
+                    wrap.className = 'cv-file-stack-wrap cv-preview-trigger';
+                    wrap.setAttribute('data-uid', userId);
+                    wrap.setAttribute('data-req-key', type);
+                    var sLbl = String((stackHost.querySelector('.cv-card-content > div') || {}).textContent || '').replace(/✓\s*VERIFIED/g, '').replace(/\bNEW\s+SUBMISSION\b/gi, '').replace(/\s+/g, ' ').trim() || 'Document';
+                    wrap.setAttribute('data-req-label', sLbl);
+                    wrap.setAttribute('data-req-files', JSON.stringify(data.files));
+                    wrap.title = 'Preview all ' + data.files.length + ' files for ' + sLbl;
+                    var stackBase = window.location.pathname + '?stream_student_file=' + encodeURIComponent(userId) + '&type=' + encodeURIComponent(type) + '&file_id=';
+                    var layers = '';
+                    for (var li = Math.min(3, data.files.length) - 1; li >= 0; li--) {
+                        var fm = data.files[li];
+                        layers += fm.isPdf
+                            ? '<div class="cv-stack-layer cv-stack-layer-pdf layer-' + (li + 1) + '"><i class="fas fa-file-pdf"></i></div>'
+                            : '<div class="cv-stack-layer layer-' + (li + 1) + '"><img src="' + stackBase + encodeURIComponent(fm.id) + '&_=' + Date.now() + '" alt=""></div>';
+                    }
+                    wrap.innerHTML = '<div class="cv-file-stack">' + layers + '<span class="cv-stack-count-badge">' + data.files.length + '</span></div><div class="cv-file-stack-label">' + data.files.length + ' files</div>';
+                    var curMain = stackPv.querySelector('img.cv-thumb-img, .cv-pdf-tile, .cv-no-file, .cv-file-stack-wrap');
+                    if (curMain) curMain.replaceWith(wrap); else stackPv.insertBefore(wrap, stackPv.firstChild);
+                    return;
+                }
+                // back to a single file: drop the stacked card so the normal single-file refresh below can take over
+                if (curStack) {
+                    var blank = document.createElement('div');
+                    blank.className = 'cv-no-file';
+                    curStack.replaceWith(blank);
+                }
+
+                // NEW (this adjustment): a PDF was submitted — show the PDF tile that opens the document preview modal
+                if (data.isPdf) {
+                    var pdfHost = (type === 'photo')
+                        ? ((document.getElementById('student-row-' + userId) || document).querySelector('.profile-card'))
+                        : document.getElementById('req-item-' + userId + '-' + type);
+                    var pdfPv = pdfHost ? pdfHost.querySelector('.cv-card-preview') : null;
+                    if (!pdfPv) return;
+                    var pdfOld = pdfPv.querySelector('img, .cv-pdf-tile, .cv-no-file');
+                    var tile = document.createElement('div');
+                    tile.className = 'cv-pdf-tile cv-preview-trigger';
+                    tile.setAttribute('data-uid', userId);
+                    tile.setAttribute('data-req-key', type);
+                    var lbl = (type === 'photo') ? 'Profile Photo (ID)' : String((pdfHost.querySelector('.cv-card-content > div') || {}).textContent || '').replace(/✓\s*VERIFIED/g, '').replace(/\bNEW\s+SUBMISSION\b/gi, '').replace(/\s+/g, ' ').trim();
+                    lbl = lbl || 'Document';
+                    tile.setAttribute('data-req-label', lbl);
+                    tile.title = 'Preview ' + lbl;
+                    tile.innerHTML = '<i class="fas fa-file-pdf"></i><span>PDF document</span>';
+                    if (pdfOld) pdfOld.replaceWith(tile); else pdfPv.insertBefore(tile, pdfPv.firstChild);
+                    return;
+                }
+
                 if (type === 'photo') {
                     var row = document.getElementById('student-row-' + userId);
                     if (!row) return;
@@ -5691,7 +6904,7 @@ if (!$courseOfferingsLoaded) {
                     } else {
                         var card = row.querySelector('.profile-card');
                         // UPDATED (this adjustment): the empty photo slot is now the card's "No file yet" tile
-                        var ph = card ? (card.querySelector('.cv-card-preview .cv-no-file') || card.querySelector('div[style*="background:#eee"]')) : null;
+                        var ph = card ? (card.querySelector('.cv-card-preview .cv-no-file, .cv-card-preview .cv-pdf-tile') || card.querySelector('div[style*="background:#eee"]')) : null;
                         if (ph) {
                             var newImg = document.createElement('img');
                             newImg.src = src;
@@ -5709,7 +6922,7 @@ if (!$courseOfferingsLoaded) {
                         imgEl2.src = src;
                     } else {
                         // UPDATED (this adjustment): the empty slot is now the card's "No file yet" tile
-                        var ph2 = itemEl.querySelector('.cv-card-preview .cv-no-file') || itemEl.querySelector('div[style*="background:#eee"]');
+                        var ph2 = itemEl.querySelector('.cv-card-preview .cv-no-file, .cv-card-preview .cv-pdf-tile') || itemEl.querySelector('div[style*="background:#eee"]');
                         if (ph2) {
                             var newImg2 = document.createElement('img');
                             newImg2.src = src;
@@ -6220,6 +7433,7 @@ if (!$courseOfferingsLoaded) {
 
     function openAppInbox() {
         document.getElementById('appRequestOverlay').style.display = 'flex';
+        cvLoadStudentUploads();   // NEW (this adjustment): new requirement submissions
         loadAppRequests();
         startAppDrawerLivePoll();
     }
@@ -6245,6 +7459,7 @@ if (!$courseOfferingsLoaded) {
     // withdrawn/cancelled requests can both be detected and reflected
     // live in the open drawer, instead of requiring a manual close/reopen.
     function pollAppDrawerLive() {
+        cvLoadStudentUploads();   // NEW (this adjustment): keep the submissions live too while the Inbox is open
         var fd = new FormData();
         fd.append('ajax_fetch_app_requests', '1');
         fetch(window.location.pathname, { method: 'POST', body: fd })
@@ -6799,12 +8014,20 @@ if (!$courseOfferingsLoaded) {
 
         var grid = document.getElementById('fv-docs-grid');
         grid.innerHTML = '<tr class="fv-doc-th"><td>Document</td><td style="width:110px; text-align:center;">Status</td></tr>';
+        var fvPreviewDocs = window._fvPreviewDocs = [];   // NEW (this adjustment): this application's PDFs, paged by the preview modal
         (app.req_docs || []).forEach(function (doc) {
             var statusClass = (doc.status === 'Verified') ? 'verified' : (doc.status === 'Denied') ? 'denied' : 'pending';
             var statusText  = (doc.status === 'Verified') ? '✓ Verified' : (doc.status === 'Denied') ? '✗ Denied' : 'Pending';
-            var thumbHtml = doc.file
-                ? '<span class="fv-doc-thumb" onclick="openPreview(\'data:image/jpeg;base64,' + doc.file + '\')"><img src="data:image/jpeg;base64,' + doc.file + '"></span>'
-                : '<span class="fv-doc-nothumb"><i class="fas fa-file" style="font-size:12px;color:#d1d5db;"></i></span>';
+            // UPDATED (this adjustment): a PDF gets a PDF icon that opens the document preview modal (an image keeps the thumbnail + enlarge)
+            var thumbHtml;
+            if (doc.file && /^JVBERi/.test(doc.file)) {   // base64 of "%PDF"
+                var pdfIdx = fvPreviewDocs.push({ b64: doc.file, isPdf: true, label: doc.label || 'Document' }) - 1;
+                thumbHtml = '<span class="fv-doc-thumb fv-doc-thumb-pdf" onclick="cvOpenDocPreview(window._fvPreviewDocs,' + pdfIdx + ')" title="Preview PDF"><i class="fas fa-file-pdf"></i></span>';
+            } else if (doc.file) {
+                thumbHtml = '<span class="fv-doc-thumb" onclick="openPreview(\'data:image/jpeg;base64,' + doc.file + '\')"><img src="data:image/jpeg;base64,' + doc.file + '"></span>';
+            } else {
+                thumbHtml = '<span class="fv-doc-nothumb"><i class="fas fa-file" style="font-size:12px;color:#d1d5db;"></i></span>';
+            }
 
             var row = document.createElement('tr');
             row.innerHTML =
@@ -7002,6 +8225,117 @@ if (!$courseOfferingsLoaded) {
         }
     }
 
+
+    /* ══════════════════════════════════════════════════════════════════
+       NEW (this adjustment): INBOX — NEW REQUIREMENT SUBMISSIONS
+       The drawer shows new student submissions (above the application
+       requests) as cards like company_validation.php's "Requirement
+       Uploaded" notifications. "View Requirements" marks it viewed (it leaves
+       the Inbox and the indicator), closes the drawer and opens that student's
+       row — on the right page, clearing a search / course filter that would
+       hide it — with the "New upload" tag on each submitted card.
+       ══════════════════════════════════════════════════════════════════ */
+    var _sruRows = [];
+    function cvSruEsc(v) { return escHtml(v == null ? '' : String(v)); }
+    function cvSruCard(r) {
+        var items = (r.items || []).map(function (i) { return cvSruEsc(i.label || i.key || ''); }).join(', ');
+        return '<div class="moa-card moa-notif-card" id="sruCard_' + r.id + '">' +
+                 '<div class="moa-card-top"><div class="moa-card-info"><div class="moa-card-company">' + cvSruEsc(r.full_name || 'Student') + '</div></div>' +
+                   '<div class="moa-notif-type-badge notif-uploaded"><i class="fas fa-file-arrow-up"></i> Requirement Uploaded</div></div>' +
+                 '<div class="moa-card-detail-row"><div class="moa-card-info">' +
+                   '<div class="moa-card-meta"><span><i class="fas fa-envelope" style="font-size:10px;"></i> ' + cvSruEsc(r.email || '—') + '</span>' +
+                     '<span><i class="fas fa-clock" style="font-size:10px;"></i> ' + cvSruEsc(r.when || '—') + '</span></div>' +
+                   '<div class="moa-card-address moa-notif-upload-detail"><i class="fas fa-file-arrow-up" style="font-size:10px;"></i> ' + items + '</div>' +
+                 '</div><div class="moa-card-actions">' +
+                   '<button type="button" class="moa-action-btn accept-btn" id="sruViewBtn_' + r.id + '" onclick="cvViewStudentUpload(' + r.id + ', ' + r.user_id + ')">' +
+                     '<i class="fas fa-file-arrow-up"></i> View Requirements</button>' +
+                 '</div></div></div>';
+    }
+    function cvRenderStudentUploads(rows) {
+        _sruRows = Array.isArray(rows) ? rows : [];
+        var box = document.getElementById('studentUploadInbox'), title = document.getElementById('appRequestSectionTitle');
+        if (!box) return;
+        if (!_sruRows.length) { box.style.display = 'none'; box.innerHTML = ''; if (title) title.style.display = 'none'; return; }
+        box.innerHTML = '<div class="sru-section-title"><i class="fas fa-file-arrow-up"></i> New Requirement Submissions <span class="sru-count">' + _sruRows.length + '</span></div>' +
+                        _sruRows.map(cvSruCard).join('');
+        box.style.display = '';
+        if (title) title.style.display = '';
+    }
+    window.cvRenderStudentUploads = cvRenderStudentUploads;
+    function cvLoadStudentUploads() {
+        fetch(window.location.pathname + '?student_upload_list=1', { credentials: 'same-origin', cache: 'no-store' })
+            .then(function (r) { return r.json(); })
+            .then(function (d) { if (!d || !d.success) return; updateAppBadge(d.count || 0); cvRenderStudentUploads(d.rows || []); })
+            .catch(function () {});
+    }
+    function cvFocusStudentSubmission(uid, keys) {
+        var row = document.getElementById('student-row-' + uid);
+        if (!row) {
+            // NEW (this adjustment): the student may have been verified earlier and is back for a new Application SIT
+            // (placement replaced) — fetch their row first; only when it still is not there is the student gone.
+            if (typeof svEnsureStudentRow === 'function') {
+                svEnsureStudentRow(uid).then(function (r) {
+                    if (r) cvFocusStudentSubmission(uid, keys);
+                    else showGuardModal('', 'Student Not Found', 'This student is no longer in the list — they may have been archived or deleted.');
+                });
+                return;
+            }
+            showGuardModal('', 'Student Not Found', 'This student is no longer in the list — they may have been archived or deleted.');
+            return;
+        }
+        var group = row.dataset.group === 'verified' ? 'verified' : 'pending';
+        var list = group === 'verified' ? _filteredVerified : _filteredPending;
+        if (list.indexOf(row) === -1) {   // hidden by the search / course filter → clear them
+            var si = document.getElementById('searchInput'), cf = document.getElementById('courseFilter');
+            if (si) si.value = '';
+            if (cf) cf.value = 'All';
+            filterAll();
+            list = group === 'verified' ? _filteredVerified : _filteredPending;
+        }
+        var idx = list.indexOf(row);
+        if (idx >= 0) {
+            var page = Math.floor(idx / ROWS_PER_PAGE) + 1;
+            if (group === 'verified') currentPageVerified = page; else currentPagePending = page;
+            renderPage(group);
+        }
+        var toggle = row.querySelector('.toggle-input');
+        if (toggle) toggle.checked = true;
+        setTimeout(function () {
+            try { row.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch (e) { row.scrollIntoView(); }
+            (keys || []).forEach(function (k) {
+                var card = (k === '__photo') ? row.querySelector('.profile-card') : document.getElementById('req-item-' + uid + '-' + k);
+                if (!card) return;
+                svFlagNewUpload(card);
+                card.classList.remove('just-updated'); void card.offsetWidth; card.classList.add('just-updated');
+                setTimeout(function () { card.classList.remove('just-updated'); }, 1400);
+            });
+        }, 80);
+    }
+    function cvViewStudentUpload(id, uid) {
+        var btn = document.getElementById('sruViewBtn_' + id);
+        if (btn) btn.disabled = true;
+        var fd = new FormData();
+        fd.append('ajax_student_upload_viewed', '1'); fd.append('id', id); fd.append('user_id', uid);
+        fetch(window.location.pathname, { method: 'POST', body: fd, credentials: 'same-origin' })
+            .then(function (r) { return r.json(); })
+            .then(function (d) {
+                if (!d || !d.success) {
+                    if (btn) btn.disabled = false;
+                    showGuardModal('', 'Could Not Open', (d && d.message) || 'The submission could not be opened. Please try again.');
+                    return;
+                }
+                updateAppBadge(d.count || 0);
+                cvRenderStudentUploads(_sruRows.filter(function (x) { return x.id !== id; }));
+                var ov = document.getElementById('appRequestOverlay');
+                if (ov && ov.style.display === 'flex') closeAppInbox();
+                cvFocusStudentSubmission(d.user_id || uid, d.keys || []);
+            })
+            .catch(function () {
+                if (btn) btn.disabled = false;
+                showGuardModal('', 'Could Not Open', 'Something went wrong while opening the submission. Please check your connection and try again.');
+            });
+    }
+    window.cvViewStudentUpload = cvViewStudentUpload;
     function escHtml(str) {
         if (!str) return '';
         return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
@@ -8822,15 +10156,196 @@ window.addEventListener('pageshow', function (e) {
         for (var k = 0; k < ICONS.length; k++) { if (cls.indexOf(ICONS[k][0]) !== -1) return ICONS[k][1]; }
         return '';
     }
+    /* ─────────────────────────────────────────────────────────────────────
+       UPDATED (this adjustment): tooltips now say, in a few simple words,
+       WHAT the button does — instead of repeating the button's own name.
+       Order: a description written for that exact button → the button's own
+       title / label when it says more than its name → the description for
+       that kind of button (this page first, then the general list) → the
+       old behaviour as a last resort. Counters are understood, e.g.
+       "Delete (2)" / "Export (Excluding 3)".
+       ───────────────────────────────────────────────────────────────────── */
+    var CV_TIP_GENERAL = {
+        'cancel': 'Close this without saving',
+        'close': 'Close this window',
+        'dismiss': 'Hide this message',
+        'ok': 'Close this message',
+        'ok, got it': 'Close this message',
+        'done': 'Close this summary',
+        'save': 'Save your changes',
+        'save changes': 'Save your changes',
+        'save all': 'Save every course you edited',
+        'yes, delete': 'Delete for good — this cannot be undone',
+        'delete': 'Remove this item',
+        'remove': 'Remove this item',
+        'confirm': 'Yes, go ahead',
+        'continue': 'Go on to the next step',
+        'back': 'Go back to the previous step',
+        'next': 'Go to the next page',
+        'prev': 'Go to the previous page',
+        'previous': 'Go to the previous page',
+        'next page': 'Go to the next page',
+        'previous page': 'Go to the previous page',
+        'next month': 'Show the next month',
+        'previous month': 'Show the previous month',
+        'export excel': 'Download this list as an Excel file',
+        'export to excel': 'Download this list as an Excel file',
+        'export filtered': 'Download only the rows that match your filters',
+        'export': 'Download this list as a file',
+        'export (excluding n)': 'Download the list without the entries you ticked',
+        'none, proceed with export': 'Export everyone in the list',
+        'archive batch': 'Move a finished batch to the archive',
+        'unarchive batch': 'Bring an archived batch back',
+        'unarchive': 'Bring this batch back to the active list',
+        'yes, unarchive': 'Bring the batch back to the active list',
+        'view archived batches': 'See the batches you archived',
+        'view archived company batches': 'See the company batches you archived',
+        'undo': 'Reverse your last action',
+        'refresh': 'Load the latest list',
+        'print': 'Print this page',
+        'save as pdf': 'Download this as a PDF file',
+        'select all': 'Tick every item in this list',
+        'clear': 'Untick every item in this list',
+        'import selected': 'Import only the groups you ticked',
+        'cancel import': 'Stop — nothing from the file is added',
+        'skip these students': 'Import the rest and leave these students out',
+        'no, skip these students': 'Import the rest and leave these students out',
+        'no, skip this student': 'Leave this student out',
+        'skip this student': 'Leave this student out',
+        'yes, add course': 'Add this course to Course Offering first',
+        'add course offering': 'Save this course to Course Offering',
+        'edit': 'Choose one entry, then change it',
+        'edit selected': 'Open the entry you picked for editing',
+        'edit (n)': 'Edit the entries you picked',
+        'delete (n)': 'Delete the entries you picked',
+        'view': 'Open the full details',
+        'full view': 'Open the full application',
+        'details': 'Show the full details',
+        'company details': "Show the company's details",
+        'view requirements': "See this company's requirements",
+        'view pdf': 'Open the document',
+        'view pdf (locked)': 'Open the flagged document (read only)',
+        'send': 'Send your message',
+        'open chat': 'Chat with this company',
+        'preview letter': 'See the letter before sending it',
+        'apply & send endorsement letter': 'Assign the students and email the letter',
+        'approve moa': "Approve this company's MOA",
+        'reject': 'Reject it and say what to fix',
+        'accept': 'Accept this request',
+        'send & request revision': 'Ask the company to fix the flagged items',
+        'set signing schedule': 'Pick the MOA signing date and time',
+        're-schedule': 'Change the MOA signing date',
+        'accept proposed schedule': "Agree to the company's proposed date",
+        'review moa': 'Check the MOA the company sent',
+        'moa workflow': "Track each company's MOA progress",
+        'notification inbox': 'See new company notifications',
+        'requirements': "See the companies' requirements",
+        'requirements /': "See the companies' requirements",
+        'allow': "Approve this student's application",
+        'allow application': "Approve this student's application",
+        'deny': "Decline this student's application",
+        'deny application': "Decline this student's application",
+        'approve & send letter': 'Approve and email the endorsement letter',
+        'application requests': 'See new student application requests',
+        'update id': "Save the student's new ID number",
+        'add student': 'Add a student',
+        'remove student': 'Take this student off the list',
+        'confirm & create admin': 'Create the new admin account',
+        'verify credentials': 'Check the details before creating the account',
+        'verify otp': 'Confirm the code sent by email',
+        'clear history': 'Remove all finished recovery requests',
+        'clear log': 'Remove every activity log entry',
+        'confirm accept': 'Approve this email change',
+        'confirm reject': 'Decline this email change',
+        'accept request': 'Approve this email change request',
+        'reject request': 'Decline this email change request',
+        'history': 'Show requests already handled',
+        'pending': 'Show requests waiting for you',
+        'quick actions': 'Open shortcuts for common tasks',
+        'attendance': 'Show the attendance records',
+        'reports': 'Show the weekly reports',
+        'comment': 'Leave feedback on this report',
+        'edit comment': 'Change your feedback',
+        'save comment': 'Save your feedback',
+        'upload': 'Let the student see this grade',
+        'unupload': 'Hide this grade from the student',
+        'upload selected': 'Show the ticked grades to students',
+        'unupload selected': 'Hide the ticked grades from students',
+        'backup now': 'Make a copy of the database now',
+        'add company manually': 'Open the form to add one company',
+        'add company': 'Save this new company',
+        'import companies': 'Add many companies from an Excel file',
+        'import students': 'Add many students from an Excel file',
+        'log out': 'Sign out of your account',
+        'logout': 'Sign out of your account',
+        'notifications': 'See new notifications',
+        'search': 'Search the list',
+        'filter': 'Narrow down the list',
+        'menu': 'Open the menu'
+    };
+    var CV_TIP_PAGE = {
+        'admin_student_list.php': {
+            'delete': 'Choose students to remove', 'yes': 'Choose students to leave out of the export', 'done': 'Close this summary'
+        },
+        'admin_company_list.php': {
+            'delete': 'Choose companies to remove', 'yes': 'Choose companies to leave out of the export', 'done': 'Close this summary'
+        },
+        'course_offering.php': {
+            'delete': 'Choose courses to remove', 'next course': 'Go to the next course', 'previous course': 'Go to the previous course'
+        },
+        'company_validation.php': { 'done': 'Mark this MOA as completed', 'back': 'Go back to the list' },
+        'admin_final_grades.php': { 'export': 'Download the grades as a file' },
+        'system_setting.php': { 'delete': 'Delete this backup', 'refresh': 'Load the latest backup list' },
+        'monitoring.php': { 'delete': 'Delete this account for good' }
+    };
+    var CV_TIP_EXACT = [   // [CSS selector, description] — for buttons whose words mean different things on the same page
+        ['#toggleBtn', null],
+        ['#addStudentBtn', 'Open the form to add one student'],
+        ['#addStudentForm button[type="submit"]', 'Save this new student'],
+        ['#addCourseOfferingBtn', 'Open the form to add a course'],
+        ['#importAddCourseSubmitBtn', 'Save this course, then continue'],
+        ['#courseOfferingSubmitBtn', 'Save this course'],
+        ['#addCompanyBtn', 'Open the form to add one company'],
+        ['#alogClearBtn', 'Remove every activity log entry'],
+        ['#studentImportFilterCloseBtn', 'Stop — nothing from the file is added'],
+        ['#importClassificationCloseBtn', 'Stop — nothing from the file is added'],
+        ['#exportChoiceCloseBtn', 'Cancel the export'],
+        ['#globalResultOkBtn', 'Close this message']
+    ];
+    var CV_TIP_PAGE_NAME = (window.location.pathname.split('/').pop() || '').toLowerCase();
+    function cvTipKey(t) {
+        return String(t || '').replace(/\s+/g, ' ').trim().toLowerCase()
+            .replace(/^[\u2190\u2192\u2039\u203a\u00ab\u00bb\u00d7\u2715<>\s]+|[\u2190\u2192\u2039\u203a\u00ab\u00bb\u00d7\u2715<>\s]+$/g, '')
+            .replace(/\d+/g, 'n');
+    }
+    function cvTipDescribe(key) {
+        var page = CV_TIP_PAGE[CV_TIP_PAGE_NAME] || {};
+        // try the name as it is, then without a trailing counter ("Pending 3", "Requirements 2 / 5")
+        var keys = [key, String(key).replace(/(\s+n(\s*\/\s*n)?)+$/, '').replace(/\s*\/\s*$/, '').trim()];
+        for (var k = 0; k < keys.length; k++) {
+            if (Object.prototype.hasOwnProperty.call(page, keys[k])) return page[keys[k]];
+            if (Object.prototype.hasOwnProperty.call(CV_TIP_GENERAL, keys[k])) return CV_TIP_GENERAL[keys[k]];
+        }
+        return '';
+    }
     function labelOf(b) {
         if (b.id === 'toggleBtn') {
             var sb = document.getElementById('sidebar');
-            return sb && sb.classList.contains('collapsed') ? 'Expand menu' : 'Collapse menu';
+            return sb && sb.classList.contains('collapsed') ? 'Show the full menu' : 'Make the menu smaller';
         }
-        var t = b.getAttribute('data-cv-tip') || b.getAttribute('aria-label') || b.getAttribute('data-cv-title') || b.getAttribute('title') || '';
-        if (!t) t = b.tagName === 'INPUT' ? (b.value || '') : (b.textContent || '');
-        t = t.replace(/\s+/g, ' ').trim();
-        if (/^[\u00D7\u2715xX]$/.test(t)) t = 'Close';
+        for (var i = 0; i < CV_TIP_EXACT.length; i++) {
+            try { if (CV_TIP_EXACT[i][1] && b.matches(CV_TIP_EXACT[i][0])) return CV_TIP_EXACT[i][1]; } catch (x) {}
+        }
+        var visible = (b.tagName === 'INPUT' ? (b.value || '') : (b.textContent || '')).replace(/\s+/g, ' ').trim();
+        if (/^[\u00D7\u2715xX]$/.test(visible)) visible = 'Close';
+        var own = (b.getAttribute('data-cv-tip') || b.getAttribute('aria-label') || b.getAttribute('data-cv-title') || b.getAttribute('title') || '').replace(/\s+/g, ' ').trim();
+        // the button's own title / label, when it says more than the button's name (more than one word)
+        if (own && own.indexOf(' ') !== -1 && cvTipKey(own) !== cvTipKey(visible) && own.length <= 160 && !cvTipDescribe(cvTipKey(own))) return own;
+        var d = cvTipDescribe(cvTipKey(visible)) || cvTipDescribe(cvTipKey(own));
+        if (!d && (!visible || /^[^A-Za-z0-9]+$/.test(visible))) d = cvTipDescribe(cvTipKey(iconName(b)));
+        if (d) return d;
+        // last resort — the old behaviour
+        var t = own || visible;
         if (!t || /^[^A-Za-z0-9]+$/.test(t)) t = iconName(b);
         return t.length > 60 ? '' : t;     // long text (e.g. whole cards acting as buttons) gets no tooltip
     }
@@ -9000,8 +10515,16 @@ window.addEventListener('pageshow', function (e) {
         });
     }
 
+    // NEW (this adjustment): new requirement submission → administrator.php opens that student's requirements
+    function openStudentUpload(id, uid) {
+        var view = g('cvViewStudentUpload');
+        if (typeof view === 'function') { view(parseInt(id, 10), parseInt(uid, 10)); return; }
+        goTo('administrator.php?open_student_upload=' + encodeURIComponent(id) + '&uid=' + encodeURIComponent(uid));
+    }
+
     function go(spec) {
         var p = String(spec || '').split(':');
+        if (p[0] === 'studentupload') { openStudentUpload(p[1], p[2]); return; }
         if (p[0] === 'notif') openNotif(p[1], p[2], p[3]);
         else if (p[0] === 'app') openApp(p[1]);
         else if (p[0] === 'recovery') openRecovery(p[1]);
@@ -9028,8 +10551,9 @@ window.addEventListener('pageshow', function (e) {
     if (params.get('open_notif')) spec = 'notif:' + params.get('open_notif') + ':' + (params.get('uid') || 0) + ':' + (params.get('type') || 'new_request');
     else if (params.get('open_app_request')) spec = 'app:' + params.get('open_app_request');
     else if (params.get('open_recovery')) spec = 'recovery:' + params.get('open_recovery');
+    else if (params.get('open_student_upload')) spec = 'studentupload:' + params.get('open_student_upload') + ':' + (params.get('uid') || 0);   // NEW (this adjustment)
     if (spec) {
-        ['open_notif', 'uid', 'type', 'open_app_request', 'open_recovery'].forEach(function (k) { params.delete(k); });
+        ['open_notif', 'uid', 'type', 'open_app_request', 'open_recovery', 'open_student_upload'].forEach(function (k) { params.delete(k); });
         if (window.history.replaceState) {
             var q = params.toString();
             window.history.replaceState({}, document.title, window.location.pathname + (q ? '?' + q : '') + window.location.hash);
@@ -9037,6 +10561,88 @@ window.addEventListener('pageshow', function (e) {
         var start = function () { setTimeout(function () { go(spec); }, 600); };
         if (document.readyState === 'complete') start(); else window.addEventListener('load', start);
     }
+})();
+</script>
+<!-- ══════════════════════════════════════════════════════════════════════
+     NEW (this adjustment) — NEW REQUIREMENT SUBMISSION POPUP + INDICATOR
+     Same design and behaviour as the other popups on this page (and as
+     company_validation.php's "uploaded new requirement document(s)" popup):
+     checked right away and then every 4 s; submissions that were already
+     waiting when the page opened do not pop up; each one pops up once (a
+     further file merged into it pops up again, listing everything); clicking
+     it opens that student's requirements. The Student Validation indicator is
+     kept in step with the Inbox total (application requests + submissions).
+     ══════════════════════════════════════════════════════════════════════ -->
+<script>
+(function () {
+    'use strict';
+    if (window._cvStudentUploadPopupReady) return;
+    window._cvStudentUploadPopupReady = true;
+    var SRU_ENDPOINT    = 'administrator.php?student_upload_list=1';
+    var SRU_POLL_MS     = 4000;
+    var SRU_TOAST_MS    = 7000;
+    var SRU_STORE_KEY   = 'cvStudentUploadKnown';
+    var SRU_STORE_FRESH = 45000;
+    var known = null, inFlight = false;
+    function esc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
+    function sigOf(r) { return String(r.id) + '@' + String(r.sig || ''); }
+    function readStore() {
+        try {
+            var o = JSON.parse(sessionStorage.getItem(SRU_STORE_KEY) || 'null');
+            if (!o || !Array.isArray(o.ids) || (Date.now() - (o.ts || 0)) > SRU_STORE_FRESH) return null;
+            return new Set(o.ids.map(String));
+        } catch (e) { return null; }
+    }
+    function writeStore() { if (!known) return; try { sessionStorage.setItem(SRU_STORE_KEY, JSON.stringify({ ids: Array.from(known), ts: Date.now() })); } catch (e) {} }
+    function layoutToasts() {
+        if (typeof window.cvLayoutTopToasts === 'function') { window.cvLayoutTopToasts(); return; }
+        var top = 30, undo = document.getElementById('undoToast');
+        if (undo && undo.classList.contains('show')) top = Math.max(top, undo.getBoundingClientRect().bottom + 12);
+        document.querySelectorAll('.cv-top-toast').forEach(function (el) { el.style.top = top + 'px'; top += el.offsetHeight + 12; });
+    }
+    function showPopup(r) {
+        var labels = (r.items || []).map(function (i) { return i.label || i.key || ''; }).filter(Boolean);
+        var what = labels.length === 1 ? 'a new requirement: ' + labels[0] : (labels.length + ' new requirements: ' + labels.join(', '));
+        var div = document.createElement('div');
+        div.className = 'cv-top-toast';
+        div.setAttribute('role', 'status');
+        div.innerHTML = '<i class="fas fa-file-arrow-up"></i><span><strong>' + esc(r.full_name || 'A student') + '</strong> submitted ' + esc(what) + ' \u2014 check the Application Requests inbox.</span>';
+        document.body.appendChild(div);
+        if (window.cvTagToast) window.cvTagToast(div, 'studentupload:' + r.id + ':' + r.user_id);   // clickable
+        layoutToasts();
+        requestAnimationFrame(function () { div.classList.add('show'); });
+        setTimeout(function () { div.classList.remove('show'); setTimeout(function () { div.remove(); layoutToasts(); }, 400); }, SRU_TOAST_MS);
+    }
+    function setBadge(count) {
+        var badge = document.getElementById('sidebarAppBadge');
+        if (!badge) return;
+        count = parseInt(count, 10) || 0;
+        badge.textContent = count;
+        badge.style.display = count > 0 ? 'inline-flex' : 'none';
+    }
+    function poll() {
+        if (inFlight || document.hidden) return;
+        inFlight = true;
+        fetch(SRU_ENDPOINT, { credentials: 'same-origin', cache: 'no-store' })
+            .then(function (r) { return r.json(); })
+            .then(function (d) {
+                inFlight = false;
+                if (!d || !d.success || !Array.isArray(d.rows)) return;
+                var now = new Set(d.rows.map(sigOf));
+                setBadge(d.count);
+                if (typeof window.cvRenderStudentUploads === 'function') window.cvRenderStudentUploads(d.rows);   // administrator.php's Inbox, if open
+                if (known === null) { known = readStore() || now; if (known === now) { writeStore(); return; } }
+                var fresh = d.rows.filter(function (r) { return !known.has(sigOf(r)); });
+                known = now; writeStore();
+                fresh.forEach(showPopup);
+            })
+            .catch(function () { inFlight = false; });
+    }
+    setTimeout(function () { poll(); setInterval(poll, SRU_POLL_MS); }, 0);
+    document.addEventListener('visibilitychange', function () { if (!document.hidden && known !== null) poll(); });
+    window.addEventListener('focus', function () { if (known !== null) poll(); });
+    window.addEventListener('pageshow', function (e) { if (e.persisted) poll(); });
+    window.addEventListener('pagehide', writeStore);
 })();
 </script>
 </body>
