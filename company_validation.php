@@ -5136,7 +5136,7 @@ if (isset($_POST['ajax_undo'])) {
     $token=trim($_POST['undo_token']??'');
     if(empty($token)||empty($_SESSION['undo_stack'][$token])){echo json_encode(['success'=>false,'message'=>'Undo token expired or invalid.']);exit;}
     $snap=$_SESSION['undo_stack'][$token];
-    if((time()-$snap['ts'])>=300){unset($_SESSION['undo_stack'][$token]);echo json_encode(['success'=>false,'message'=>'Undo window has expired (5 minutes).']);exit;}
+    if((time()-$snap['ts'])>=310){unset($_SESSION['undo_stack'][$token]);   /* 10 s latency grace: the browser's countdown starts when the response arrives, just after 'ts' is stamped */ echo json_encode(['success'=>false,'message'=>'Undo window has expired (5 minutes).']);exit;}
     $user_id=$snap['user_id'];$type=$snap['requirement_type'];$prevStatus=$snap['prev_status'];$prevRemark=$snap['prev_remark'];$newStatus=$snap['new_status']??'';$isDenied=in_array($newStatus,['Denied','Rejected'],true);
     if(!$isDenied){
         // ── UPDATED (this adjustment): every entry of a multi-file requirement is put back to its OWN
@@ -5199,7 +5199,7 @@ if (isset($_POST['ajax_moa_undo'])) {
     $mToken = trim($_POST['undo_token'] ?? '');
     $mSnap  = ($mToken !== '') ? ($_SESSION['moa_undo_stack'][$mToken] ?? null) : null;
     if (!is_array($mSnap)) { echo json_encode(['success'=>false,'message'=>'Undo token expired or invalid.']); exit; }
-    if ((time() - (int)($mSnap['ts'] ?? 0)) >= 300) {
+    if ((time() - (int)($mSnap['ts'] ?? 0)) >= 310) {   // 10 s latency grace (the browser's countdown starts when the response arrives)
         cvMoaUndoSendPending($conn, $mToken); cvMoaUndoDrop($mToken);
         echo json_encode(['success'=>false,'message'=>'Undo window has expired (5 minutes).']); exit;
     }
@@ -8997,22 +8997,39 @@ function updateRowSummaryMoaProgress(uid, stage, needsRevision){
 }
 
 // ── Undo Toast
-const UNDO_DURATION=300;let undoToken=null,undoCountdown=0,undoTimer=null,_undoUid=null,_undoReq=null,_undoIsDenied=false;
+const UNDO_DURATION=300;/* FIX (countdown drifting in a background tab): browsers throttle/freeze setInterval in hidden tabs, so counting down by
+   subtracting 1 per tick made the toast slow down or stop while the admin was on another site, then still show time left after
+   the real 5 minutes (Undo then answered "expired"). The time left is now measured against a wall-clock deadline, re-read on
+   every tick and whenever the tab becomes visible again. */
+let undoDeadline=0;
+let undoToken=null,undoCountdown=0,undoTimer=null,_undoUid=null,_undoReq=null,_undoIsDenied=false;
 const ring=document.getElementById('undoRingProgress'),ringCircumference=88;
 function startUndoToast(token,label,uid,req,newStatus,newRemark,isDenied){
     if(undoToken&&undoToken!==token)_finalizeCurrentUndo();
-    undoToken=token;undoCountdown=UNDO_DURATION;_undoUid=uid;_undoReq=req;_undoIsDenied=!!isDenied;
+    undoToken=token;undoCountdown=UNDO_DURATION;undoDeadline=Date.now()+UNDO_DURATION*1000;_undoUid=uid;_undoReq=req;_undoIsDenied=!!isDenied;
     document.getElementById('undoToastLabel').textContent=label;
     document.getElementById('undoBtnMain').disabled=false;document.getElementById('undoBtnMain').textContent='Undo';
     const ringEl=document.getElementById('undoRingProgress'),numEl=document.getElementById('undoCountNum'),toast=document.getElementById('undoToast');
     if(isDenied){ringEl.style.stroke='#ef4444';numEl.style.color='#ef4444';toast.style.borderColor='#ef4444';}else{ringEl.style.stroke='var(--neust-gold)';numEl.style.color='var(--neust-gold)';toast.style.borderColor='';}
     toast.classList.add('show');clearInterval(undoTimer);updateRing();
-    undoTimer=setInterval(()=>{undoCountdown--;updateRing();if(undoCountdown<=0)dismissUndo();},1000);
+    undoTimer=setInterval(undoTick,250);
 }
+// Recompute the time left from the deadline (never by counting ticks); close + commit when it has run out.
+function undoTick(){
+    if(!undoToken)return;
+    let left=Math.max(0,Math.ceil((undoDeadline-Date.now())/1000));
+    if(left>UNDO_DURATION)left=UNDO_DURATION;   // clock moved backwards — never show more than the window
+    if(left!==undoCountdown){undoCountdown=left;updateRing();}
+    if(left<=0)dismissUndo();
+}
+// Returning to the page (tab switch, window focus, back/forward cache) re-syncs at once instead of waiting for a throttled timer.
+document.addEventListener('visibilitychange',()=>{if(!document.hidden)undoTick();});
+window.addEventListener('focus',undoTick);
+window.addEventListener('pageshow',undoTick);
 function updateRing(){ring.style.strokeDashoffset=ringCircumference*(1-undoCountdown/UNDO_DURATION);const m=Math.floor(undoCountdown/60),s=undoCountdown%60;document.getElementById('undoCountNum').textContent=m+':'+String(s).padStart(2,'0');}
 function dismissUndo(){clearInterval(undoTimer);const toast=document.getElementById('undoToast');toast.classList.remove('show');toast.style.borderColor='';document.getElementById('undoRingProgress').style.stroke='var(--neust-gold)';document.getElementById('undoCountNum').style.color='var(--neust-gold)';if(undoToken)_finalizeCurrentUndo();}
 function _finalizeCurrentUndo(){const token=undoToken,isDenied=_undoIsDenied,kind=_undoKind;undoToken=null;_undoUid=null;_undoReq=null;_undoIsDenied=false;cvUndoResetMoaLook();if(!token)return;const fd=new FormData();if(kind==='moa')fd.append('ajax_moa_commit','1');else if(isDenied)fd.append('ajax_commit_denied','1');else fd.append('ajax_confirm_send','1');fd.append('undo_token',token);fetch(SELF,{method:'POST',body:fd}).catch(()=>{});}
-function triggerUndo(){if(!undoToken)return;const btn=document.getElementById('undoBtnMain');btn.disabled=true;btn.textContent='…';const token=undoToken,kind=_undoKind,moaUid=_undoMoaUid;const fd=new FormData();fd.append(kind==='moa'?'ajax_moa_undo':'ajax_undo','1');fd.append('undo_token',token);fetch(SELF,{method:'POST',body:fd}).then(r=>r.json()).then(data=>{clearInterval(undoTimer);const toast=document.getElementById('undoToast');toast.classList.remove('show');toast.style.borderColor='';document.getElementById('undoRingProgress').style.stroke='var(--neust-gold)';document.getElementById('undoCountNum').style.color='var(--neust-gold)';undoToken=null;_undoUid=null;_undoReq=null;_undoIsDenied=false;cvUndoResetMoaLook();if(data.success){if(kind==='moa')cvAfterMoaUndo(data,moaUid);else{updateReqItemUI(data.user_id,data.requirement_type,data.new_status,data.new_remark);updateOverallStatusUI(data.user_id,data.overall_status);}}else showGuardModal('','Undo Failed',data.message||'Could not undo.');}).catch(()=>{btn.disabled=false;btn.textContent='Undo';showGuardModal('','Network Error','Could not connect.');});}
+function triggerUndo(){undoTick();if(!undoToken)return;const btn=document.getElementById('undoBtnMain');btn.disabled=true;btn.textContent='…';const token=undoToken,kind=_undoKind,moaUid=_undoMoaUid;const fd=new FormData();fd.append(kind==='moa'?'ajax_moa_undo':'ajax_undo','1');fd.append('undo_token',token);fetch(SELF,{method:'POST',body:fd}).then(r=>r.json()).then(data=>{clearInterval(undoTimer);const toast=document.getElementById('undoToast');toast.classList.remove('show');toast.style.borderColor='';document.getElementById('undoRingProgress').style.stroke='var(--neust-gold)';document.getElementById('undoCountNum').style.color='var(--neust-gold)';undoToken=null;_undoUid=null;_undoReq=null;_undoIsDenied=false;cvUndoResetMoaLook();if(data.success){if(kind==='moa')cvAfterMoaUndo(data,moaUid);else{updateReqItemUI(data.user_id,data.requirement_type,data.new_status,data.new_remark);updateOverallStatusUI(data.user_id,data.overall_status);}}else showGuardModal('','Undo Failed',data.message||'Could not undo.');}).catch(()=>{btn.disabled=false;btn.textContent='Undo';showGuardModal('','Network Error','Could not connect.');});}
 
 // ── NEW (this adjustment): the SAME undo toast, now for MOA processes too. Approve MOA, Set / Re-Schedule, Accept Proposed
 // Schedule, Done and Send & Request Revision each start it (startMoaUndoToast) with the token the server returned; it
