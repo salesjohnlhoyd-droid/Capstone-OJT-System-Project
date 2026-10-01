@@ -732,7 +732,8 @@ if (isset($_POST['ajax_undo'])) {
         exit;
     }
     $snap = $_SESSION['undo_stack'][$token];
-    if ((time() - $snap['ts']) >= 300) {
+    // 10 s grace: the browser's countdown starts when the response arrives, a moment after 'ts' was stamped here
+    if ((time() - $snap['ts']) >= 310) {
         unset($_SESSION['undo_stack'][$token]);
         echo json_encode(['success'=>false,'message'=>'Undo window has expired (5 minutes).']);
         exit;
@@ -4986,6 +4987,12 @@ if (!$courseOfferingsLoaded) {
     let undoToken      = null;
     let undoCountdown  = 0;
     let undoTimer      = null;
+    /* FIX (countdown drifting while the tab is in the background): the toast used to count by subtracting 1 on
+       every setInterval tick. Browsers throttle (or freeze) timers in hidden tabs, so the countdown slowed or
+       stopped while the admin was on another site, then still showed time left after the real 5 minutes had
+       passed — and Undo answered "expired". The countdown is now measured against a fixed wall-clock deadline
+       and re-read on every tick and whenever the tab becomes visible again, so it is always accurate. */
+    let undoDeadline   = 0;   // Date.now() value at which the undo window closes
     let undoIsDenied   = false;
     const ring         = document.getElementById('undoRingProgress');
     const ringCircumference = 88;
@@ -5004,6 +5011,7 @@ if (!$courseOfferingsLoaded) {
         undoContext   = context || null;
         undoIsDenied  = !!isDenied;
         undoCountdown = UNDO_DURATION;
+        undoDeadline  = Date.now() + UNDO_DURATION * 1000;
 
         document.getElementById('undoToastLabel').textContent = label;
         document.getElementById('undoBtnMain').disabled = false;
@@ -5030,12 +5038,22 @@ if (!$courseOfferingsLoaded) {
         toast.classList.add('show');
         clearInterval(undoTimer);
         updateRing();
-        undoTimer = setInterval(function () {
-            undoCountdown--;
-            updateRing();
-            if (undoCountdown <= 0) { dismissUndo(true); }
-        }, 1000);
+        undoTimer = setInterval(undoTick, 250);
     }
+
+    // Recompute the time left from the deadline (never by counting ticks); close + commit when it has run out.
+    function undoTick() {
+        if (!undoToken) return;
+        var left = Math.max(0, Math.ceil((undoDeadline - Date.now()) / 1000));
+        if (left > UNDO_DURATION) left = UNDO_DURATION;   // clock moved backwards — never show more than the window
+        if (left !== undoCountdown) { undoCountdown = left; updateRing(); }
+        if (left <= 0) { dismissUndo(true); }
+    }
+    // Returning to the page (tab switch, window focus, back/forward cache) re-syncs immediately instead of
+    // waiting for a throttled timer.
+    document.addEventListener('visibilitychange', function () { if (!document.hidden) undoTick(); });
+    window.addEventListener('focus', undoTick);
+    window.addEventListener('pageshow', undoTick);
 
     function updateRing() {
         var fraction = undoCountdown / UNDO_DURATION;
@@ -5079,6 +5097,7 @@ if (!$courseOfferingsLoaded) {
     }
 
     function triggerUndo() {
+        undoTick();   // window may have closed while the tab was in the background
         if (!undoToken) return;
         var btn = document.getElementById('undoBtnMain');
         btn.disabled = true;
