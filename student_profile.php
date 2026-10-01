@@ -848,6 +848,83 @@ if ($student['deploy_status'] === "Deployed") {
         .cv-go-highlight { outline: 2px solid #F7C600 !important; outline-offset: 2px; animation: cvGoFlash 2.6s ease; }
         @keyframes cvGoFlash { 0%, 55% { box-shadow: 0 0 0 5px rgba(247, 198, 0, 0.35); } 100% { box-shadow: 0 0 0 0 rgba(247, 198, 0, 0); } }
 
+        /* ══════════════════════════════════════════════════════════
+           ADJUSTMENT (action loading page) — ported from AccomForm.php: the full-page loading screen
+           shown while "Update Resume" is saving, which then turns into a green "Resume Updated" check.
+           Same markup, CSS and show/hide pattern as AccomForm.php / admin_student_list.php.
+           Hidden by default: unlike AccomForm.php there is NO first-paint cover on this page, so nothing
+           can appear again after the action finishes and the page refreshes.
+           ══════════════════════════════════════════════════════════ */
+        #globalLoadingOverlay {
+            position: fixed; inset: 0; z-index: 100000;
+            display: flex; align-items: center; justify-content: center;
+            background: rgba(238, 241, 246, 0.92);
+            opacity: 1; visibility: visible;
+            transition: opacity 0.35s ease, visibility 0.35s ease;
+        }
+        #globalLoadingOverlay.hidden { opacity: 0; visibility: hidden; pointer-events: none; }
+        .global-loading-box { display: flex; flex-direction: column; align-items: center; gap: 16px; animation: globalLoadingPop 0.35s ease; }
+        .global-loading-spinner {
+            width: 64px; height: 64px; border: 0; border-radius: 50%; box-sizing: border-box;
+            background: conic-gradient(from 0deg, rgba(27,42,74,0.12) 0deg, rgba(27,42,74,0.35) 120deg, rgba(27,42,74,0.7) 240deg, #1B2A4A 330deg, #1B2A4A 360deg);
+            -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 9px), #000 calc(100% - 8px)),
+                          repeating-conic-gradient(from 5deg, #000 0deg 20deg, transparent 20deg 30deg);
+            -webkit-mask-composite: source-in;
+                    mask: radial-gradient(farthest-side, transparent calc(100% - 9px), #000 calc(100% - 8px)),
+                          repeating-conic-gradient(from 5deg, #000 0deg 20deg, transparent 20deg 30deg);
+                    mask-composite: intersect;
+            will-change: transform;
+            animation: cvRingSpin 1s steps(12, end) infinite;
+        }
+        @keyframes cvRingSpin { to { transform: rotate(360deg); } }
+        .global-loading-text {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            font-size: 13px; font-weight: 700; color: #1B2A4A;
+            text-transform: uppercase; letter-spacing: 0.6px;
+            display: flex; align-items: center; gap: 8px;
+        }
+        .global-loading-dots span { animation: globalLoadingDots 1.2s infinite; opacity: 0; }
+        .global-loading-dots span:nth-child(2) { animation-delay: 0.2s; }
+        .global-loading-dots span:nth-child(3) { animation-delay: 0.4s; }
+        @keyframes globalLoadingPop { from { transform: scale(0.9); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+        @keyframes globalLoadingDots { 0%, 20% { opacity: 0; } 50% { opacity: 1; } 100% { opacity: 0; } }
+        .global-loading-success { display: none; flex-direction: column; align-items: center; gap: 10px; text-align: center; max-width: 460px; width: calc(100vw - 40px); padding: 0 20px; box-sizing: border-box; }
+        #globalLoadingOverlay.success-state .global-loading-spinner,
+        #globalLoadingOverlay.success-state .global-loading-text { display: none; }
+        #globalLoadingOverlay.success-state .global-loading-success { display: flex; }
+        .gls-check {
+            width: 64px; height: 64px; border-radius: 50%;
+            background: #2C5A2C; color: #fff;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 30px; box-shadow: 0 0 0 8px #EAF3EA;
+            animation: glsCheckPop 0.45s cubic-bezier(.34,1.56,.64,1);
+        }
+        .gls-title {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            font-size: 15px; font-weight: 700; color: #1B2A4A;
+            text-transform: uppercase; letter-spacing: 0.6px; margin-top: 6px;
+        }
+        .gls-message { font-size: 13px; color: #5B6478; line-height: 1.5; }
+        .gls-message:empty { display: none; }
+        .gls-areas { display: flex; flex-direction: column; gap: 8px; width: 100%; max-height: 34vh; overflow-y: auto; text-align: left; margin-top: 2px; }
+        .gls-areas:empty { display: none; }
+        .gls-area { background: #fff; border: 1px solid #DCE1EC; padding: 8px 12px; }
+        .gls-area-title { font-size: 11px; font-weight: 700; color: #1B2A4A; text-transform: uppercase; letter-spacing: 0.5px; }
+        .gls-area-fields { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
+        .gls-chip { font-size: 11px; font-weight: 600; color: #2C5A2C; background: #EAF3EA; padding: 2px 8px; border-radius: 2px; }
+        .gls-warn { width: 100%; box-sizing: border-box; text-align: left; font-size: 12px; line-height: 1.45; color: #A0850A; background: #FAF3DC; border: 1px solid #E6D9A8; padding: 8px 12px; }
+        .gls-warn:empty { display: none; }
+        .gls-sub { font-size: 11px; color: #5B6478; opacity: .8; display: flex; align-items: center; gap: 6px; }
+        .gls-sub:empty { display: none; }
+        .gls-continue {
+            margin-top: 4px; padding: 10px 28px; border-radius: 0; font-weight: 600; cursor: pointer;
+            border: 1px solid #1B2A4A; background: #1B2A4A; color: #fff;
+            text-transform: uppercase; letter-spacing: 0.5px; font-size: 12px; font-family: inherit;
+        }
+        .gls-continue:hover { background: #fff; color: #1B2A4A; }
+        @keyframes glsCheckPop { from { transform: scale(0.3); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+        @media (prefers-reduced-motion: reduce) { .global-loading-box, .gls-check, .global-loading-spinner { animation: none; } }
+
         .logout-link { margin-top: auto; padding: 20px; border-top: 1px solid rgba(255,255,255,0.1); }
         .logout-link a {
             border: 1px solid var(--neust-gold); color: var(--neust-gold);
@@ -1724,6 +1801,30 @@ if ($student['deploy_status'] === "Deployed") {
     </style>
 </head>
 <body>
+<!-- ══════════════════════════════════════════════════════════
+     ADJUSTMENT (action loading page): full-page loading screen — same markup as AccomForm.php's
+     #globalLoadingOverlay. Hidden by default; controlled by showGlobalLoading() / showGlobalSuccess() /
+     hideGlobalLoading() in the script before </body>. Used by "Update Resume".
+     ══════════════════════════════════════════════════════════ -->
+<div id="globalLoadingOverlay" class="hidden" aria-live="polite">
+    <div class="global-loading-box">
+        <div class="global-loading-spinner"></div>
+        <div class="global-loading-text">
+            <span id="globalLoadingLabel">Loading</span>
+            <span class="global-loading-dots"><span>.</span><span>.</span><span>.</span></span>
+        </div>
+        <div class="global-loading-success" id="globalLoadingSuccess" role="status" aria-live="polite">
+            <div class="gls-check"><i class="fas fa-check"></i></div>
+            <div class="gls-title" id="globalLoadingSuccessTitle">Success</div>
+            <div class="gls-message" id="globalLoadingSuccessMsg"></div>
+            <div class="gls-areas" id="globalLoadingSuccessAreas"></div>
+            <div class="gls-warn" id="globalLoadingSuccessWarn"></div>
+            <div class="gls-sub" id="globalLoadingSuccessSub"></div>
+            <button type="button" class="gls-continue" id="globalLoadingContinueBtn">Continue</button>
+        </div>
+    </div>
+</div>
+<noscript><style>#globalLoadingOverlay { display: none !important; }</style></noscript>
 
 <!-- ══ SIDEBAR ══ -->
 <div id="sidebar" class="sidebar">
@@ -3142,6 +3243,186 @@ setInterval(_anbWatch, 30000);
     }, 1500);
     document.addEventListener('visibilitychange', function () { if (!document.hidden) poll(); });
 })();
+</script>
+
+<script>
+/* ══════════════════════════════════════════════════════════════════════
+   ADJUSTMENT (action loading page) — UPDATE RESUME
+   ------------------------------------------------------------
+   Same show/hide pattern as AccomForm.php (Save Information / Submit Requirements):
+     showGlobalLoading(label) → showGlobalSuccess(...) → page refreshes → hideGlobalLoading()
+   A valid "Update Resume" is sent to this same page in the background (same URL, same fields);
+   the loading screen shows "Saving resume", turns into a green "Resume Updated" with what was saved,
+   then the page refreshes exactly like the old redirect did.
+   • This page has no first-paint loading cover, so NOTHING loads again after the refresh.
+   • Not intercepted (the normal submit still runs): ?debug=1 mode, or a browser without fetch / FormData.
+   • If the save fails (server message, expired session, network, timeout) the screen closes, the typed
+     entries stay in place and the problem is shown in a popup, so the student can try again.
+   ══════════════════════════════════════════════════════════════════════ */
+var globalLoadingActiveCount = 0;
+var globalLoadingOverlay = document.getElementById('globalLoadingOverlay');
+var globalLoadingLabel   = document.getElementById('globalLoadingLabel');
+var globalSuccessTimer   = null;
+
+function showGlobalLoading(label) {
+    globalLoadingActiveCount++;
+    if (globalLoadingLabel) globalLoadingLabel.textContent = label || 'Loading';
+    if (globalLoadingOverlay) {
+        globalLoadingOverlay.classList.remove('success-state');
+        globalLoadingOverlay.classList.remove('hidden');
+    }
+}
+function hideGlobalLoading() {
+    globalLoadingActiveCount = Math.max(0, globalLoadingActiveCount - 1);
+    if (globalLoadingActiveCount === 0 && globalLoadingOverlay) globalLoadingOverlay.classList.add('hidden');
+}
+/* opts: areas [{title, fields[]}] · warnings [text] · sub · button (false hides "Continue") · autoCloseMs ·
+         keepOpen (leave the screen up, the page is about to refresh) · onDone() */
+function showGlobalSuccess(title, message, opts) {
+    opts = opts || {};
+    var byId = function (id) { return document.getElementById(id); };
+    var t = byId('globalLoadingSuccessTitle'), m = byId('globalLoadingSuccessMsg'), list = byId('globalLoadingSuccessAreas'),
+        warn = byId('globalLoadingSuccessWarn'), sub = byId('globalLoadingSuccessSub'), btn = byId('globalLoadingContinueBtn');
+    if (!globalLoadingOverlay || !t || !m || !list || !warn || !sub || !btn) {   /* markup missing: never leave an action unreported */
+        if (globalLoadingActiveCount > 0) hideGlobalLoading();
+        window.alert((title || 'Done') + (message ? '\n\n' + message : ''));
+        if (opts.onDone) opts.onDone();
+        return;
+    }
+    if (globalLoadingActiveCount === 0) globalLoadingActiveCount = 1;
+    if (globalSuccessTimer) { clearTimeout(globalSuccessTimer); globalSuccessTimer = null; }
+    t.textContent = title || 'Success';
+    m.textContent = message || '';
+    list.textContent = '';
+    (opts.areas || []).forEach(function (a) {
+        var box = document.createElement('div');  box.className = 'gls-area';
+        var h   = document.createElement('div');  h.className   = 'gls-area-title';  h.textContent = a.title || '';
+        var f   = document.createElement('div');  f.className   = 'gls-area-fields';
+        (a.fields || []).forEach(function (x) {
+            var c = document.createElement('span'); c.className = 'gls-chip'; c.textContent = x; f.appendChild(c);
+        });
+        box.appendChild(h); box.appendChild(f); list.appendChild(box);
+    });
+    warn.textContent = (opts.warnings || []).join(' ');
+    sub.textContent = '';
+    if (opts.sub) {
+        var ic = document.createElement('i'); ic.className = 'fas fa-sync-alt fa-spin';
+        sub.appendChild(ic); sub.appendChild(document.createTextNode(' ' + opts.sub));
+    }
+    btn.style.display = (opts.button === false) ? 'none' : '';
+    globalLoadingOverlay.classList.add('success-state');
+    globalLoadingOverlay.classList.remove('hidden');
+
+    var finished = false;
+    function finish() {
+        if (finished) return;
+        finished = true;
+        if (globalSuccessTimer) { clearTimeout(globalSuccessTimer); globalSuccessTimer = null; }
+        if (!opts.keepOpen) {
+            hideGlobalLoading();
+            setTimeout(function () {
+                if (globalLoadingOverlay.classList.contains('hidden')) globalLoadingOverlay.classList.remove('success-state');
+            }, 400);
+        }
+        if (opts.onDone) opts.onDone();
+    }
+    btn.onclick = finish;
+    globalSuccessTimer = setTimeout(finish, opts.autoCloseMs || 4500);
+    if (btn.style.display !== 'none') { try { btn.focus(); } catch (e) {} }
+}
+
+/* A page restored from the back/forward cache keeps its old state — never show a left-over loading screen. */
+window.addEventListener('pageshow', function (e) {
+    if (!e.persisted) return;
+    globalLoadingActiveCount = 0;
+    if (globalLoadingOverlay) { globalLoadingOverlay.classList.add('hidden'); globalLoadingOverlay.classList.remove('success-state'); }
+    var sb = document.querySelector('button.dr-save-btn');
+    if (sb) sb.disabled = false;
+});
+
+/* Problem popup — the page's own navy .cv-top-toast bar with a red icon (same look as company_list.php's error popups). */
+function resumeActionError(title, message) {
+    var div = document.createElement('div');
+    div.className = 'cv-top-toast is-error';
+    div.setAttribute('role', 'alert');
+    var i = document.createElement('i'); i.className = 'fas fa-circle-xmark';
+    var sp = document.createElement('span');
+    var st = document.createElement('strong'); st.textContent = title;
+    sp.appendChild(st); sp.appendChild(document.createTextNode(' ' + message));
+    div.appendChild(i); div.appendChild(sp);
+    document.body.appendChild(div);
+    var top = 30;
+    document.querySelectorAll('.cv-top-toast').forEach(function (el) { el.style.top = top + 'px'; top += el.offsetHeight + 12; });
+    requestAnimationFrame(function () { div.classList.add('show'); });
+    setTimeout(function () { div.classList.remove('show'); setTimeout(function () { div.remove(); }, 400); }, 8000);
+}
+
+document.addEventListener('DOMContentLoaded', function () {
+    var form = document.getElementById('resumeForm');
+    if (!form || !window.FormData || !window.fetch) return;            /* old browser: the normal submit still works */
+    if (/[?&]debug=/.test(window.location.search)) return;              /* debug panel: keep the native post */
+    var busy = false;
+
+    form.addEventListener('submit', function (e) {
+        if (e.defaultPrevented) return;                                  /* the "enter at least one skill" check already stopped it */
+        e.preventDefault();
+        if (busy) return;
+
+        var fd = new FormData(form);
+        var sb = e.submitter || document.querySelector('button.dr-save-btn');
+        if (sb && sb.name) fd.append(sb.name, sb.value);                 /* a script-built FormData leaves the clicked button out; the server looks for update_resume */
+
+        var filled = function (name) {
+            return Array.prototype.filter.call(document.querySelectorAll('textarea[name="' + name + '"]'), function (t) { return t.value.trim() !== ''; }).length;
+        };
+        var nSkills = filled('skill_entry[]'), nExp = filled('exp_entry[]');
+
+        function fail(title, message) {
+            busy = false;
+            if (sb) sb.disabled = false;
+            hideGlobalLoading();
+            resumeActionError(title, message);
+        }
+
+        busy = true;
+        if (sb) sb.disabled = true;
+        showGlobalLoading('Saving resume');
+
+        var ctrl = window.AbortController ? new AbortController() : null;
+        var timer = setTimeout(function () { if (ctrl) ctrl.abort(); }, 60000);
+        fetch(window.location.href, { method: 'POST', body: fd, credentials: 'same-origin', redirect: 'follow', signal: ctrl ? ctrl.signal : undefined })
+            .then(function (res) {
+                clearTimeout(timer);
+                var path = '';
+                try { path = new URL(res.url || '', window.location.href).pathname; } catch (err) {}
+                if (/\/login\.php$/i.test(path)) { fail('Session Expired', 'Your session has expired. Please log in again, then update your resume.'); return; }
+                if (res.ok && res.redirected && /\/student_profile\.php$/i.test(path)) {
+                    /* the handler saved and sent the student back to this page = saved */
+                    showGlobalSuccess(
+                        'Resume Updated',
+                        'Your digital resume was saved:',
+                        {
+                            areas: [{ title: 'Digital Resume', fields: [nSkills + (nSkills === 1 ? ' skill' : ' skills'), nExp + (nExp === 1 ? ' experience entry' : ' experience entries')] }],
+                            sub: 'Refreshing your resume...',
+                            button: false, keepOpen: true, autoCloseMs: 2200,
+                            onDone: function () { window.location.replace(window.location.href); }   /* same refresh the old redirect did; no loading cover exists on this page */
+                        }
+                    );
+                    return;
+                }
+                return res.text().then(function (txt) {
+                    var msg = (txt || '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+                    if (!msg || msg.length > 300) msg = 'The server could not save your resume. Please try again.';
+                    fail('Resume Not Saved', msg);
+                });
+            })
+            .catch(function (err) {
+                clearTimeout(timer);
+                if (err && err.name === 'AbortError') fail('Request Timed Out', 'Saving took too long. Please check your connection and try again.');
+                else fail('Network Error', 'Could not reach the server while saving. Please check your connection and try again.');
+            });
+    });
+});
 </script>
 
 </body>
