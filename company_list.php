@@ -5253,6 +5253,21 @@ document.getElementById('endoLetterModal').addEventListener('click', function (e
     if (e.target === this) closeEndoLetterModal();
 });
 
+/* ADJUSTMENT: the notifications of the signed-letter upload use the same popup as the letter notifications
+   (the navy .cv-top-toast bar at the top: icon, company name in bold, "View ›" opening the Inbox). Falls back to the
+   old bottom toast if the popup helper is not available, so an upload is never left unreported. */
+function endoUploadNotice(id, message, isError) {
+    try {
+        if (typeof clShowTopToast === 'function') {
+            if (isError) { clShowTopToast('', message, 'fa-circle-xmark', true); return; }
+            var l = _endoLetters.find(function (x) { return x.id === id; });
+            clShowTopToast(l ? l.company_name : '', '\u2014 ' + message, 'fa-envelope-circle-check', false, 'inbox');
+            return;
+        }
+    } catch (e) {}
+    showEndoToast(message, isError ? 'error' : 'success');
+}
+
 /* ── Upload the signed letter ── */
 function endoPickUpload(id) {
     _endoUploadTargetId = id;
@@ -5265,8 +5280,8 @@ document.getElementById('endoUploadInput').addEventListener('change', function (
     var file = this.files && this.files[0];
     var id = _endoUploadTargetId;
     if (!file || id === null) return;
-    if (ENDO_TYPES.indexOf(file.type) === -1) { showEndoToast('Only JPG, PNG, WEBP or PDF files are accepted.', 'error'); return; }
-    if (file.size > ENDO_MAX_BYTES)           { showEndoToast('The file must be smaller than 8 MB.', 'error'); return; }
+    if (ENDO_TYPES.indexOf(file.type) === -1) { endoUploadNotice(id, 'Only JPG, PNG, WEBP or PDF files are accepted.', true); return; }
+    if (file.size > ENDO_MAX_BYTES)           { endoUploadNotice(id, 'The file must be smaller than 8 MB.', true); return; }
 
     var btn = document.getElementById('endoUpBtn' + id);
     var oldHtml = btn ? btn.innerHTML : '';
@@ -5280,17 +5295,17 @@ document.getElementById('endoUploadInput').addEventListener('change', function (
         .then(function (r) { return r.json(); })
         .then(function (res) {
             if (res && res.success) {
-                showEndoToast(res.message || 'Endorsement letter uploaded.', 'success');
+                endoUploadNotice(id, res.message || 'Endorsement letter uploaded.', false);
                 _endoKnownStatus[id] = 'Pending';
                 loadEndoInbox();
             } else {
                 if (btn) { btn.disabled = false; btn.innerHTML = oldHtml; }
-                showEndoToast((res && res.message) || 'Upload failed. Please try again.', 'error');
+                endoUploadNotice(id, (res && res.message) || 'Upload failed. Please try again.', true);
             }
         })
         .catch(function () {
             if (btn) { btn.disabled = false; btn.innerHTML = oldHtml; }
-            showEndoToast('Network error. Please try again.', 'error');
+            endoUploadNotice(id, 'Network error. Please try again.', true);
         });
 });
 
