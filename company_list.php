@@ -7,7 +7,7 @@ require_once __DIR__ . "/placement_hold.php"; // ADJUSTMENT: preferred-placement
    ADJUSTMENT: VERIFY-TOAST GATE (reader side)
    ------------------------------------------------------------
    administrator.php writes "Verified" at once and keeps an Undo
-   toast up for up to 5 minutes (recorded in verify_toast_pending
+   toast up for up to 5 minutes (recorded in verify_toast_gate
    under the toast's undo token, removed when the toast ends or is
    undone). A held application (placement replaced) must not be
    applied while that toast is still active, so the two release
@@ -22,14 +22,15 @@ function cv_vt_pending($conn, $student_id) {
     try {
         $student_id = (int)$student_id;
         if ($student_id <= 0) return false;
-        $conn->query("CREATE TABLE IF NOT EXISTS verify_toast_pending ( undo_token VARCHAR(64) NOT NULL PRIMARY KEY, student_id INT NOT NULL, created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, KEY idx_vt_student (student_id) )");
-        $st = $conn->prepare("SELECT 1 FROM verify_toast_pending WHERE student_id = ? AND created_at >= (NOW() - INTERVAL " . (int)CV_VT_WINDOW_SECONDS . " SECOND) LIMIT 1");
-        $st->bind_param('i', $student_id);
+        $conn->query("CREATE TABLE IF NOT EXISTS verify_toast_gate ( undo_token VARCHAR(64) NOT NULL PRIMARY KEY, student_id INT NOT NULL, created_ts BIGINT NOT NULL, KEY idx_vtg_student (student_id) )");
+        $since = time() - (int)CV_VT_WINDOW_SECONDS;
+        $st = $conn->prepare("SELECT 1 FROM verify_toast_gate WHERE student_id = ? AND created_ts >= ? LIMIT 1");
+        $st->bind_param('ii', $student_id, $since);
         $st->execute();
         $found = (bool)$st->get_result()->fetch_row();
         $st->close();
         return $found;
-    } catch (\Throwable $e) { return false; }
+    } catch (\Throwable $e) { error_log('verify_toast_gate check: ' . $e->getMessage()); return false; }
 }
 function cv_vt_release_if_ready($conn, $student_id) {
     if (cv_vt_pending($conn, $student_id)) return;

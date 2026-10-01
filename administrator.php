@@ -31,40 +31,54 @@ include "db.php";
 // ADJUSTMENT: VERIFY-TOAST GATE (writer side) — a held application waits for the undo toast
 // ----------------------------------------------------------------------------
 // A "Verified" save is written at once while the Undo toast stays up (up to 5 minutes). A student whose
-// application is ON HOLD (placement replaced) must not be applied while that toast is still active, so each
-// Verified save is recorded here under its undo token (cv_vt_mark) and removed when the toast ends
-// (ajax_confirm_send) or is undone (ajax_undo) — cv_vt_clear. company_list.php reads this table before it
-// releases a held application. An entry also expires by itself after the 5-minute undo window, so a closed
-// tab never leaves a student on hold forever. Every function swallows its errors: the save is never affected.
+// application is ON HOLD (placement replaced) must not be applied while that toast is still active, so every
+// Verified save is recorded in verify_toast_gate:
+//   • cv_vt_reserve() — BEFORE the Verified status is written (a temporary token), so the student's page can
+//                       never see "all Verified" in the gap between the write and the undo token existing;
+//   • cv_vt_mark()    — right after the undo snapshot: the entry now carries the toast's undo token;
+//   • cv_vt_clear()   — the toast ended (ajax_confirm_send: countdown finished / dismissed / replaced by the
+//                       next toast) or the action was undone (ajax_undo).
+// company_list.php reads this table before it releases a held application. Times are PHP epoch seconds, and an
+// entry also expires by itself after the 5-minute undo window, so a closed tab never leaves a student on hold
+// forever. Every function swallows (and logs) its errors: the save itself is never affected.
 // ============================================================================
 if (!defined('CV_VT_WINDOW_SECONDS')) define('CV_VT_WINDOW_SECONDS', 305); // undo window (300 s) + a short grace
 function cv_vt_ensure($conn) {
     static $done = false;
     if ($done) return true;
     try {
-        $conn->query("CREATE TABLE IF NOT EXISTS verify_toast_pending ( undo_token VARCHAR(64) NOT NULL PRIMARY KEY, student_id INT NOT NULL, created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, KEY idx_vt_student (student_id) )");
+        $conn->query("CREATE TABLE IF NOT EXISTS verify_toast_gate ( undo_token VARCHAR(64) NOT NULL PRIMARY KEY, student_id INT NOT NULL, created_ts BIGINT NOT NULL, KEY idx_vtg_student (student_id) )");
         $done = true;
-    } catch (\Throwable $e) { return false; }
+    } catch (\Throwable $e) { error_log('verify_toast_gate ensure: ' . $e->getMessage()); return false; }
     return $done;
 }
 function cv_vt_mark($conn, $student_id, $token) {
     try {
         $student_id = (int)$student_id; $token = (string)$token;
-        if ($student_id <= 0 || $token === '' || !cv_vt_ensure($conn)) return;
-        $conn->query("DELETE FROM verify_toast_pending WHERE created_at < (NOW() - INTERVAL " . (int)CV_VT_WINDOW_SECONDS . " SECOND)");
-        $st = $conn->prepare("REPLACE INTO verify_toast_pending (undo_token, student_id, created_at) VALUES (?, ?, NOW())");
-        $st->bind_param('si', $token, $student_id);
+        if ($student_id <= 0 || $token === '' || !cv_vt_ensure($conn)) return false;
+        $old = time() - (int)CV_VT_WINDOW_SECONDS;
+        $conn->query("DELETE FROM verify_toast_gate WHERE created_ts < " . (int)$old);
+        $now = time();
+        $st = $conn->prepare("REPLACE INTO verify_toast_gate (undo_token, student_id, created_ts) VALUES (?, ?, ?)");
+        $st->bind_param('sii', $token, $student_id, $now);
         $st->execute(); $st->close();
-    } catch (\Throwable $e) { /* never affects the save */ }
+        return true;
+    } catch (\Throwable $e) { error_log('verify_toast_gate mark: ' . $e->getMessage()); return false; }
+}
+function cv_vt_reserve($conn, $student_id) {   // returns the temporary token (or '' when it could not be recorded)
+    try {
+        $tmp = 'tmp_' . bin2hex(random_bytes(8));
+        return cv_vt_mark($conn, $student_id, $tmp) ? $tmp : '';
+    } catch (\Throwable $e) { return ''; }
 }
 function cv_vt_clear($conn, $token) {
     try {
         $token = (string)$token;
         if ($token === '' || !cv_vt_ensure($conn)) return;
-        $st = $conn->prepare("DELETE FROM verify_toast_pending WHERE undo_token = ?");
+        $st = $conn->prepare("DELETE FROM verify_toast_gate WHERE undo_token = ?");
         $st->bind_param('s', $token);
         $st->execute(); $st->close();
-    } catch (\Throwable $e) {}
+    } catch (\Throwable $e) { error_log('verify_toast_gate clear: ' . $e->getMessage()); }
 }
 include "mail.php";
 
@@ -923,6 +937,7 @@ if (isset($_POST['ajax_update_photo'])) {
         exit;
     }
 
+    $vtTmp = ($status === 'Verified') ? cv_vt_reserve($conn, $user_id) : '';   // ADJUSTMENT: hold the student's held application BEFORE Verified is written
     // ── DB WRITE: only for non-Denied; Denied is deferred until toast expires ──
     if ($status !== 'Denied') {
         if ($status === 'Verified') {
@@ -963,7 +978,7 @@ if (isset($_POST['ajax_update_photo'])) {
         'new_status'   => $status,
         'new_remark'   => $remark,
     ], 'Profile Photo');
-    if ($status === 'Verified') cv_vt_mark($conn, $user_id, $undoToken);   // ADJUSTMENT: a held application must not be released while this toast is active
+    if ($status === 'Verified') { cv_vt_mark($conn, $user_id, $undoToken); cv_vt_clear($conn, $vtTmp); }   // ADJUSTMENT: the entry now carries the toast's undo token
 
     // Store deferred email
     if (!isset($_SESSION['pending_emails'])) $_SESSION['pending_emails'] = [];
@@ -1121,6 +1136,7 @@ if (isset($_POST['ajax_update_requirement'])) {
         exit;
     }
 
+    $vtTmp = ($status === 'Verified') ? cv_vt_reserve($conn, $user_id) : '';   // ADJUSTMENT: hold the student's held application BEFORE Verified is written
     // ── DB WRITE: only for non-Denied; Denied is deferred until toast expires ──
     if ($status !== 'Denied') {
         if ($status === 'Verified') {
@@ -1162,7 +1178,7 @@ if (isset($_POST['ajax_update_requirement'])) {
         'new_status'       => $status,
         'new_remark'       => $remark,
     ], $undoLabel);
-    if ($status === 'Verified') cv_vt_mark($conn, $user_id, $undoToken);   // ADJUSTMENT: a held application must not be released while this toast is active
+    if ($status === 'Verified') { cv_vt_mark($conn, $user_id, $undoToken); cv_vt_clear($conn, $vtTmp); }   // ADJUSTMENT: the entry now carries the toast's undo token
 
     // Store deferred email
     if (!isset($_SESSION['pending_emails'])) $_SESSION['pending_emails'] = [];
