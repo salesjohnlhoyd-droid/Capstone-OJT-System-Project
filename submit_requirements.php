@@ -8,7 +8,17 @@ if(!isset($_SESSION['user_id'])){
 }
 
 $user_id = $_SESSION['user_id'];
-$maxFileSize = 5 * 1024 * 1024; // 5MB limit
+/* ADJUSTMENT: the per-file limit now comes from upload_limits.php (system ceiling capped by the server's real
+   PHP / MySQL limits — the same value AccomForm.php shows). Falls back to the original 5 MB if that file is missing. */
+if (is_file(__DIR__ . '/upload_limits.php')) require_once __DIR__ . '/upload_limits.php';
+$maxFileSize = function_exists('ulMaxFileBytes') ? ulMaxFileBytes($conn) : 5 * 1024 * 1024;
+$maxFileLabel = function_exists('ulFormatMB') ? ulFormatMB($maxFileSize) : '5 MB';
+
+/* ADJUSTMENT: a submission bigger than post_max_size arrives with an empty $_POST and $_FILES — say so
+   instead of silently doing nothing. */
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && empty($_POST) && empty($_FILES) && (int)($_SERVER['CONTENT_LENGTH'] ?? 0) > 0) {
+    die("Upload failed: the selected files are too large to send together (limit " . htmlspecialchars((string)ini_get('post_max_size')) . " per submission). Please submit fewer files at a time.");
+}
 $allowedTypes = [
     'image/jpeg',
     'image/png',
@@ -82,13 +92,20 @@ function saveBlob($conn, $user_id, $fieldName, $table, $columnName, $requirement
     global $maxFileSize, $allowedTypes;
 
     if(!isset($_FILES[$fieldName]) || $_FILES[$fieldName]['error'] != 0){
+        /* ADJUSTMENT: tell the student when PHP itself refused a too-big file (it used to be skipped silently) */
+        global $maxFileLabel;
+        if (isset($_FILES[$fieldName]) && function_exists('ulUploadErrorMessage')) {
+            $ulMsg = ulUploadErrorMessage((int)$_FILES[$fieldName]['error'], $conn);
+            if ($ulMsg !== null) die($ulMsg);
+        }
         return;
     }
 
     $tmp = $_FILES[$fieldName]['tmp_name'];
 
     if(filesize($tmp) > $maxFileSize){
-        die("File too large. Maximum 5MB allowed.");
+        global $maxFileLabel;
+        die("File too large. Maximum " . $maxFileLabel . " allowed.");
     }
 
     $mime = mime_content_type($tmp);
