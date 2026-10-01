@@ -852,8 +852,10 @@ if ($student['deploy_status'] === "Deployed") {
            ADJUSTMENT (action loading page) — ported from AccomForm.php: the full-page loading screen
            shown while "Update Resume" is saving, which then turns into a green "Resume Updated" check.
            Same markup, CSS and show/hide pattern as AccomForm.php / admin_student_list.php.
-           Hidden by default: unlike AccomForm.php there is NO first-paint cover on this page, so nothing
-           can appear again after the action finishes and the page refreshes.
+           ADJUSTMENT (page loading screen): like AccomForm.php it is visible on first paint and fades out when
+           the page has loaded (script right after the overlay markup), then is reused by the action. The
+           refresh that follows "Update Resume" skips this first-paint cover (see html.skip-initial-cover), so no
+           second loading page appears after the action's own screen.
            ══════════════════════════════════════════════════════════ */
         #globalLoadingOverlay {
             position: fixed; inset: 0; z-index: 100000;
@@ -863,6 +865,7 @@ if ($student['deploy_status'] === "Deployed") {
             transition: opacity 0.35s ease, visibility 0.35s ease;
         }
         #globalLoadingOverlay.hidden { opacity: 0; visibility: hidden; pointer-events: none; }
+        html.skip-initial-cover #globalLoadingOverlay[data-initial] { display: none; }
         .global-loading-box { display: flex; flex-direction: column; align-items: center; gap: 16px; animation: globalLoadingPop 0.35s ease; }
         .global-loading-spinner {
             width: 64px; height: 64px; border: 0; border-radius: 50%; box-sizing: border-box;
@@ -1803,10 +1806,23 @@ if ($student['deploy_status'] === "Deployed") {
 <body>
 <!-- ══════════════════════════════════════════════════════════
      ADJUSTMENT (action loading page): full-page loading screen — same markup as AccomForm.php's
-     #globalLoadingOverlay. Hidden by default; controlled by showGlobalLoading() / showGlobalSuccess() /
-     hideGlobalLoading() in the script before </body>. Used by "Update Resume".
+     #globalLoadingOverlay. Visible on first paint (data-initial) and closed once the page has loaded; then
+     controlled by showGlobalLoading() / showGlobalSuccess() / hideGlobalLoading() in the script before </body>.
      ══════════════════════════════════════════════════════════ -->
-<div id="globalLoadingOverlay" class="hidden" aria-live="polite">
+<script>
+/* The "Update Resume" success screen leaves a one-time flag in sessionStorage just before it refreshes the page.
+   Read and clear it here, before the overlay is parsed, so the first-paint cover is skipped for that one refresh
+   only. Storage can be blocked: then the cover shows as before. */
+(function () {
+    try {
+        if (sessionStorage.getItem('profileSkipInitialCover') === '1') {
+            sessionStorage.removeItem('profileSkipInitialCover');
+            document.documentElement.classList.add('skip-initial-cover');
+        }
+    } catch (e) {}
+})();
+</script>
+<div id="globalLoadingOverlay" data-initial="1" aria-live="polite">
     <div class="global-loading-box">
         <div class="global-loading-spinner"></div>
         <div class="global-loading-text">
@@ -1825,6 +1841,28 @@ if ($student['deploy_status'] === "Deployed") {
     </div>
 </div>
 <noscript><style>#globalLoadingOverlay { display: none !important; }</style></noscript>
+<script>
+/* Page loading screen (same behaviour as AccomForm.php): covers the very first paint, then fades out once the window
+   has finished loading, or after a 4-second safety net if a slow asset (CDN stylesheet, map iframe) delays 'load'.
+   A tiny standalone script right after the markup so nothing further down can leave it stuck. It only closes the
+   INITIAL cover: once "Update Resume" takes over the screen, showGlobalLoading() / showGlobalSuccess() remove the
+   data-initial flag and this script leaves it alone. */
+(function () {
+    var done = false;
+    function finishInitialPageLoad() {
+        if (done) return;
+        done = true;
+        var o = document.getElementById('globalLoadingOverlay');
+        if (o && o.hasAttribute('data-initial')) {
+            o.removeAttribute('data-initial');
+            o.classList.add('hidden');
+        }
+    }
+    if (document.readyState === 'complete') finishInitialPageLoad();
+    else window.addEventListener('load', finishInitialPageLoad);
+    setTimeout(finishInitialPageLoad, 4000);
+})();
+</script>
 
 <!-- ══ SIDEBAR ══ -->
 <div id="sidebar" class="sidebar">
@@ -3254,7 +3292,7 @@ setInterval(_anbWatch, 30000);
    A valid "Update Resume" is sent to this same page in the background (same URL, same fields);
    the loading screen shows "Saving resume", turns into a green "Resume Updated" with what was saved,
    then the page refreshes exactly like the old redirect did.
-   • This page has no first-paint loading cover, so NOTHING loads again after the refresh.
+   • The refresh skips the first-paint loading cover (one-time sessionStorage flag), so NOTHING loads again after it.
    • Not intercepted (the normal submit still runs): ?debug=1 mode, or a browser without fetch / FormData.
    • If the save fails (server message, expired session, network, timeout) the screen closes, the typed
      entries stay in place and the problem is shown in a popup, so the student can try again.
@@ -3268,6 +3306,7 @@ function showGlobalLoading(label) {
     globalLoadingActiveCount++;
     if (globalLoadingLabel) globalLoadingLabel.textContent = label || 'Loading';
     if (globalLoadingOverlay) {
+        globalLoadingOverlay.removeAttribute('data-initial');   /* an action now owns the screen, not the first-paint cover */
         globalLoadingOverlay.classList.remove('success-state');
         globalLoadingOverlay.classList.remove('hidden');
     }
@@ -3310,6 +3349,7 @@ function showGlobalSuccess(title, message, opts) {
         sub.appendChild(ic); sub.appendChild(document.createTextNode(' ' + opts.sub));
     }
     btn.style.display = (opts.button === false) ? 'none' : '';
+    globalLoadingOverlay.removeAttribute('data-initial');
     globalLoadingOverlay.classList.add('success-state');
     globalLoadingOverlay.classList.remove('hidden');
 
@@ -3335,7 +3375,7 @@ function showGlobalSuccess(title, message, opts) {
 window.addEventListener('pageshow', function (e) {
     if (!e.persisted) return;
     globalLoadingActiveCount = 0;
-    if (globalLoadingOverlay) { globalLoadingOverlay.classList.add('hidden'); globalLoadingOverlay.classList.remove('success-state'); }
+    if (globalLoadingOverlay) { globalLoadingOverlay.removeAttribute('data-initial'); globalLoadingOverlay.classList.add('hidden'); globalLoadingOverlay.classList.remove('success-state'); }
     var sb = document.querySelector('button.dr-save-btn');
     if (sb) sb.disabled = false;
 });
@@ -3431,7 +3471,10 @@ document.addEventListener('DOMContentLoaded', function () {
                             areas: [{ title: 'Digital Resume', fields: [nSkills + (nSkills === 1 ? ' skill' : ' skills'), nExp + (nExp === 1 ? ' experience entry' : ' experience entries')] }],
                             sub: 'Refreshing your resume...',
                             button: false, keepOpen: true, autoCloseMs: 2200,
-                            onDone: function () { window.location.replace(window.location.href); }   /* same refresh the old redirect did; no loading cover exists on this page */
+                            onDone: function () {
+                                try { sessionStorage.setItem('profileSkipInitialCover', '1'); } catch (e) {}   /* no loading cover on the refresh */
+                                window.location.replace(window.location.href);                                 /* same refresh the old redirect did */
+                            }
                         }
                     );
                     return;
