@@ -91,26 +91,24 @@ function splitFullNameParts(string $full): array {
     return [$first, $middle, $last];
 }
 
-/* ADJUSTMENT: every picture selected for a requirement is kept as its own record in the
-   `requirements` table (written by submit_requirements.php) — NOT in a separate
-   requirement_files table. Each individual picture is one extra `requirements` row whose
-   requirement_type is "<requirement_key>_part" (e.g. cert_registration_part), so it never
-   clashes with the main row (cert_registration) that holds the combined image + status.
-   These helpers list them so the card can show ALL the pictures. */
-const ACCOM_REQ_PART_SUFFIX = '_part';
+/* ADJUSTMENT: every file selected for a requirement is saved as its OWN row in the
+   `requirements` table by submit_requirements.php (same user_id + requirement_type, oldest id
+   first — the same one-row-per-file storage CompanyForm.php uses for company_requirements).
+   Nothing is combined and there is no separate requirement_files table. These helpers list
+   the stored pictures so the card can show ALL of them. */
+const ACCOM_REQ_KEYS = ['cert_registration','certificate_pdos','ojt_sheet','application_sit','waiver_form','student_contract','psych_result','medical_result'];
 
 /* kept as a harmless no-op so existing calls keep working — no extra table is needed anymore */
 function accomEnsureReqFilesTable(mysqli $conn): void {
     return;
 }
 
-/** ids of the individually stored pictures of one requirement (empty unless there are 2 or more) */
+/** ids of the stored files (one `requirements` row each) of one requirement (empty unless there are 2 or more) */
 function accomReqPartIds(mysqli $conn, int $user_id, string $key): array {
     $ids = [];
-    $partType = $key . ACCOM_REQ_PART_SUFFIX;
-    $st = $conn->prepare("SELECT id FROM requirements WHERE user_id=? AND requirement_type=? ORDER BY id ASC");
+    $st = $conn->prepare("SELECT id FROM requirements WHERE user_id=? AND requirement_type=? AND file_name IS NOT NULL AND LENGTH(file_name) > 0 ORDER BY id ASC");
     if (!$st) return $ids;
-    $st->bind_param("is", $user_id, $partType);
+    $st->bind_param("is", $user_id, $key);
     $st->execute();
     $res = $st->get_result();
     while ($r = $res->fetch_assoc()) $ids[] = (int)$r['id'];
@@ -365,15 +363,22 @@ try { $placement_hold = ph_get_hold($conn, (int)$user_id); } catch (\Throwable $
 
 /* ADJUSTMENT: streams ONE of the individually stored pictures of a requirement (own pictures only) */
 if (isset($_GET['stream_req_file'])) {
-    accomEnsureReqFilesTable($conn);
     $sr_id = (int)$_GET['stream_req_file'];
-    $sr = $conn->prepare("SELECT file_name FROM requirements WHERE id=? AND user_id=? AND requirement_type LIKE '%\\_part' LIMIT 1");
+    $sr_in = "'" . implode("','", ACCOM_REQ_KEYS) . "'"; // fixed whitelist, never user input
+    $sr = $conn->prepare("SELECT file_name FROM requirements WHERE id=? AND user_id=? AND requirement_type IN ($sr_in) LIMIT 1");
     $sr->bind_param("ii", $sr_id, $user_id);
     $sr->execute();
     $sr_row = $sr->get_result()->fetch_assoc();
     $sr->close();
     if (!$sr_row || $sr_row['file_name'] === null || $sr_row['file_name'] === '') { http_response_code(404); exit; }
-    header('Content-Type: image/jpeg');
+    $sr_mime = 'image/jpeg';
+    try {
+        $sr_fi = new finfo(FILEINFO_MIME_TYPE);
+        $sr_det = (string)$sr_fi->buffer($sr_row['file_name']);
+        if (in_array($sr_det, ['image/jpeg', 'image/png', 'image/gif', 'image/webp'], true)) $sr_mime = $sr_det;
+    } catch (\Throwable $e) { /* keep the image/jpeg default */ }
+    header('Content-Type: ' . $sr_mime);
+    header('X-Content-Type-Options: nosniff');
     header('Cache-Control: private, max-age=3600');
     echo $sr_row['file_name'];
     exit;
@@ -4773,7 +4778,7 @@ function hideNotifModal(modalId) { document.getElementById(modalId).style.displa
    ADJUSTMENT: the requirement uploads (Documentary Requirements)
    now accept ANY picture format (JPG, PNG, GIF, WEBP, BMP, ...) and
    several pictures per requirement — see isPictureFile() and
-   submit_requirements.php, which combines them into one image.
+   submit_requirements.php, which saves each picture as its own `requirements` row.
    ============================================================ */
 var MAX_FILE_SIZE = 5 * 1024 * 1024;
 var ALLOWED_TYPES = ['image/jpeg'];

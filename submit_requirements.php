@@ -202,6 +202,219 @@ function saveBlob($conn, $user_id, $fieldName, $table, $columnName, $requirement
 }
 
 /* ==========================================================
+   MULTI-FILE REQUIREMENTS — ONE `requirements` ROW PER FILE
+   Same technique as CompanyForm.php's
+   cfValidateRequirementUploadsMulti() / cfReplaceCompanyRequirementFiles():
+   every file selected for a requirement is validated, then saved as its
+   OWN row (same user_id + requirement_type, oldest id first) instead of
+   being combined into a single image. administrator.php already lists
+   every row of a requirement (svFetchFileEntries / stream_student_file).
+========================================================== */
+
+/** Any picture format is accepted; non JPG/PNG pictures are converted to PNG so every browser can show them. */
+function srNormalizePictureBytes(string $tmpPath, string $mime): ?string
+{
+    $raw = @file_get_contents($tmpPath);
+    if ($raw === false || $raw === '') return null;
+    if ($mime === 'image/jpeg' || $mime === 'image/png') return $raw;
+    if (!function_exists('imagecreatefromstring')) return null;
+    $img = @imagecreatefromstring($raw);
+    if (!$img) return null;
+    imagealphablending($img, false);
+    imagesavealpha($img, true);
+    ob_start();
+    imagepng($img);
+    $png = ob_get_clean();
+    imagedestroy($img);
+    return ($png === false || $png === '') ? null : $png;
+}
+
+/**
+ * Makes sure the `requirements` table can hold several rows per
+ * (user_id, requirement_type). The table was created with
+ * UNIQUE (user_id, requirement_type), which rejects the 2nd file of a
+ * requirement, so that unique index is replaced by a plain index (the
+ * plain one is added FIRST because the user_id foreign key needs an index).
+ * Runs once per request; every step is guarded so a failure here can never
+ * stop single-file uploads from working.
+ */
+function srEnsureMultiFileSchema(mysqli $conn): void
+{
+    static $done = false;
+    if ($done) return;
+    $done = true;
+    try {
+        $idx = [];
+        if ($res = $conn->query("SHOW INDEX FROM requirements")) {
+            while ($r = $res->fetch_assoc()) {
+                $idx[$r['Key_name']]['unique'] = ((int)$r['Non_unique'] === 0);
+                $idx[$r['Key_name']]['cols'][(int)$r['Seq_in_index']] = $r['Column_name'];
+            }
+            $res->free();
+        }
+        $legacy = [];
+        foreach ($idx as $name => $info) {
+            if ($name === 'PRIMARY' || empty($info['unique'])) continue;
+            ksort($info['cols']);
+            $cols = array_values($info['cols']);
+            if ($cols === ['user_id', 'requirement_type'] || $cols === ['requirement_type', 'user_id']) $legacy[] = $name;
+        }
+        if (!$legacy) return;
+        if (!isset($idx['idx_user_requirement_type'])) {
+            $conn->query("ALTER TABLE requirements ADD INDEX idx_user_requirement_type (user_id, requirement_type)");
+        }
+        foreach ($legacy as $name) {
+            $conn->query("ALTER TABLE requirements DROP INDEX `" . $conn->real_escape_string($name) . "`");
+        }
+    } catch (\Throwable $e) {
+        error_log('[SUBMIT REQ SCHEMA] could not relax the unique index on requirements: ' . $e->getMessage());
+    }
+}
+
+/**
+ * Validates every file submitted for one requirement field
+ * ($_FILES[$fieldName] — name="key[]" multi input; a plain single input is
+ * also understood). Returns ['ok'=>bool, 'error'=>string, 'bytes'=>string[]];
+ * 'bytes' is empty (ok=true) when nothing was chosen for this field, so the
+ * requirement is simply left untouched.
+ */
+function srValidateRequirementUploads(string $fieldName, string $label, int $maxFileSize, array $allowedTypes, int $safePacket): array
+{
+    $none = ['ok' => true, 'error' => '', 'bytes' => []];
+    if (!isset($_FILES[$fieldName]) || !isset($_FILES[$fieldName]['name'])) return $none;
+    $f = $_FILES[$fieldName];
+    $namesArr = array_values((array)$f['name']);
+    $tmpNames = array_values((array)$f['tmp_name']);
+    $errors   = array_values((array)$f['error']);
+    $sizes    = array_values((array)$f['size']);
+
+    $submitted = [];
+    foreach ($errors as $i => $code) {
+        if ((int)$code !== UPLOAD_ERR_NO_FILE) $submitted[] = $i;
+    }
+    if (!$submitted) return $none;
+
+    $fail = function (string $msg): array { return ['ok' => false, 'error' => $msg, 'bytes' => []]; };
+
+    // Optional safety net: the browser may tell us how many files it selected.
+    $expected = $_POST[$fieldName . '_expected_count'] ?? null;
+    if ($expected !== null && is_numeric($expected) && (int)$expected > count($submitted)) {
+        return $fail('You selected ' . (int)$expected . ' file(s) for "' . $label . '" but only ' . count($submitted)
+            . ' reached the server. This usually means a server upload limit (max_file_uploads in php.ini) was exceeded. '
+            . 'Please upload fewer files at once for this document, or ask the administrator to raise that limit.');
+    }
+
+    // One PDF at most, and never mixed with pictures (same rule as CompanyForm.php).
+    $pdfCount = 0; $otherCount = 0;
+    foreach ($submitted as $i) {
+        if ((int)$errors[$i] !== UPLOAD_ERR_OK) continue;
+        if (@mime_content_type($tmpNames[$i]) === 'application/pdf') $pdfCount++; else $otherCount++;
+    }
+    if ($pdfCount > 1) {
+        return $fail('Only one PDF file can be selected for "' . $label . '". Choose a single PDF, or pictures if you need several files for this document.');
+    }
+    if ($pdfCount === 1 && $otherCount > 0) {
+        return $fail('Please select files of the same format only for "' . $label . '" — either all pictures or a single PDF, not a mix of both.');
+    }
+
+    $out = [];
+    foreach ($submitted as $i) {
+        $nm = $namesArr[$i] ?? 'a file';
+        if ((int)$errors[$i] !== UPLOAD_ERR_OK) {
+            $why = ((int)$errors[$i] === UPLOAD_ERR_INI_SIZE || (int)$errors[$i] === UPLOAD_ERR_FORM_SIZE) ? ' (the file is larger than the server allows)' : '';
+            return $fail('There was a problem uploading "' . $label . '" (' . $nm . ')' . $why . '. Please try again.');
+        }
+        $tmp = $tmpNames[$i];
+        if (!is_uploaded_file($tmp)) return $fail('"' . $label . '" (' . $nm . ') was not uploaded correctly. Please try again.');
+        if ((int)$sizes[$i] > $maxFileSize) return $fail('"' . $label . '" (' . $nm . ') exceeds the 5MB limit.');
+
+        $mime = @mime_content_type($tmp);
+        $isPicture = $mime && strpos($mime, 'image/') === 0;
+        if (!$mime || (!$isPicture && !in_array($mime, $allowedTypes, true))) {
+            return $fail('"' . $label . '" (' . $nm . ') must be a PDF or a picture file (JPG, PNG, GIF, WEBP, BMP, ...).');
+        }
+        if ($isPicture) {
+            $bytes = srNormalizePictureBytes($tmp, $mime);
+            if ($bytes === null) return $fail('"' . $label . '" (' . $nm . ') is in a picture format this server cannot read. Please convert it to JPG or PNG and try again.');
+        } else {
+            $bytes = @file_get_contents($tmp);
+        }
+        if ($bytes === false || $bytes === '') return $fail('Failed to read "' . $label . '" (' . $nm . '). Please try again.');
+        if (strlen($bytes) > $safePacket) {
+            return $fail('"' . $label . '" (' . $nm . ') is too large for the server\'s current database settings (max_allowed_packet). Please ask the administrator to increase it, or upload a smaller file.');
+        }
+        $out[] = $bytes;
+    }
+    return ['ok' => true, 'error' => '', 'bytes' => $out];
+}
+
+/**
+ * Replaces every saved file of one requirement with the new set: deletes the
+ * old rows, then inserts each file as its own `requirements` row (status
+ * Pending, no remark — a resubmission re-enters the admin's review queue, as
+ * before). Runs in a transaction, so a failure part-way leaves the previously
+ * saved file(s) untouched instead of a half-saved requirement.
+ * Returns '' on success or an error message.
+ */
+function srReplaceRequirementFiles(mysqli $conn, int $userId, string $type, array $filesBytes): string
+{
+    if (!$filesBytes) return '';
+    try {
+        $conn->begin_transaction();
+
+        $del = $conn->prepare("DELETE FROM requirements WHERE user_id=? AND requirement_type=?");
+        if (!$del) throw new Exception('prepare(delete) failed: ' . $conn->error);
+        $del->bind_param("is", $userId, $type);
+        $del->execute();
+        $del->close();
+
+        foreach ($filesBytes as $bytes) {
+            $ins = $conn->prepare("INSERT INTO requirements (user_id, requirement_type, file_name, status, remark) VALUES (?, ?, ?, 'Pending', NULL)");
+            if (!$ins) throw new Exception('prepare(insert) failed: ' . $conn->error);
+            // Blob bound directly as "s" (same as CompanyForm.php) so the full file is stored.
+            $ins->bind_param("iss", $userId, $type, $bytes);
+            $ins->execute();
+            $newId = (int)$conn->insert_id;
+            $affected = $ins->affected_rows;
+            $ins->close();
+            if ($affected < 1) throw new Exception('insert reported 0 affected rows');
+
+            $v = $conn->prepare("SELECT LENGTH(file_name) AS len FROM requirements WHERE id=?");
+            if ($v) {
+                $v->bind_param("i", $newId);
+                $v->execute();
+                $vr = $v->get_result()->fetch_assoc();
+                $v->close();
+                if ((int)($vr['len'] ?? 0) !== strlen($bytes)) throw new Exception('stored file length mismatch');
+            }
+        }
+        $conn->commit();
+        return '';
+    } catch (\Throwable $e) {
+        try { $conn->rollback(); } catch (\Throwable $e2) {}
+        error_log('[SUBMIT REQ] saving "' . $type . '" failed for user ' . $userId . ': ' . $e->getMessage());
+        if (stripos($e->getMessage(), 'max_allowed_packet') !== false) {
+            return 'A file for this requirement is too large for the server\'s current database settings (max_allowed_packet). Please ask the administrator to increase it, or upload a smaller file.';
+        }
+        if (stripos($e->getMessage(), 'Duplicate entry') !== false) {
+            return 'Several files for one requirement cannot be saved yet because the database still enforces one file per requirement. Please contact the administrator.';
+        }
+        return 'Your file(s) could not be saved. Please try again.';
+    }
+}
+
+/** Plain error page for a rejected requirement submit (nothing is saved when this is shown). */
+function srFailSubmit(string $message): void
+{
+    http_response_code(422);
+    echo '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Upload failed</title></head>'
+       . '<body style="font-family:Arial,sans-serif;padding:30px;">'
+       . '<h3>Upload failed</h3><p>' . htmlspecialchars($message) . '</p>'
+       . '<p><a href="AccomForm.php">&larr; Back to Documentary Requirements</a></p></body></html>';
+    exit;
+}
+
+/* ==========================================================
    IF "Submit All" BUTTON IS CLICKED
    - Updates company info + saves 2x2 photo + requirements
 ========================================================== */
@@ -271,8 +484,40 @@ if(isset($_POST['submit_all'])){
         "medical_result"
     ];
 
+    // Every file chosen for a requirement is saved as its own row in `requirements`
+    // (no combining). All requirements are validated BEFORE anything is written, so
+    // one bad file never leaves the submit half-saved.
+    $reqLabels = [
+        "cert_registration" => "Certification of Registration",
+        "certificate_pdos"  => "PDOS Certificate",
+        "ojt_sheet"         => "OJT Sheet",
+        "application_sit"   => "Application SIT",
+        "waiver_form"       => "Waiver Form",
+        "student_contract"  => "Student Contract",
+        "psych_result"      => "Psych Result",
+        "medical_result"    => "Medical Result",
+    ];
+
+    $safePacket = 1048576;
+    if ($res = $conn->query("SELECT @@max_allowed_packet AS map")) {
+        $row = $res->fetch_assoc();
+        if ($row && isset($row['map'])) $safePacket = (int)($row['map'] * 0.9);
+        $res->free();
+    }
+
+    $toSave = [];
     foreach($requirements as $req){
-        saveBlob($conn, $user_id, $req, "requirements", "file_name", $req);
+        $v = srValidateRequirementUploads($req, $reqLabels[$req] ?? $req, $maxFileSize, $allowedTypes, $safePacket);
+        if (!$v['ok']) srFailSubmit($v['error']);
+        if (!empty($v['bytes'])) $toSave[$req] = $v['bytes'];
+    }
+
+    if ($toSave) {
+        srEnsureMultiFileSchema($conn);
+        foreach ($toSave as $req => $filesBytes) {
+            $err = srReplaceRequirementFiles($conn, (int)$user_id, $req, $filesBytes);
+            if ($err !== '') srFailSubmit('"' . ($reqLabels[$req] ?? $req) . '": ' . $err);
+        }
     }
 
     header("Location: AccomForm.php?msg=all_submitted");
