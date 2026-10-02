@@ -1834,6 +1834,11 @@ $result = $stmt->get_result();
         /* ── MAIN CONTENT ── */
         .main-content { margin-left: 260px; width: 100%; transition: 0.3s; }
         .sidebar.collapsed + .main-content { margin-left: 80px; }
+        /* FIX (side menu covering the page): .main-content is a flex item, and by default a flex item cannot shrink below
+           its widest content. The applicants table (now with the Schedule column) is wider than a small window, so the
+           whole page grew wider than the window and scrolling sideways slid the content under the fixed side menu.
+           With min-width: 0 the page keeps the window's width and the table scrolls inside its own box (.apl-table-wrap). */
+        .main-content { min-width: 0; }
         .navbar {
             background: var(--neust-maroon);
             padding: 10px 30px;
