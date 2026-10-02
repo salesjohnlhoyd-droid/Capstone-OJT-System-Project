@@ -2814,6 +2814,12 @@ body { background: var(--grid-bg); color: #2d3748; font-family: 'Segoe UI', Taho
     .main-content { height: 100vh; overflow: hidden; }
     .page-wrap { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
 }
+
+/* Keep the four progress dots on one line even when a step carries the
+   "Pending" badge (late request submitted): without this the taller step
+   pushed its own dot up and bent the connector line. Steps that have no
+   badge are the same height, so they are unaffected. */
+.track-steps { align-items: flex-start; }
     </style>
 </head>
 <body>
