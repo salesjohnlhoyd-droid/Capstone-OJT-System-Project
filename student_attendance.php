@@ -161,25 +161,6 @@ function getLateRequestWindowStatus($type, $setting, $current_time) {
     return 'open';
 }
 
-// ================= LATE REQUEST TYPE (late / overtime) =================
-// late_requests.request_type: 'late' (default - the original behaviour) or 'overtime'.
-// The column is added automatically the first time it is needed so existing databases keep working.
-function ensureLateRequestTypeColumn($conn) {
-    static $ok = null;
-    if ($ok !== null) return $ok;
-    $exists = function() use ($conn) {
-        $r = $conn->query("SHOW COLUMNS FROM late_requests LIKE 'request_type'");
-        return $r && $r->num_rows > 0;
-    };
-    try {
-        if ($exists()) return $ok = true;
-        $conn->query("ALTER TABLE late_requests ADD COLUMN request_type ENUM('late','overtime') NOT NULL DEFAULT 'late' AFTER type");
-    } catch (\Throwable $e) {
-        // another request may have added it first - fall through to the re-check
-    }
-    try { return $ok = $exists(); } catch (\Throwable $e) { return $ok = false; }
-}
-
 /* ════════════════════════════════════════════════════════════════════
    NEW (student schedule): attendance follows each student's own training
    schedule (Day / Evening Schedule set on AccomForm.php and changed by the
@@ -391,7 +372,7 @@ if (!function_exists('ojtend_is_after')) {
 }
 
 /* ════════════════════════════════════════════════════════════════════
-   NEW (late request legitimacy check): evidence the SERVER records for every late / overtime request
+   NEW (late request legitimacy check): evidence the SERVER records for every late request
    (the student's browser cannot change it) so the supervisor can judge whether it is genuine:
      late_requests.submit_ip / submit_ua / photo_hash / photo_valid, and
      attendance_device_log — the device, network and photo fingerprint of every regular sign-in and late
@@ -766,8 +747,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET' && isset($_GET['action']) && $_GET['act
     }
     $payload['late_request_windows'] = $lrWindows;
 
-    $lrTypeCol = ensureLateRequestTypeColumn($conn) ? 'request_type' : "'late' AS request_type";
-    $lrStmt = $conn->prepare("SELECT type, status, {$lrTypeCol} FROM late_requests WHERE student_id=? AND company_id=? AND date=?");
+    $lrStmt = $conn->prepare("SELECT type, status FROM late_requests WHERE student_id=? AND company_id=? AND date=?");
     $lrStmt->bind_param("iis", $user_id, $company_id, $date);
     $lrStmt->execute();
     $lrRows = $lrStmt->get_result()->fetch_all(MYSQLI_ASSOC);
@@ -976,25 +956,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
     $type   = $_POST['type']   ?? '';
     $reason = trim($_POST['reason'] ?? '');
     $image  = $_POST['image']  ?? '';
-    $requestType = $_POST['request_type'] ?? 'late';
+    // Overtime requests were removed — this is always a late request (an old client that still sends 'overtime' is told so)
+    $requestType = 'late';
+    if (($_POST['request_type'] ?? 'late') === 'overtime') {
+        echo json_encode(['success' => false, 'message' => 'Overtime requests are no longer available. Please submit a late request instead.']);
+        exit;
+    }
 
     $valid_types = ['am_time_in','am_time_out','pm_time_in','pm_time_out'];
     if (!in_array($type, $valid_types) || !$reason) {
         echo json_encode(['success' => false, 'message' => 'Invalid request. Provide type and reason.']);
-        exit;
-    }
-    if (!in_array($requestType, ['late','overtime'], true)) {
-        echo json_encode(['success' => false, 'message' => 'Invalid request type.']);
-        exit;
-    }
-    // Overtime only makes sense for a sign out (it is counted from that duty's sign in up to the submission time)
-    if ($requestType === 'overtime' && !in_array($type, ['am_time_out','pm_time_out'], true)) {
-        echo json_encode(['success' => false, 'message' => 'Overtime can only be requested for a Sign Out entry.']);
-        exit;
-    }
-    $hasTypeColumn = ensureLateRequestTypeColumn($conn);
-    if ($requestType === 'overtime' && !$hasTypeColumn) {
-        echo json_encode(['success' => false, 'message' => 'Overtime requests are temporarily unavailable. Please contact your administrator.']);
         exit;
     }
 
@@ -1055,21 +1026,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
         exit;
     }
 
-    // Overtime is counted from this duty's Sign In, so a recorded Sign In is required.
-    if ($requestType === 'overtime') {
-        $inCol  = ($type === 'am_time_out') ? 'am_time_in' : 'pm_time_in';
-        $inStmt = $conn->prepare("SELECT {$inCol} AS val FROM attendance_logs WHERE user_id=? AND date=? AND company_id=?");
-        $inStmt->bind_param("isi", $user_id, $date, $company_id);
-        $inStmt->execute();
-        $inRow = $inStmt->get_result()->fetch_assoc();
-        $inVal = $inRow['val'] ?? null;
-        if ($inVal === null || $inVal === '' || $inVal === 'missed') {
-            $periodLbl = ($type === 'am_time_out') ? 'AM' : 'PM';
-            echo json_encode(['success' => false, 'message' => "Overtime needs a recorded {$periodLbl} Sign In. Submit a regular late request instead."]);
-            exit;
-        }
-    }
-
     $image_data = null;
     if ($image) {
         $image = preg_replace('/^data:image\/[a-z]+;base64,/i', '', $image);
@@ -1097,21 +1053,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
     $statusPending = 'pending';
     $null = null;
     try {
-        if ($hasTypeColumn) {
-            $ins = $conn->prepare(
-                "INSERT INTO late_requests (student_id, company_id, date, type, request_type, reason, photo, status, created_at)
-                VALUES (?,?,?,?,?,?,?,?,NOW())"
-            );
-            $ins->bind_param("iissssbs", $user_id, $company_id, $date, $type, $requestType, $reason, $null, $statusPending);
-            if ($image_data) $ins->send_long_data(6, $image_data);
-        } else {
-            $ins = $conn->prepare(
-                "INSERT INTO late_requests (student_id, company_id, date, type, reason, photo, status, created_at)
-                VALUES (?,?,?,?,?,?,?,NOW())"
-            );
-            $ins->bind_param("iisssbs", $user_id, $company_id, $date, $type, $reason, $null, $statusPending);
-            if ($image_data) $ins->send_long_data(5, $image_data);
-        }
+        $ins = $conn->prepare(
+            "INSERT INTO late_requests (student_id, company_id, date, type, reason, photo, status, created_at)
+            VALUES (?,?,?,?,?,?,?,NOW())"
+        );
+        $ins->bind_param("iisssbs", $user_id, $company_id, $date, $type, $reason, $null, $statusPending);
+        if ($image_data) $ins->send_long_data(5, $image_data);
         $ins->execute();
     } catch (\Throwable $e) {
         // 1062 = duplicate (student double-clicked / submitted from two tabs)
@@ -1134,10 +1081,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
         }
     } catch (\Throwable $e) {}
 
-    $okMsg = $requestType === 'overtime'
-        ? 'Overtime request submitted. Waiting for company approval.'
-        : 'Late request submitted. Waiting for company approval.';
-    echo json_encode(['success' => true, 'message' => $okMsg, 'request_type' => $requestType]);
+    echo json_encode(['success' => true, 'message' => 'Late request submitted. Waiting for company approval.']);
     exit;
 }
 
@@ -1336,15 +1280,12 @@ $am_out_missed = ($attendance['am_time_out'] ?? '') === 'missed';
 $pm_in_missed  = ($attendance['pm_time_in']  ?? '') === 'missed';
 $pm_out_missed = ($attendance['pm_time_out'] ?? '') === 'missed';
 
-$lrTypeColInit = ensureLateRequestTypeColumn($conn) ? 'request_type' : "'late' AS request_type";
-$lrStmt = $conn->prepare("SELECT type, status, {$lrTypeColInit} FROM late_requests WHERE student_id=? AND company_id=? AND date=?");
+$lrStmt = $conn->prepare("SELECT type, status FROM late_requests WHERE student_id=? AND company_id=? AND date=?");
 $lrStmt->bind_param("iis", $user_id, $company_id, $date);
 $lrStmt->execute();
 $pending_requests = [];
-$pending_request_types = [];
 foreach ($lrStmt->get_result()->fetch_all(MYSQLI_ASSOC) as $lr) {
     $pending_requests[$lr['type']] = $lr['status'];
-    $pending_request_types[$lr['type']] = $lr['request_type'];
 }
 
 $lrWindowStatuses = [];
@@ -1490,7 +1431,7 @@ function missedNoticeHtml($type, $pending_requests, $lrWindowStatuses) {
     $status    = $pending_requests[$type] ?? null;
     $winStatus = $lrWindowStatuses[$type] ?? 'permanently_missed';
 
-    $reqKind = (($GLOBALS['pending_request_types'][$type] ?? 'late') === 'overtime') ? 'Overtime request' : 'Request';
+    $reqKind = 'Request';
     if ($status === 'pending') {
         $actionHtml = '<div class="late-req-pending"><i class="fas fa-hourglass-half"></i> ' . $reqKind . ' pending — waiting for company approval</div>';
     } elseif ($status === 'approved') {
@@ -3349,21 +3290,6 @@ body { background: var(--grid-bg); color: #2d3748; font-family: 'Segoe UI', Taho
         min-height: max(220px, min(calc(100vh - 340px), 400px));
     }
 }
-/* Request type picker (Late Request / Overtime) */
-#lateReqBox .lr-reqtype-title { margin-top: 8px; }
-#lateReqBox .lr-reqtype-options { display: flex; gap: 6px; }
-#lateReqBox .lr-reqtype-opt {
-    flex: 1 1 0; display: flex; align-items: center; justify-content: center; gap: 6px;
-    padding: 5px 8px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.3px;
-    color: var(--grid-navy); background: #fff; border: 1px solid var(--grid-border); cursor: pointer;
-    user-select: none; transition: background .15s, color .15s, border-color .15s;
-}
-#lateReqBox .lr-reqtype-opt input { position: absolute; opacity: 0; pointer-events: none; }
-#lateReqBox .lr-reqtype-opt:hover { background: #f3f4f7; }
-#lateReqBox .lr-reqtype-opt.selected { background: var(--grid-navy); color: #fff; border-color: var(--grid-navy); }
-#lateReqBox .lr-reqtype-opt:focus-within { outline: 2px solid var(--grid-navy); outline-offset: 2px; }
-#lateReqBox .lr-reqtype-opt.disabled { opacity: .5; cursor: not-allowed; }
-#lateReqBox #lr-reqtype-desc { margin-top: 3px; }
     </style>
 </head>
 <body>
@@ -3392,20 +3318,6 @@ body { background: var(--grid-bg); color: #2d3748; font-family: 'Segoe UI', Taho
                 <div class="lr-group lr-type-group">
                     <div class="lr-type-label">Entry Type</div>
                     <div class="lr-type-val" id="lr-type-display">—</div>
-                    <div id="lr-reqtype-wrap" style="display:none;">
-                        <div class="lr-type-label lr-reqtype-title">Request Type</div>
-                        <div class="lr-reqtype-options" role="radiogroup" aria-label="Request type">
-                            <label class="lr-reqtype-opt selected" id="lr-opt-late">
-                                <input type="radio" name="lr-request-type" value="late" checked>
-                                <span>Late Request</span>
-                            </label>
-                            <label class="lr-reqtype-opt" id="lr-opt-overtime">
-                                <input type="radio" name="lr-request-type" value="overtime">
-                                <span>Overtime</span>
-                            </label>
-                        </div>
-                        <div class="lr-help" id="lr-reqtype-desc"></div>
-                    </div>
                 </div>
                 <div class="lr-group lr-deadline-group">
                     <div class="lr-type-label">Deadline</div>
@@ -3790,7 +3702,6 @@ function render_log_html($att, $pending_requests = [], $am_skipped = false, $pm_
 const ACTIVE_STEP_INIT   = <?= json_encode($active_step) ?>;
 const IS_WEEKEND         = <?= $is_weekend ? 'true' : 'false' ?>;
 const PENDING_REQUESTS   = <?= json_encode($pending_requests) ?>;
-const PENDING_REQUEST_TYPES = <?= json_encode($pending_request_types) ?>;
 const ATT_BADGE_INFO     = <?= json_encode($attendance_badge_info) ?>;
 const ANB_IS_ALL_DONE    = <?= json_encode((bool)$_att_all_done) ?>;
 const TODAY_SETTINGS     = <?= json_encode($todaySettings ? [
@@ -4174,7 +4085,7 @@ function buildMissedNoticeHtml(type, winStatusOverride) {
     const status    = PENDING_REQUESTS[type] || null;
     const winStatus = (winStatusOverride !== undefined) ? winStatusOverride : getLateRequestWindowStatus(type);
     let actionHtml  = '';
-    const reqKind = (PENDING_REQUEST_TYPES[type] === 'overtime') ? 'Overtime request' : 'Request';
+    const reqKind = 'Request';
     if (status === 'pending') {
         actionHtml = `<div class="late-req-pending"> ${reqKind} pending — waiting for company approval</div>`;
     } else if (status === 'approved') {
@@ -4208,7 +4119,6 @@ function refreshLog() {
         if (data.token) document.getElementById('csrf-token').value = data.token;
         const att = data.attendance;
         const lr  = data.late_requests || [];
-        lr.forEach(r => { PENDING_REQUEST_TYPES[r.type] = r.request_type || 'late'; });
 
         if (att) {
             const rawMap = {
@@ -4440,48 +4350,6 @@ function updateLogItemPending(type) {
     timeEl.textContent = 'MISSED (pending)';
 }
 
-/* ══ LATE REQUEST / OVERTIME TYPE PICKER ══ */
-function getLrRequestType() {
-    const c = document.querySelector('input[name="lr-request-type"]:checked');
-    return c ? c.value : 'late';
-}
-function updateLrRequestTypeUi() {
-    const type = lateReqType;
-    const wrap = document.getElementById('lr-reqtype-wrap');
-    if (!type || !wrap || wrap.style.display === 'none') return;
-    const kind   = getLrRequestType();
-    const period = type.startsWith('am') ? 'AM' : 'PM';
-    document.getElementById('lr-opt-late').classList.toggle('selected', kind === 'late');
-    document.getElementById('lr-opt-overtime').classList.toggle('selected', kind === 'overtime');
-    const sched = TODAY_SETTINGS ? TODAY_SETTINGS[type.replace('_time_out', '') + '_time_out_start'] : null;
-    const descEl = document.getElementById('lr-reqtype-desc');
-    descEl.textContent = (kind === 'overtime')
-        ? `Counts ${period} Sign In to the time you submit.`
-        : `Counts ${period} Sign In to scheduled Sign Out` + (sched ? ` (${fmt12(sched)}).` : '.');
-    document.getElementById('lr-reason').placeholder = (kind === 'overtime')
-        ? 'Describe the work you did beyond your scheduled sign-out time…'
-        : 'Describe what happened and why you were unable to sign in/out on time…';
-}
-function setupLrRequestType(type) {
-    const wrap = document.getElementById('lr-reqtype-wrap');
-    if (!wrap) return;
-    const isOut = (type === 'am_time_out' || type === 'pm_time_out');
-    const inEl  = document.getElementById('track-' + (type === 'am_time_out' ? 'am_time_in' : 'pm_time_in'));
-    const hasSignIn = !!(inEl && inEl.classList.contains('done-step'));
-    document.getElementById('lr-reason').placeholder = 'Describe what happened and why you were unable to sign in/out on time…';
-    // Reset to the original behaviour (Late Request) every time the modal opens
-    const lateRadio = document.querySelector('input[name="lr-request-type"][value="late"]');
-    const otRadio   = document.querySelector('input[name="lr-request-type"][value="overtime"]');
-    lateRadio.checked = true;
-    if (!isOut) { wrap.style.display = 'none'; return; } // sign-in entries only have the late request
-    wrap.style.display = 'block';
-    otRadio.disabled = !hasSignIn;
-    document.getElementById('lr-opt-overtime').classList.toggle('disabled', !hasSignIn);
-    document.getElementById('lr-opt-overtime').title = hasSignIn ? '' : 'Overtime needs a recorded ' + (type.startsWith('am') ? 'AM' : 'PM') + ' Sign In.';
-    updateLrRequestTypeUi();
-}
-document.querySelectorAll('input[name="lr-request-type"]').forEach(r => r.addEventListener('change', updateLrRequestTypeUi));
-
 /* ══ LATE REQUEST MODAL ══ */
 function openLateReqModal(type) {
     if (isTypeSkipped(type)) {
@@ -4501,7 +4369,7 @@ function openLateReqModal(type) {
     lateReqType = type;
     document.getElementById('lr-type-display').textContent = TYPE_LABELS[type] || type;
     document.getElementById('lr-reason').value = '';
-    setupLrRequestType(type);
+    document.getElementById('lr-reason').placeholder = 'Describe what happened and why you were unable to sign in/out on time…';
 
     const warnEl = document.getElementById('lr-window-warn');
     const dlEl   = document.getElementById('lr-deadline-time');
@@ -4565,7 +4433,6 @@ function submitLateRequest() {
     }
     const reason = document.getElementById('lr-reason').value.trim();
     if (!reason) { showToast('Please enter a reason.', 'warning'); return; }
-    const requestType = getLrRequestType();
 
     const canvas  = document.getElementById('canvas');
     const lrVid   = document.getElementById('lr-video-preview');
@@ -4582,7 +4449,6 @@ function submitLateRequest() {
     const fd = new FormData();
     fd.append('action', 'submit_late_request');
     fd.append('type',   lateReqType);
-    fd.append('request_type', requestType);
     fd.append('reason', reason);
     fd.append('image',  imageData);
 
@@ -4599,11 +4465,8 @@ function submitLateRequest() {
         closeLateReqModal();
 
         if (data.success) {
-            showToast(requestType === 'overtime'
-                ? ' Overtime request submitted. Awaiting approval.'
-                : ' Late request submitted. Awaiting approval.', 'success');
+            showToast(' Late request submitted. Awaiting approval.', 'success');
             PENDING_REQUESTS[submittedType] = 'pending';
-            PENDING_REQUEST_TYPES[submittedType] = requestType;
             markStepMissed(submittedType, false, true);
             updateLogItemPending(submittedType);
             refreshLog();

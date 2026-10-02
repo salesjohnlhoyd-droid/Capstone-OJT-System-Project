@@ -568,7 +568,7 @@ if (!function_exists('attm_live_signature')) {
 }
 
 /* ════════════════════════════════════════════════════════════════════
-   NEW (late request legitimacy check): evidence the SERVER records for every late / overtime request
+   NEW (late request legitimacy check): evidence the SERVER records for every late request
    (the student's browser cannot change it) so the supervisor can judge whether it is genuine:
      late_requests.submit_ip / submit_ua / photo_hash / photo_valid, and
      attendance_device_log — the device, network and photo fingerprint of every regular sign-in and late
@@ -653,7 +653,7 @@ if (!function_exists('attm_lr_mask_ip')) {
     }
 }
 if (!function_exists('attm_lr_evidence')) {
-    /* Legitimacy check of ONE late / overtime request. Only evidence the server recorded or can verify is used:
+    /* Legitimacy check of ONE late request. Only evidence the server recorded or can verify is used:
          photo (readable, not re-used), device + network compared with the student's regular sign-ins,
          the rest of that day's attendance, how long after the window it was sent, how often the student asks,
          and whether the same reason was already used. Returns
@@ -670,7 +670,7 @@ if (!function_exists('attm_lr_evidence')) {
             $sid  = (int)($r['student_id'] ?? 0);
             $date = (string)($r['date'] ?? '');
             $type = (string)($r['type'] ?? '');
-            $kind = (($r['request_type'] ?? 'late') === 'overtime') ? 'overtime' : 'late';
+            $kind = 'late'; // overtime requests were removed (old overtime rows are handled as late requests)
             $labels = ['am_time_in' => 'AM Sign In', 'am_time_out' => 'AM Sign Out', 'pm_time_in' => 'PM Sign In', 'pm_time_out' => 'PM Sign Out'];
             $slotLbl = $labels[$type] ?? $type;
 
@@ -760,10 +760,8 @@ if (!function_exists('attm_lr_evidence')) {
                 }
             }
 
-            // 4b) Late request or overtime? — what the request really means in time, so the supervisor can tell them apart.
-            //     Late     = the Sign Out is credited at the SCHEDULED sign-out time (never later than the submission).
-            //     Overtime = the Sign Out is credited at the moment the request was SENT, so it only makes sense
-            //                when that moment is after the scheduled sign-out.
+            // 4b) What allowing this late request records: the Sign Out is credited at the SCHEDULED sign-out time
+            //     (never later than the moment the request was sent, never before the Sign In).
             if (in_array($type, ['am_time_out', 'pm_time_out'], true) && $set) {
                 $per = ($type === 'am_time_out') ? 'am' : 'pm';
                 $fmt = function($ts) { return $ts ? date('g:i A', $ts) : null; };
@@ -778,25 +776,15 @@ if (!function_exists('attm_lr_evidence')) {
                 $schedTs = $toTs($set[$per . '_time_out_start'] ?? null);
                 $sentTs2 = strtotime((string)($r['created_at'] ?? '')) ?: null;
                 $detail = [
-                    'kind' => $kind, 'period' => strtoupper($per),
+                    'period' => strtoupper($per),
                     'in' => $fmt($inTs), 'sched_out' => $fmt($schedTs), 'sent' => $fmt($sentTs2),
-                    'late_credit' => null, 'ot_credit' => null, 'extra_min' => null,
+                    'late_credit' => null,
                 ];
                 if ($inTs && $schedTs && $sentTs2) {
                     $lateOut = min($schedTs, $sentTs2); if ($lateOut < $inTs) $lateOut = $inTs;
                     $detail['late_credit'] = $dur($lateOut - $inTs);
-                    $detail['ot_credit']   = $dur(max($sentTs2, $inTs) - $inTs);
-                    $extra = (int)round(($sentTs2 - $schedTs) / 60);
-                    $detail['extra_min'] = $extra;
-                    if ($kind === 'overtime') {
-                        if ($extra <= 0) $add('review', 'Marked as OVERTIME, but it was sent before the scheduled ' . strtoupper($per) . ' sign-out (' . $detail['sched_out'] . ') — there is no time beyond the schedule to count. A late request fits better.');
-                        else             $add('info',   'Overtime: sent ' . ($extra >= 60 ? floor($extra / 60) . ' h ' . ($extra % 60) . ' min' : $extra . ' min') . ' after the scheduled sign-out (' . $detail['sched_out'] . '). Allowing it credits ' . $detail['ot_credit'] . ' (sign-in to ' . $detail['sent'] . ').');
-                        if (($sentTs2 - $inTs) / 3600 > 10) $add('review', 'The overtime would make this duty longer than 10 hours.');
-                    } else {
-                        $add('info', 'Late request: allowing it credits only ' . $detail['late_credit'] . ' (sign-in to the scheduled sign-out, ' . $detail['sched_out'] . ').');
-                        if ($extra >= 60) $add('review', 'Marked as a LATE request, but it was sent ' . floor($extra / 60) . ' h ' . ($extra % 60) . ' min after the scheduled sign-out. If the student really kept working until ' . $detail['sent'] . ', it should be an overtime request instead.');
-                    }
-                } elseif ($kind === 'late' && !$inTs) {
+                    $add('info', 'Allowing it credits ' . $detail['late_credit'] . ' (sign-in to the scheduled sign-out, ' . $detail['sched_out'] . ').');
+                } elseif (!$inTs) {
                     $detail['late_credit'] = '0h 0m';
                 }
             }
@@ -806,8 +794,8 @@ if (!function_exists('attm_lr_evidence')) {
             $q->bind_param("ii", $sid, $id); $q->execute();
             $f = $q->get_result()->fetch_assoc(); $q->close();
             $n = (int)($f['n'] ?? 0); $rej = (int)($f['rej'] ?? 0);
-            if ($n >= 5)      $add('risk',   $n . ' other late / overtime requests from this student in the last 30 days.');
-            elseif ($n >= 3)  $add('review', $n . ' other late / overtime requests from this student in the last 30 days.');
+            if ($n >= 5)      $add('risk',   $n . ' other late requests from this student in the last 30 days.');
+            elseif ($n >= 3)  $add('review', $n . ' other late requests from this student in the last 30 days.');
             else              $add('ok',     $n === 0 ? 'No other late requests from this student in the last 30 days.' : $n . ' other late request' . ($n === 1 ? '' : 's') . ' from this student in the last 30 days.');
             if ($rej >= 2)    $add('review', $rej . ' of this student\'s recent requests were rejected.');
 
@@ -1388,26 +1376,6 @@ function timeToMins($time) {
     return (int)$parts[0] * 60 + (int)$parts[1];
 }
 
-// late_requests.request_type: 'late' (original behaviour) or 'overtime'. The column is added
-// automatically the first time it is needed so existing databases keep working.
-if (!function_exists('ensureLateRequestTypeColumn')) {
-    function ensureLateRequestTypeColumn($conn) {
-        static $ok = null;
-        if ($ok !== null) return $ok;
-        $exists = function() use ($conn) {
-            $r = $conn->query("SHOW COLUMNS FROM late_requests LIKE 'request_type'");
-            return $r && $r->num_rows > 0;
-        };
-        try {
-            if ($exists()) return $ok = true;
-            $conn->query("ALTER TABLE late_requests ADD COLUMN request_type ENUM('late','overtime') NOT NULL DEFAULT 'late' AFTER type");
-        } catch (\Throwable $e) {
-            // another request may have added it first - fall through to the re-check
-        }
-        try { return $ok = $exists(); } catch (\Throwable $e) { return $ok = false; }
-    }
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // AJAX HANDLERS
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1449,7 +1417,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_SERVER['HTTP_X_REQUESTED_WI
         [$time_col, $photo_col] = $col_map[$type];
 
         $approved_time = $lr_date . ' ' . date('H:i:s', strtotime($lr['created_at']));
-        $requestType   = (($lr['request_type'] ?? 'late') === 'overtime') ? 'overtime' : 'late';
 
         $setting = $conn->prepare("SELECT * FROM attendance_settings WHERE company_id=? AND date=? LIMIT 1");
         $setting->bind_param("is", $company_id, $lr_date);
@@ -1468,12 +1435,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_SERVER['HTTP_X_REQUESTED_WI
         $chk->execute();
         $existing_log = $chk->get_result()->fetch_assoc();
 
-        /* ── Late request vs Overtime (sign-out entries only) ──
+        /* ── Late request (sign-out entries only) ──
            Duty time everywhere in the system is (sign out − sign in), so the time recorded for the
-           sign out is what decides the hours credited:
-             • Overtime     → counted from the duty Sign In up to the moment the request was submitted.
-             • Late request → counts only that duty (AM Sign In → AM Sign Out): the Sign Out is credited
-                              at the scheduled sign-out time instead of the (later) submission time. */
+           sign out is what decides the hours credited: only that duty (AM Sign In → AM Sign Out) is counted —
+           the Sign Out is credited at the scheduled sign-out time instead of the (later) submission time. */
         if (in_array($type, ['am_time_out','pm_time_out'], true)) {
             $period = ($type === 'am_time_out') ? 'am' : 'pm';
             $toTs = function($v) use ($lr_date) {
@@ -1485,20 +1450,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_SERVER['HTTP_X_REQUESTED_WI
             $inTs      = $toTs($existing_log[$period . '_time_in'] ?? null);
             $createdTs = strtotime($approved_time);
 
-            if ($requestType === 'overtime') {
-                if ($inTs === null) {
-                    echo json_encode(['success'=>false,'message'=>'Cannot approve overtime: the student has no recorded ' . strtoupper($period) . ' Sign In to count it from. Reject it or ask the student to resubmit as a late request.']);
-                    exit;
-                }
-                if ($createdTs !== false && $createdTs < $inTs) $approved_time = date('Y-m-d H:i:s', $inTs);
-            } else {
-                $schedOut = $settingRow[$period . '_time_out_start'] ?? null;
-                $schedTs  = $schedOut ? $toTs($schedOut) : null;
-                if ($schedTs !== null) {
-                    if ($createdTs !== false && $schedTs > $createdTs) $schedTs = $createdTs;   // never later than the submission
-                    if ($inTs !== null && $schedTs < $inTs)            $schedTs = $inTs;         // never before the sign in (0 min)
-                    $approved_time = date('Y-m-d H:i:s', $schedTs);
-                }
+            $schedOut = $settingRow[$period . '_time_out_start'] ?? null;
+            $schedTs  = $schedOut ? $toTs($schedOut) : null;
+            if ($schedTs !== null) {
+                if ($createdTs !== false && $schedTs > $createdTs) $schedTs = $createdTs;   // never later than the submission
+                if ($inTs !== null && $schedTs < $inTs)            $schedTs = $inTs;         // never before the sign in (0 min)
+                $approved_time = date('Y-m-d H:i:s', $schedTs);
             }
         }
 
@@ -1546,11 +1503,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_SERVER['HTTP_X_REQUESTED_WI
         $npc->execute();
         $newPendingCount = $npc->get_result()->fetch_assoc()['cnt'] ?? 0;
 
-        $approvedLabel = ($requestType === 'overtime') ? 'overtime' : 'time';
         echo json_encode([
             'success'       => true,
-            'message'       => "Approved. {$sName} {$approvedLabel} and photo updated recorded.",
-            'request_type'  => $requestType,
+            'message'       => "Approved. {$sName} time and photo updated recorded.",
             'recorded_time' => $approved_time,
             'duty_info'     => $dutyInfo,
             'req_id'        => $req_id,
@@ -1738,7 +1693,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET'
 
     header('Content-Type: application/json');
 
-    $lrTypeSel = ensureLateRequestTypeColumn($conn) ? 'lr.request_type' : "'late' AS request_type";
     // NEW (late request legitimacy check): server-recorded evidence; photos sent before this check existed get their fingerprint here
     $evOk  = ensureLateRequestEvidence($conn);
     $evSel = $evOk ? ', lr.submit_ip, lr.submit_ua, lr.photo_hash, lr.photo_valid' : '';
@@ -1751,7 +1705,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET'
             lr.student_id,
             lr.date,
             lr.type,
-            {$lrTypeSel},
             lr.reason,
             lr.status,
             lr.created_at,
@@ -1787,7 +1740,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET'
     $rows = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
 
     foreach ($rows as &$row) {
-        $row['request_type'] = (($row['request_type'] ?? 'late') === 'overtime') ? 'overtime' : 'late';
         $row['has_photo'] = (bool)$row['has_photo'];
         $row['photo_url'] = "late_request_photo.php?id={$row['id']}&t=" . time();
         // NEW (late request legitimacy check): evidence for the requests still waiting for a decision
@@ -2899,9 +2851,6 @@ tr.day-off-row td { background:#ede7f6; color:#512da8; font-style:italic; }
 .req-type-badge.am_time_out { background:#c62828; }
 .req-type-badge.pm_time_in  { background:#1565c0; }
 .req-type-badge.pm_time_out { background:#2e7d32; }
-.req-kind-badge { display:inline-block; padding:3px 10px; border-radius:20px; font-size:11px; font-weight:700; color:#fff; }
-.req-kind-badge.late { background:#5A6272; }
-.req-kind-badge.overtime { background:#6a1b9a; }
 .req-kind-note { margin-top:8px; font-size:12px; color:#5A6272; line-height:1.5; }
 .req-kind-note strong { color:#1B2A4A; }
 .req-evidence { border:1px solid #e0e4ef; border-radius:8px; margin-bottom:10px; overflow:hidden; font-size:12.5px; }
@@ -4604,14 +4553,11 @@ let _lastKnownPendingIds=new Set(<?php
     $id_arr=[];while($idr=$init_ids->fetch_assoc())$id_arr[]=$idr['id'];echo json_encode($id_arr);
 ?>);
 const TYPE_LABELS_CO={am_time_in:'AM Sign In',am_time_out:'AM Sign Out',pm_time_in:'PM Sign In',pm_time_out:'PM Sign Out'};
-const KIND_LABELS_CO={late:'Late Request',overtime:'Overtime'};
 function reqKindNote(req){
     const isOut=(req.type==='am_time_out'||req.type==='pm_time_out');
     if(!isOut) return '';
     const P=req.type==='am_time_out'?'AM':'PM';
-    return req.request_type==='overtime'
-        ? `<div class="req-kind-note"><strong>Overtime:</strong> ${P} duty is counted from the student's ${P} Sign In up to the time this request was submitted.</div>`
-        : `<div class="req-kind-note"><strong>Late Request:</strong> only the ${P} duty is counted &mdash; ${P} Sign In to the scheduled ${P} Sign Out.</div>`;
+    return `<div class="req-kind-note"><strong>Late Request:</strong> only the ${P} duty is counted &mdash; ${P} Sign In to the scheduled ${P} Sign Out.</div>`;
 }
 
 function openLateInbox(){document.getElementById('lateInboxOverlay').classList.add('open');if(!liLoaded)fetchLateRequests();}
@@ -4638,9 +4584,8 @@ function fetchLateRequests(isPolling){
                 const req=newRequests.find(r=>r.id===brandNew[0]);
                 const studentName=req?(req.first_name+(req.middle_name?' '+req.middle_name:'')+' '+req.last_name):'A student';
                 const typeLabel=req?(TYPE_LABELS_CO[req.type]||req.type):'';
-                const kindWord=(req&&req.request_type==='overtime')?'an overtime request':'a late request';
-                sendSystemNotification(req&&req.request_type==='overtime'?'New Overtime Request':'New Late Request',`${studentName} submitted ${kindWord} for ${typeLabel}.`,()=>{window.focus();openLateInbox();switchTab('pending');});
-                showToast(req&&req.request_type==='overtime'?`New overtime request from ${studentName}`:`New late request from ${studentName}`,'info');
+                sendSystemNotification('New Late Request',`${studentName} submitted a late request for ${typeLabel}.`,()=>{window.focus();openLateInbox();switchTab('pending');});
+                showToast(`New late request from ${studentName}`,'info');
             }
             newPendingIds.forEach(id=>_lastKnownPendingIds.add(id));
             const currentPendingSet=new Set(newPendingIds);
@@ -4660,8 +4605,7 @@ function renderLiBody(){
     if(!filtered.length){body.innerHTML=`<div class="li-empty">No ${liTab} requests.</div>`;return;}
     let html='';
     filtered.forEach(req=>{
-        const kind=(req.request_type==='overtime')?'overtime':'late';
-        const typeBadge=`<span class="req-type-badge ${req.type}">${TYPE_LABELS_CO[req.type]||req.type}</span><span class="req-kind-badge ${kind}">${KIND_LABELS_CO[kind]}</span>`;
+        const typeBadge=`<span class="req-type-badge ${req.type}">${TYPE_LABELS_CO[req.type]||req.type}</span>`;
         const dateLabel=new Date(req.date+'T00:00:00').toLocaleDateString('en-US',{weekday:'long',year:'numeric',month:'long',day:'numeric'});
         const submitted=new Date(req.created_at).toLocaleString('en-US',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});
         let statusSection='';
@@ -4677,7 +4621,7 @@ function renderLiBody(){
             dutyHtml=`<div class="req-duty-info has-late"><div class="req-duty-stat"><strong>AM In</strong>${fmt(req.am_time_in)}</div><div class="req-duty-stat"><strong>AM Out</strong>${fmt(req.am_time_out)}</div><div class="req-duty-stat"><strong>PM In</strong>${fmt(req.pm_time_in)}</div><div class="req-duty-stat"><strong>PM Out</strong>${fmt(req.pm_time_out)}</div></div>`;
         }
         let evidenceHtml='';
-        if(req.evidence){const ev=req.evidence,ico={ok:'fa-circle-check',info:'fa-circle-info',review:'fa-triangle-exclamation',risk:'fa-circle-xmark'};evidenceHtml=`<div class="req-evidence ${escH(ev.level)}"><div class="req-evidence-head"><i class="fas ${ev.level==='ok'?'fa-shield-halved':(ev.level==='review'?'fa-triangle-exclamation':'fa-circle-exclamation')}"></i>Legitimacy check — ${escH(ev.label)}</div><ul class="req-evidence-list">${(ev.signals||[]).map(sg=>`<li class="${escH(sg.level)}"><i class="fas ${ico[sg.level]||'fa-circle-info'}"></i><span>${escH(sg.text)}</span></li>`).join('')}</ul>${ev.detail?`<div class="req-evidence-detail"><div><span>This is a</span><strong>${ev.detail.kind==='overtime'?'OVERTIME request':'LATE request'}</strong></div><div><span>${ev.detail.period} Sign In recorded</span><strong>${ev.detail.in?escH(ev.detail.in):'none'}</strong></div><div><span>Scheduled ${ev.detail.period} Sign Out</span><strong>${ev.detail.sched_out?escH(ev.detail.sched_out):'—'}</strong></div><div><span>Request sent at</span><strong>${ev.detail.sent?escH(ev.detail.sent):'—'}</strong></div><div><span>Credited if allowed as late</span><strong>${ev.detail.late_credit?escH(ev.detail.late_credit):'—'}</strong></div><div><span>Credited if allowed as overtime</span><strong>${ev.detail.ot_credit?escH(ev.detail.ot_credit):'—'}</strong></div></div>`:''}${ev.device?`<div class="req-evidence-device">Sent from: ${escH(ev.device)}</div>`:''}</div>`;}
+        if(req.evidence){const ev=req.evidence,ico={ok:'fa-circle-check',info:'fa-circle-info',review:'fa-triangle-exclamation',risk:'fa-circle-xmark'};evidenceHtml=`<div class="req-evidence ${escH(ev.level)}"><div class="req-evidence-head"><i class="fas ${ev.level==='ok'?'fa-shield-halved':(ev.level==='review'?'fa-triangle-exclamation':'fa-circle-exclamation')}"></i>Legitimacy check — ${escH(ev.label)}</div><ul class="req-evidence-list">${(ev.signals||[]).map(sg=>`<li class="${escH(sg.level)}"><i class="fas ${ico[sg.level]||'fa-circle-info'}"></i><span>${escH(sg.text)}</span></li>`).join('')}</ul>${ev.detail?`<div class="req-evidence-detail"><div><span>${ev.detail.period} Sign In recorded</span><strong>${ev.detail.in?escH(ev.detail.in):'none'}</strong></div><div><span>Scheduled ${ev.detail.period} Sign Out</span><strong>${ev.detail.sched_out?escH(ev.detail.sched_out):'—'}</strong></div><div><span>Request sent at</span><strong>${ev.detail.sent?escH(ev.detail.sent):'—'}</strong></div><div><span>Credited if allowed</span><strong>${ev.detail.late_credit?escH(ev.detail.late_credit):'—'}</strong></div></div>`:''}${ev.device?`<div class="req-evidence-device">Sent from: ${escH(ev.device)}</div>`:''}</div>`;}
         html+=`<div class="req-card" id="req-card-${req.id}"><div class="req-card-top"><div class="req-student-info"><div class="req-student-name">${escH(req.first_name)}${req.middle_name?' '+escH(req.middle_name):''} ${escH(req.last_name)}</div><div class="req-meta">${typeBadge}<span>${escH(dateLabel)}</span><span>Submitted ${escH(submitted)}</span></div>${reqKindNote(req)}</div></div>${photoHtml}<div class="req-reason-box"><div class="req-reason-label">Reason</div>${escH(req.reason)}</div>${evidenceHtml}${dutyHtml}${statusSection}</div>`;
     });
     body.innerHTML=html;
@@ -4709,10 +4653,9 @@ function openPhotoLightbox(reqId,studentName){
 function approveRequest(reqId,btn){
     const req=liRequests.find(r=>r.id===reqId);
     const studentName=req?(req.first_name+(req.middle_name?' '+req.middle_name:'')+' '+req.last_name):null;
-    const isOT=!!(req&&req.request_type==='overtime');
     const isRisk=!!(req&&req.evidence&&req.evidence.level==='risk');
-    const baseMsg=isOT?"Overtime will be counted from the student's Sign In up to the time this request was submitted.":"The student's time and photo will be recorded.";
-    showCustomConfirm({title:isOT?'Allow Overtime Request?':'Allow Late Request?',message:isRisk?"High-risk warnings were found in the legitimacy check. Allow only if you have confirmed this with the student. "+baseMsg:baseMsg,studentName,type:'approve',onConfirm:()=>{
+    const baseMsg="The student's time and photo will be recorded.";
+    showCustomConfirm({title:'Allow Late Request?',message:isRisk?"High-risk warnings were found in the legitimacy check. Allow only if you have confirmed this with the student. "+baseMsg:baseMsg,studentName,type:'approve',onConfirm:()=>{
         btn.classList.add('loading'); btn.textContent='Processing…';
         const fd=new FormData(); fd.append('action','approve_late_request'); fd.append('req_id',reqId); if(isRisk) fd.append('confirm_risk','1');
         fetch(window.location.pathname,{method:'POST',headers:{'X-Requested-With':'XMLHttpRequest'},body:fd})
@@ -4735,7 +4678,7 @@ function approveRequest(reqId,btn){
 function rejectRequest(reqId,btn){
     const req=liRequests.find(r=>r.id===reqId);
     const studentName=req?(req.first_name+' '+req.last_name):null;
-    showCustomConfirm({title:'Reject This Request?',message:"The student's "+(req&&req.request_type==='overtime'?'overtime':'late')+" request will be rejected. This cannot be undone.",studentName,type:'reject',onConfirm:()=>{
+    showCustomConfirm({title:'Reject This Request?',message:"The student's late request will be rejected. This cannot be undone.",studentName,type:'reject',onConfirm:()=>{
         const fd=new FormData(); fd.append('action','reject_late_request'); fd.append('req_id',reqId);
         fetch(window.location.pathname,{method:'POST',headers:{'X-Requested-With':'XMLHttpRequest'},body:fd})
         .then(r=>r.json())

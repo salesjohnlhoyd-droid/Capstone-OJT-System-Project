@@ -549,16 +549,8 @@ $log_stmt->execute();
 $logs = $log_stmt->get_result()->fetch_all(MYSQLI_ASSOC);
 
 // ── Fetch late requests for the selected month ──
-// request_type ('late' / 'overtime') exists once the Late Request / Overtime feature has been used;
-// older databases simply report every request as a regular late request.
-$lr_has_kind = false;
-try {
-    $lr_kc = $conn->query("SHOW COLUMNS FROM late_requests LIKE 'request_type'");
-    $lr_has_kind = ($lr_kc && $lr_kc->num_rows > 0);
-} catch (\Throwable $e) {}
-$lr_kind_sel = $lr_has_kind ? 'request_type' : "'late' AS request_type";
 $lr_stmt = $conn->prepare("
-    SELECT date, type, status, {$lr_kind_sel}
+    SELECT date, type, status
     FROM late_requests
     WHERE student_id=? AND company_id=? AND date BETWEEN ? AND ?
 ");
@@ -567,10 +559,8 @@ $lr_stmt->execute();
 $lr_rows = $lr_stmt->get_result()->fetch_all(MYSQLI_ASSOC);
 
 $late_req_map = [];
-$late_kind_map = []; // [date][slot] => 'late' | 'overtime'
 foreach ($lr_rows as $lr) {
     $late_req_map[$lr['date']][$lr['type']] = $lr['status'];
-    $late_kind_map[$lr['date']][$lr['type']] = (($lr['request_type'] ?? 'late') === 'overtime') ? 'overtime' : 'late';
 }
 
 
@@ -1505,7 +1495,6 @@ a { color: inherit; text-decoration: none; }
 .time-val.empty   { color: var(--border); font-style: italic; }
 .time-val.missed  { color: var(--red); font-weight: 700; }
 .time-val.pending { color: var(--orange); font-weight: 700; }
-.ot-tag { display: inline-block; margin-left: 4px; padding: 1px 6px; border-radius: 20px; font-size: 9px; font-weight: 700; letter-spacing: .3px; background: rgba(167,139,250,.15); color: var(--purple); vertical-align: middle; }
 .hours-val { font-family: var(--mono); font-size: 12px; font-weight: 700; }
 .hours-val.met  { color: var(--green); }
 .hours-val.low  { color: var(--orange); }
@@ -1771,16 +1760,14 @@ a { color: inherit; text-decoration: none; }
                     $dayLR = $late_req_map[$ds] ?? [];
 
                     if ($log && $st !== 'noschedule') {
-                        $dayKind = $late_kind_map[$ds] ?? [];
-                        $tipSlot = function($col, $label) use ($log, $dayLR, $dayKind) {
+                        $tipSlot = function($col, $label) use ($log, $dayLR) {
                             $v  = $log[$col] ?? null;
                             $lr = $dayLR[$col] ?? null;
-                            $otTag = (($dayKind[$col] ?? 'late') === 'overtime' && in_array($lr, ['pending','approved'], true)) ? ' [Overtime]' : '';
                             if ($v === 'missed') {
                                 $tag = $lr === 'pending' ? ' (⏳)' : ($lr === 'approved' ? ' (✓)' : '');
-                                return "{$label}: MISSED{$tag}{$otTag}";
+                                return "{$label}: MISSED{$tag}";
                             }
-                            return "{$label}: " . fmt12s($v) . $otTag;
+                            return "{$label}: " . fmt12s($v);
                         };
                         $tip = $tipSlot('am_time_in',  'AM In ')
                              . "\n" . $tipSlot('am_time_out', 'AM Out')
@@ -1847,7 +1834,6 @@ a { color: inherit; text-decoration: none; }
                 <?php foreach ($table_rows as $ds => $dd):
                     $log   = $log_map[$ds] ?? null;
                     $dayLR = $late_req_map[$ds] ?? [];
-                    $dayKind = $late_kind_map[$ds] ?? [];
                     $h     = $dd['hours'];
                     $st    = $dd['status'];
                     $hs    = (int)($dd['seconds'] ?? round($h * 3600)); // UPDATED (accurate hours)
@@ -1888,7 +1874,7 @@ a { color: inherit; text-decoration: none; }
                             $disp = '—';
                         }
                     ?>
-                    <td><span class="time-val<?= $cls ? " {$cls}" : '' ?>"><?= htmlspecialchars($disp) ?></span><?php if (($dayKind[$col] ?? 'late') === 'overtime' && in_array($lrs, ['pending','approved'], true)): ?> <span class="ot-tag" title="Overtime request (<?= htmlspecialchars($lrs) ?>)">OT</span><?php endif; ?></td>
+                    <td><span class="time-val<?= $cls ? " {$cls}" : '' ?>"><?= htmlspecialchars($disp) ?></span></td>
                     <?php endforeach; ?>
                     <td><span class="hours-val <?= $hrs_cls ?>"><?= $hs > 0 ? fmtDuration($hs) : '—' ?></span></td>
                     <td><span class="status-pill <?= $st_cls ?>"><?= $st_label ?></span></td>
