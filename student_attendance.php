@@ -2989,6 +2989,15 @@ body { background: var(--grid-bg); color: #2d3748; font-family: 'Segoe UI', Taho
     #lateReqBox .lr-footer button { flex: 1; }
 }
 @media (prefers-reduced-motion: reduce) { #lateReqBox { animation: none; } }
+/* Keep the camera balanced with the right-hand column: on wide layouts the camera stretches to the
+   column height (its old size stays as the minimum), so extra rows such as Request Type never leave a gap. */
+@media (min-width: 901px) {
+    #lateReqBox .lr-photo-group { display: flex; flex-direction: column; align-self: stretch; }
+    #lateReqBox .lr-photo-group .lr-camera-wrap {
+        aspect-ratio: auto; max-height: none; flex: 1 1 0;
+        min-height: max(220px, min(calc(100vh - 340px), 400px));
+    }
+}
 /* Request type picker (Late Request / Overtime) */
 #lateReqBox .lr-reqtype-title { margin-top: 8px; }
 #lateReqBox .lr-reqtype-options { display: flex; gap: 6px; }
