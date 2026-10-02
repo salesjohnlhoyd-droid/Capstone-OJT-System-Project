@@ -164,6 +164,113 @@ function ensureLateRequestTypeColumn($conn) {
     try { return $ok = $exists(); } catch (\Throwable $e) { return $ok = false; }
 }
 
+/* ════════════════════════════════════════════════════════════════════
+   NEW (student schedule): attendance follows each student's own training
+   schedule (Day / Evening Schedule set on AccomForm.php and changed by the
+   company supervisor on add_ojt_student.php; stored in student_information
+   as Mon–Fri acronyms such as "MWF", "TTh" or "None").
+   A weekday the student is NOT scheduled on, with no real attendance entry,
+   is never counted as Absent / Missed / Incomplete — it is shown as
+   "Not scheduled" instead. A day with a real entry is always judged normally.
+   Schedule changes are dated (student_schedule_changes), so past days keep the
+   schedule that was in force back then. A student whose schedule is empty or
+   unreadable is treated as scheduled every weekday (nothing changes for them).
+   ════════════════════════════════════════════════════════════════════ */
+if (!function_exists('attsch_parse_days')) {
+    // "MWF" -> [1,3,5] (date('w') numbers); "None" / empty / unreadable -> []
+    function attsch_parse_days($value): array {
+        $rest = trim((string)$value);
+        if ($rest === '' || strcasecmp($rest, 'None') === 0) return [];
+        $codes = ['Th' => 4, 'M' => 1, 'T' => 2, 'W' => 3, 'F' => 5];
+        $found = [];
+        while ($rest !== '') {
+            $hit = false;
+            foreach ($codes as $code => $n) {
+                if (stripos($rest, $code) === 0) { $found[$n] = true; $rest = substr($rest, strlen($code)); $hit = true; break; }
+            }
+            if (!$hit) return [];
+        }
+        $days = array_keys($found);
+        sort($days);
+        return $days;
+    }
+}
+if (!function_exists('attsch_days')) {
+    // Day + Evening schedule combined; null = no usable schedule (scheduled every weekday)
+    function attsch_days($day, $evening): ?array {
+        $all = array_values(array_unique(array_merge(attsch_parse_days($day), attsch_parse_days($evening))));
+        if (empty($all)) return null;
+        sort($all);
+        return $all;
+    }
+}
+if (!function_exists('attsch_load')) {
+    // [student_id => ['cur' => days|null, 'changes' => [['d' => 'Y-m-d', 'old' => days|null], ...oldest first]]]
+    function attsch_load($conn, array $ids): array {
+        static $cache = [];
+        $ids = array_values(array_unique(array_filter(array_map('intval', $ids))));
+        sort($ids);
+        if (empty($ids)) return [];
+        $key = implode(',', $ids);
+        if (isset($cache[$key])) return $cache[$key];
+        $map = [];
+        foreach ($ids as $i) $map[$i] = ['cur' => null, 'changes' => []];
+        try {
+            $r = $conn->query("SELECT user_id, day_sched, evening_sched FROM student_information WHERE user_id IN ($key)");
+            if ($r) { while ($row = $r->fetch_assoc()) $map[(int)$row['user_id']]['cur'] = attsch_days($row['day_sched'], $row['evening_sched']); }
+        } catch (\Throwable $e) {}
+        try {
+            $t = $conn->query("SHOW TABLES LIKE 'student_schedule_changes'");
+            if ($t && $t->num_rows > 0) {
+                $r = $conn->query("SELECT student_id, old_day_sched, old_evening_sched, DATE(created_at) AS d
+                                   FROM student_schedule_changes WHERE student_id IN ($key) ORDER BY created_at ASC, id ASC");
+                if ($r) {
+                    while ($row = $r->fetch_assoc()) {
+                        $map[(int)$row['student_id']]['changes'][] = ['d' => $row['d'], 'old' => attsch_days($row['old_day_sched'], $row['old_evening_sched'])];
+                    }
+                }
+            }
+        } catch (\Throwable $e) {}
+        return $cache[$key] = $map;
+    }
+}
+if (!function_exists('attsch_is_scheduled')) {
+    // true when the student is scheduled to report on $day (weekdays only; unknown student = scheduled)
+    function attsch_is_scheduled(array $map, $studentId, string $day): bool {
+        $s = $map[(int)$studentId] ?? null;
+        if ($s === null) return true;
+        $days = $s['cur'];
+        foreach ($s['changes'] as $c) {            // a change applies from its own date onward
+            if ($c['d'] > $day) { $days = $c['old']; break; }
+        }
+        if ($days === null) return true;
+        return in_array((int)date('w', strtotime($day)), $days, true);
+    }
+}
+if (!function_exists('attsch_has_real_entry')) {
+    // true when the log row holds at least one real time (a "missed"-only row is not an entry)
+    function attsch_has_real_entry($row): bool {
+        if (!is_array($row)) return false;
+        foreach (['am_time_in', 'am_time_out', 'pm_time_in', 'pm_time_out'] as $c) {
+            $v = $row[$c] ?? null;
+            if ($v !== null && $v !== '' && $v !== 'missed') return true;
+        }
+        return false;
+    }
+}
+if (!function_exists('attsch_js_map')) {
+    // compact form for the page script: {id: {c: days|null, h: [[date, days|null], ...]}}
+    function attsch_js_map(array $map): object {
+        $o = [];
+        foreach ($map as $id => $s) {
+            $h = [];
+            foreach ($s['changes'] as $c) $h[] = [$c['d'], $c['old']];
+            $o[(string)$id] = ['c' => $s['cur'], 'h' => $h];
+        }
+        return (object)$o;
+    }
+}
+
 // ================= AUTO-MISSED CHECK & MARKING =================
 function autoMarkMissed($conn, $user_id, $company_id, $date, $current_time) {
     if ((int)date('w', strtotime($date)) === 0 || (int)date('w', strtotime($date)) === 6) return [];
@@ -178,6 +285,10 @@ function autoMarkMissed($conn, $user_id, $company_id, $date, $current_time) {
     $stmt->bind_param("isi", $user_id, $date, $company_id);
     $stmt->execute();
     $log = $stmt->get_result()->fetch_assoc();
+
+    // NEW (student schedule): on a day the student is not scheduled to report (and nothing was recorded),
+    // nothing is marked "missed" — the day simply is not a duty day for this student.
+    if (!attsch_is_scheduled(attsch_load($conn, [(int)$user_id]), $user_id, $date) && !attsch_has_real_entry($log)) return [];
 
     $now_sec = timeToSeconds($current_time);
 
@@ -352,6 +463,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET' && isset($_GET['action']) && $_GET['act
         $fmtOrMissed = fn($v) => ($v === 'missed' ? 'MISSED' : fmt12php($v));
         $log_map[$row['date']] = [
             'status'         => $status,
+            'has_real'       => attsch_has_real_entry($row), // NEW (student schedule)
             'am_time_in_12'  => $fmtOrMissed($amIn),
             'am_time_out_12' => $fmtOrMissed($amOut),
             'pm_time_in_12'  => $fmtOrMissed($pmIn),
@@ -359,6 +471,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET' && isset($_GET['action']) && $_GET['act
         ];
     }
     $days = [];
+    $sched_map = attsch_load($conn, [(int)$user_id]); // NEW (student schedule)
     $d = strtotime($start);
     while ($d <= strtotime($end)) {
         $day_str = date("Y-m-d", $d);
@@ -368,6 +481,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET' && isset($_GET['action']) && $_GET['act
         if ($day_str < $ojt_start)   $status = 'before_start';
         elseif ($is_wknd)            $status = 'dayoff';
         elseif ($day_str > $today)   $status = 'future';
+        elseif (empty($entry['has_real']) && !attsch_is_scheduled($sched_map, $user_id, $day_str)) $status = 'noschedule'; // NEW (student schedule): not a duty day → never absent
         elseif (!$entry)             $status = 'A';
         else                         $status = $entry['status'];
         $days[] = [
@@ -387,13 +501,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET' && isset($_GET['action']) && $_GET['act
     $incomplete = count(array_filter($days, fn($d) => $d['status'] === 'I'));
     $absent     = count(array_filter($days, fn($d) => $d['status'] === 'A'));
     $dayoff     = count(array_filter($days, fn($d) => $d['status'] === 'dayoff'));
+    $noschedule = count(array_filter($days, fn($d) => $d['status'] === 'noschedule')); // NEW (student schedule)
     echo json_encode([
         'success'     => true,
         'month'       => $req_month,
         'month_label' => date("F Y", strtotime($start)),
         'ojt_start'   => $ojt_start,
         'days'        => $days,
-        'stats'       => compact('present','incomplete','absent','dayoff'),
+        'stats'       => compact('present','incomplete','absent','dayoff','noschedule'),
     ]);
     exit;
 }

@@ -104,6 +104,115 @@ while ($lr = $log_res->fetch_assoc()) {
     $exp_logs[$lr['user_id']][$lr['date']] = $st;
 }
 
+/* ════════════════════════════════════════════════════════════════════
+   NEW (student schedule): attendance follows each student's own training
+   schedule (Day / Evening Schedule set on AccomForm.php and changed by the
+   company supervisor on add_ojt_student.php; stored in student_information
+   as Mon–Fri acronyms such as "MWF", "TTh" or "None").
+   A weekday the student is NOT scheduled on, with no real attendance entry,
+   is never counted as Absent / Missed / Incomplete — it is shown as
+   "Not scheduled" instead. A day with a real entry is always judged normally.
+   Schedule changes are dated (student_schedule_changes), so past days keep the
+   schedule that was in force back then. A student whose schedule is empty or
+   unreadable is treated as scheduled every weekday (nothing changes for them).
+   ════════════════════════════════════════════════════════════════════ */
+if (!function_exists('attsch_parse_days')) {
+    // "MWF" -> [1,3,5] (date('w') numbers); "None" / empty / unreadable -> []
+    function attsch_parse_days($value): array {
+        $rest = trim((string)$value);
+        if ($rest === '' || strcasecmp($rest, 'None') === 0) return [];
+        $codes = ['Th' => 4, 'M' => 1, 'T' => 2, 'W' => 3, 'F' => 5];
+        $found = [];
+        while ($rest !== '') {
+            $hit = false;
+            foreach ($codes as $code => $n) {
+                if (stripos($rest, $code) === 0) { $found[$n] = true; $rest = substr($rest, strlen($code)); $hit = true; break; }
+            }
+            if (!$hit) return [];
+        }
+        $days = array_keys($found);
+        sort($days);
+        return $days;
+    }
+}
+if (!function_exists('attsch_days')) {
+    // Day + Evening schedule combined; null = no usable schedule (scheduled every weekday)
+    function attsch_days($day, $evening): ?array {
+        $all = array_values(array_unique(array_merge(attsch_parse_days($day), attsch_parse_days($evening))));
+        if (empty($all)) return null;
+        sort($all);
+        return $all;
+    }
+}
+if (!function_exists('attsch_load')) {
+    // [student_id => ['cur' => days|null, 'changes' => [['d' => 'Y-m-d', 'old' => days|null], ...oldest first]]]
+    function attsch_load($conn, array $ids): array {
+        static $cache = [];
+        $ids = array_values(array_unique(array_filter(array_map('intval', $ids))));
+        sort($ids);
+        if (empty($ids)) return [];
+        $key = implode(',', $ids);
+        if (isset($cache[$key])) return $cache[$key];
+        $map = [];
+        foreach ($ids as $i) $map[$i] = ['cur' => null, 'changes' => []];
+        try {
+            $r = $conn->query("SELECT user_id, day_sched, evening_sched FROM student_information WHERE user_id IN ($key)");
+            if ($r) { while ($row = $r->fetch_assoc()) $map[(int)$row['user_id']]['cur'] = attsch_days($row['day_sched'], $row['evening_sched']); }
+        } catch (\Throwable $e) {}
+        try {
+            $t = $conn->query("SHOW TABLES LIKE 'student_schedule_changes'");
+            if ($t && $t->num_rows > 0) {
+                $r = $conn->query("SELECT student_id, old_day_sched, old_evening_sched, DATE(created_at) AS d
+                                   FROM student_schedule_changes WHERE student_id IN ($key) ORDER BY created_at ASC, id ASC");
+                if ($r) {
+                    while ($row = $r->fetch_assoc()) {
+                        $map[(int)$row['student_id']]['changes'][] = ['d' => $row['d'], 'old' => attsch_days($row['old_day_sched'], $row['old_evening_sched'])];
+                    }
+                }
+            }
+        } catch (\Throwable $e) {}
+        return $cache[$key] = $map;
+    }
+}
+if (!function_exists('attsch_is_scheduled')) {
+    // true when the student is scheduled to report on $day (weekdays only; unknown student = scheduled)
+    function attsch_is_scheduled(array $map, $studentId, string $day): bool {
+        $s = $map[(int)$studentId] ?? null;
+        if ($s === null) return true;
+        $days = $s['cur'];
+        foreach ($s['changes'] as $c) {            // a change applies from its own date onward
+            if ($c['d'] > $day) { $days = $c['old']; break; }
+        }
+        if ($days === null) return true;
+        return in_array((int)date('w', strtotime($day)), $days, true);
+    }
+}
+if (!function_exists('attsch_has_real_entry')) {
+    // true when the log row holds at least one real time (a "missed"-only row is not an entry)
+    function attsch_has_real_entry($row): bool {
+        if (!is_array($row)) return false;
+        foreach (['am_time_in', 'am_time_out', 'pm_time_in', 'pm_time_out'] as $c) {
+            $v = $row[$c] ?? null;
+            if ($v !== null && $v !== '' && $v !== 'missed') return true;
+        }
+        return false;
+    }
+}
+if (!function_exists('attsch_js_map')) {
+    // compact form for the page script: {id: {c: days|null, h: [[date, days|null], ...]}}
+    function attsch_js_map(array $map): object {
+        $o = [];
+        foreach ($map as $id => $s) {
+            $h = [];
+            foreach ($s['changes'] as $c) $h[] = [$c['d'], $c['old']];
+            $o[(string)$id] = ['c' => $s['cur'], 'h' => $h];
+        }
+        return (object)$o;
+    }
+}
+
+$exp_sched = attsch_load($conn, array_keys($exp_students)); // NEW (student schedule)
+
 // ── Date columns ──────────────────────────────────────────────────────────────
 $exp_dates = [];
 for ($d = strtotime($exp_start); $d <= strtotime($exp_end); $d = strtotime('+1 day', $d)) {
@@ -132,6 +241,8 @@ foreach ($exp_students as $sid => $stu) {
             $row[] = 'OFF';
         } elseif ($d > $today_str) {
             $row[] = '';
+        } elseif (empty($exp_has_entry[$sid][$d]) && !attsch_is_scheduled($exp_sched, $sid, $d)) {
+            $row[] = 'NOT SCHEDULED'; // NEW (student schedule): not a duty day for this student — never absent
         } elseif ($d === $today_str && empty($exp_has_entry[$sid][$d])) {
             $row[] = ''; // today with no attendance entry yet: blank until the day has passed
         } else {

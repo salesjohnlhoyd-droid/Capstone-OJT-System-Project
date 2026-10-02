@@ -324,6 +324,113 @@ if (!function_exists('attm_before_start')) {
 }
 
 /* ════════════════════════════════════════════════════════════════════
+   NEW (student schedule): attendance follows each student's own training
+   schedule (Day / Evening Schedule set on AccomForm.php and changed by the
+   company supervisor on add_ojt_student.php; stored in student_information
+   as Mon–Fri acronyms such as "MWF", "TTh" or "None").
+   A weekday the student is NOT scheduled on, with no real attendance entry,
+   is never counted as Absent / Missed / Incomplete — it is shown as
+   "Not scheduled" instead. A day with a real entry is always judged normally.
+   Schedule changes are dated (student_schedule_changes), so past days keep the
+   schedule that was in force back then. A student whose schedule is empty or
+   unreadable is treated as scheduled every weekday (nothing changes for them).
+   ════════════════════════════════════════════════════════════════════ */
+if (!function_exists('attsch_parse_days')) {
+    // "MWF" -> [1,3,5] (date('w') numbers); "None" / empty / unreadable -> []
+    function attsch_parse_days($value): array {
+        $rest = trim((string)$value);
+        if ($rest === '' || strcasecmp($rest, 'None') === 0) return [];
+        $codes = ['Th' => 4, 'M' => 1, 'T' => 2, 'W' => 3, 'F' => 5];
+        $found = [];
+        while ($rest !== '') {
+            $hit = false;
+            foreach ($codes as $code => $n) {
+                if (stripos($rest, $code) === 0) { $found[$n] = true; $rest = substr($rest, strlen($code)); $hit = true; break; }
+            }
+            if (!$hit) return [];
+        }
+        $days = array_keys($found);
+        sort($days);
+        return $days;
+    }
+}
+if (!function_exists('attsch_days')) {
+    // Day + Evening schedule combined; null = no usable schedule (scheduled every weekday)
+    function attsch_days($day, $evening): ?array {
+        $all = array_values(array_unique(array_merge(attsch_parse_days($day), attsch_parse_days($evening))));
+        if (empty($all)) return null;
+        sort($all);
+        return $all;
+    }
+}
+if (!function_exists('attsch_load')) {
+    // [student_id => ['cur' => days|null, 'changes' => [['d' => 'Y-m-d', 'old' => days|null], ...oldest first]]]
+    function attsch_load($conn, array $ids): array {
+        static $cache = [];
+        $ids = array_values(array_unique(array_filter(array_map('intval', $ids))));
+        sort($ids);
+        if (empty($ids)) return [];
+        $key = implode(',', $ids);
+        if (isset($cache[$key])) return $cache[$key];
+        $map = [];
+        foreach ($ids as $i) $map[$i] = ['cur' => null, 'changes' => []];
+        try {
+            $r = $conn->query("SELECT user_id, day_sched, evening_sched FROM student_information WHERE user_id IN ($key)");
+            if ($r) { while ($row = $r->fetch_assoc()) $map[(int)$row['user_id']]['cur'] = attsch_days($row['day_sched'], $row['evening_sched']); }
+        } catch (\Throwable $e) {}
+        try {
+            $t = $conn->query("SHOW TABLES LIKE 'student_schedule_changes'");
+            if ($t && $t->num_rows > 0) {
+                $r = $conn->query("SELECT student_id, old_day_sched, old_evening_sched, DATE(created_at) AS d
+                                   FROM student_schedule_changes WHERE student_id IN ($key) ORDER BY created_at ASC, id ASC");
+                if ($r) {
+                    while ($row = $r->fetch_assoc()) {
+                        $map[(int)$row['student_id']]['changes'][] = ['d' => $row['d'], 'old' => attsch_days($row['old_day_sched'], $row['old_evening_sched'])];
+                    }
+                }
+            }
+        } catch (\Throwable $e) {}
+        return $cache[$key] = $map;
+    }
+}
+if (!function_exists('attsch_is_scheduled')) {
+    // true when the student is scheduled to report on $day (weekdays only; unknown student = scheduled)
+    function attsch_is_scheduled(array $map, $studentId, string $day): bool {
+        $s = $map[(int)$studentId] ?? null;
+        if ($s === null) return true;
+        $days = $s['cur'];
+        foreach ($s['changes'] as $c) {            // a change applies from its own date onward
+            if ($c['d'] > $day) { $days = $c['old']; break; }
+        }
+        if ($days === null) return true;
+        return in_array((int)date('w', strtotime($day)), $days, true);
+    }
+}
+if (!function_exists('attsch_has_real_entry')) {
+    // true when the log row holds at least one real time (a "missed"-only row is not an entry)
+    function attsch_has_real_entry($row): bool {
+        if (!is_array($row)) return false;
+        foreach (['am_time_in', 'am_time_out', 'pm_time_in', 'pm_time_out'] as $c) {
+            $v = $row[$c] ?? null;
+            if ($v !== null && $v !== '' && $v !== 'missed') return true;
+        }
+        return false;
+    }
+}
+if (!function_exists('attsch_js_map')) {
+    // compact form for the page script: {id: {c: days|null, h: [[date, days|null], ...]}}
+    function attsch_js_map(array $map): object {
+        $o = [];
+        foreach ($map as $id => $s) {
+            $h = [];
+            foreach ($s['changes'] as $c) $h[] = [$c['d'], $c['old']];
+            $o[(string)$id] = ['c' => $s['cur'], 'h' => $h];
+        }
+        return (object)$o;
+    }
+}
+
+/* ════════════════════════════════════════════════════════════════════
    UPDATED (Live updates instead of auto page reload): a small fingerprint
    of everything this page displays (attendance logs, late requests,
    schedules, assigned students, course rules and today's date). The page
@@ -342,6 +449,8 @@ if (!function_exists('attm_live_signature')) {
             "SELECT COUNT(*) AS c, COALESCE(SUM(CRC32(CONCAT_WS('|', date, IFNULL(am_time_in_start,''), IFNULL(am_time_in_end,''), IFNULL(am_time_out_start,''), IFNULL(am_time_out_end,''), IFNULL(pm_time_in_start,''), IFNULL(pm_time_in_end,''), IFNULL(pm_time_out_start,''), IFNULL(pm_time_out_end,'')))), 0) AS s
              FROM attendance_settings WHERE company_id = $cid",
             "SELECT COUNT(*) AS c, COALESCE(SUM(student_id), 0) AS s FROM ojt_assignments WHERE company_id = $cid",
+            "SELECT COUNT(*) AS c, COALESCE(SUM(CRC32(CONCAT_WS('|', user_id, IFNULL(day_sched,''), IFNULL(evening_sched,'')))), 0) AS s FROM student_information WHERE user_id IN (SELECT student_id FROM ojt_assignments WHERE company_id = $cid)", // NEW (student schedule)
+            "SELECT COUNT(*) AS c, COALESCE(SUM(id), 0) AS s FROM student_schedule_changes WHERE company_id = $cid", // NEW (student schedule): absent table is ignored below
             "SELECT COUNT(*) AS c, COALESCE(SUM(CRC32(CONCAT_WS('|', course, total_hours, daily_hours))), 0) AS s FROM course_offerings",
         ];
         foreach ($queries as $q) {
@@ -388,6 +497,7 @@ if (isset($_GET['export']) && $_GET['export'] == '1') {
         $exp_students[$sr['id']] = $sr;
     }
     $exp_first = attm_first_attendance_map($conn, array_keys($exp_students)); // UPDATED (Start = first attendance)
+    $exp_sched = attsch_load($conn, array_keys($exp_students)); // NEW (student schedule)
 
     $log_res = $conn->query("
         SELECT user_id, date, am_time_in, am_time_out, pm_time_in, pm_time_out
@@ -444,6 +554,8 @@ if (isset($_GET['export']) && $_GET['export'] == '1') {
                 $row[] = '';
             } elseif (attm_before_start($exp_first, $sid, $d)) {
                 $row[] = ''; // UPDATED: before first attendance — not absent / missed
+            } elseif (empty($exp_has_entry[$sid][$d]) && !attsch_is_scheduled($exp_sched, $sid, $d)) {
+                $row[] = 'NOT SCHEDULED'; // NEW (student schedule): not a duty day for this student — never absent
             } elseif ($d === date('Y-m-d') && empty($exp_has_entry[$sid][$d])) {
                 $row[] = ''; // today with no attendance entry yet: blank until the day has passed
             } else {
@@ -955,6 +1067,19 @@ if ($today_dow === 0 || $today_dow === 6) {
     if ($ts_ids_res) { while ($tr = $ts_ids_res->fetch_assoc()) $ts_all_ids[] = (int)$tr['student_id']; }
     $ts_first   = attm_first_attendance_map($conn, $ts_all_ids);
     $ts_started = array_values(array_filter($ts_all_ids, fn($sid) => !attm_before_start($ts_first, $sid, $today_str)));
+    // NEW (student schedule): a student who is not scheduled today and has no real entry is neither Absent nor Incomplete
+    $ts_sched = attsch_load($conn, $ts_all_ids);
+    $ts_real_today = [];
+    try {
+        $ts_nr = $conn->query("SELECT user_id, am_time_in, am_time_out, pm_time_in, pm_time_out FROM attendance_logs WHERE company_id=$company_id AND date='$today_str'");
+        if ($ts_nr) { while ($tn = $ts_nr->fetch_assoc()) { if (attsch_has_real_entry($tn)) $ts_real_today[(int)$tn['user_id']] = true; } }
+    } catch (\Throwable $e) {}
+    $ts_not_sched_count = 0;
+    $ts_started = array_values(array_filter($ts_started, function($sid) use ($ts_sched, $ts_real_today, $today_str, &$ts_not_sched_count) {
+        if (attsch_is_scheduled($ts_sched, $sid, $today_str) || !empty($ts_real_today[(int)$sid])) return true;
+        $ts_not_sched_count++;
+        return false;
+    }));
     $ts_started_sql = !empty($ts_started) ? implode(',', $ts_started) : '0';
     $ts_res = $conn->query("
         SELECT
@@ -989,6 +1114,7 @@ if ($today_dow === 0 || $today_dow === 6) {
             'incomplete' => $incomplete,
             'day_off'    => 0,
             'total'      => $total,
+            'not_scheduled' => $ts_not_sched_count, // NEW (student schedule)
         ];
     }
 }
@@ -1048,6 +1174,7 @@ $res = $conn->query("
 ");
 while ($row = $res->fetch_assoc()) { $students[$row['id']] = $row; }
 $student_first_attendance = attm_first_attendance_map($conn, array_keys($students)); // UPDATED (Start = first attendance)
+$student_sched = attsch_load($conn, array_keys($students)); // NEW (student schedule)
 
 /* ════════════════════════════════════════════════════════════════════
    UPDATED (Start / End indicators in the Monthly Attendance Summary):
@@ -1248,6 +1375,8 @@ foreach ($all_chart_months as $ym) {
 
         foreach ($students as $sid => $s) {
             if (attm_before_start($student_first_attendance, $sid, $day_str)) continue; // UPDATED: not started yet
+            // NEW (student schedule): not a duty day for this student and nothing recorded → not counted at all
+            if (!attsch_has_real_entry($all_logs[$sid][$day_str] ?? null) && !attsch_is_scheduled($student_sched, $sid, $day_str)) continue;
             if (isset($all_logs[$sid][$day_str])) {
                 $lr2    = $all_logs[$sid][$day_str];
                 $status = computeStatusForLog($lr2, $duty['am'], $duty['pm']);
@@ -1682,6 +1811,7 @@ body { margin: 0; display: flex; min-height: 100vh; font-family: 'Segoe UI', Tah
 .sm-mark-start { color:#2C5A2C; }
 .sm-mark-end   { color:#A02A2A; }
 .sm-mark-est   { opacity:.55; }
+.sm-table td.sm-nosched { background:#eff6ff; color:#2563eb; font-style:italic; } /* NEW (student schedule): not scheduled that day */
 .sm-table td.sm-before-start { background:#f8fafc; color:#cbd5e1; } /* UPDATED: before first attendance */
 .sm-table td.sm-has-mark { box-shadow:inset 0 0 0 1px rgba(21,101,192,.25); }
 .sm-table tbody tr:hover td { filter:brightness(0.97); }
@@ -1702,6 +1832,7 @@ td.present   { color:#2e7d32; font-weight:700; text-align:center; }
 td.absent    { color:#c62828; font-weight:700; text-align:center; }
 td.incomplete{ color:#e65100; font-weight:700; text-align:center; }
 td.pending   { color:#888;    font-weight:600; text-align:center; }
+td.nosched   { color:#2563eb; background:#eff6ff; font-weight:700; text-align:center; } /* NEW (student schedule) */
 td.missed    { color:#e65100; font-weight:700; text-align:center; }
 tr.day-off-row td { background:#ede7f6; color:#512da8; font-style:italic; }
 .weekend-notice { background:#ede7f6; color:#512da8; padding:10px 16px; border-radius:8px; margin-bottom:12px; font-size:13px; font-weight:500; display:flex; align-items:center; gap:8px; }
@@ -2354,6 +2485,7 @@ tr.day-off-row td { background:#ede7f6; color:#512da8; font-style:italic; }
                     <span class="sm-legend-item"><span class="sm-legend-dot" style="background:#fffbeb;border:1px solid #fcd34d;"></span><span style="color:#92400e;">I — Incomplete</span></span>
                     <span class="sm-legend-item"><span class="sm-legend-dot" style="background:#fef2f2;border:1px solid #fca5a5;"></span><span style="color:#9b1c1c;">A — Absent</span></span>
                     <span class="sm-legend-item"><span class="sm-legend-dot" style="background:#f3f0ff;border:1px solid #c4b5fd;"></span><span style="color:#7c3aed;">O — Day Off</span></span>
+                    <span class="sm-legend-item"><span class="sm-legend-dot" style="background:#eff6ff;border:1px solid #93c5fd;"></span><span style="color:#2563eb;">N — Not scheduled</span></span>
                     <span class="sm-legend-item"><i class="fas fa-play-circle sm-mark-start" style="font-size:10px;"></i><span style="color:#2C5A2C;">OJT Start</span></span>
                     <span class="sm-legend-item"><i class="fas fa-stop-circle sm-mark-end" style="font-size:10px;"></i><span style="color:#A02A2A;">OJT End</span></span>
                     <span class="sm-legend-item"><i class="fas fa-stop-circle sm-mark-end sm-mark-est" style="font-size:10px;"></i><span style="color:#A02A2A;">OJT End (est.)</span></span>
@@ -2399,9 +2531,13 @@ tr.day-off-row td { background:#ede7f6; color:#512da8; font-style:italic; }
                                 if ($is_wkd) {
                                     $val = 'O'; $cls = 'sm-off';
                                 } elseif ($d > date("Y-m-d")) {
-                                    $val = ''; $cls = '';
+                                    // NEW (student schedule): upcoming days the student is not scheduled on carry the marker too
+                                    if (!attm_before_start($student_first_attendance, $id, $d) && !attsch_is_scheduled($student_sched, $id, $d)) { $val = 'N'; $cls = 'sm-nosched'; }
+                                    else { $val = ''; $cls = ''; }
                                 } elseif (attm_before_start($student_first_attendance, $id, $d)) {
                                     $val = ''; $cls = 'sm-before-start'; // UPDATED: before first attendance — not absent / missed
+                                } elseif (empty($logs_has_entry[$id][$d]) && !attsch_is_scheduled($student_sched, $id, $d)) {
+                                    $val = 'N'; $cls = 'sm-nosched'; // NEW (student schedule): not scheduled on this day → not absent
                                 } elseif ($d === date("Y-m-d") && empty($logs_has_entry[$id][$d])) {
                                     $val = ''; $cls = ''; // today and no attendance entry yet: stay blank, it becomes Absent once the day has passed
                                 } else {
@@ -2533,7 +2669,7 @@ tr.day-off-row td { background:#ede7f6; color:#512da8; font-style:italic; }
             </div>
             <div class="panel-card-body" style="padding:14px 16px;">
                 <div style="font-size:11px; color:#9ca3af; margin-bottom:10px; font-weight:600;">
-                    <?= date("l, F j") ?> &middot; <?= $today_stats['total'] ?> student<?= $today_stats['total'] !== 1 ? 's' : '' ?>
+                    <?= date("l, F j") ?> &middot; <?= $today_stats['total'] ?> student<?= $today_stats['total'] !== 1 ? 's' : '' ?><?php if (!empty($today_stats['not_scheduled'])): ?> &middot; <?= (int)$today_stats['not_scheduled'] ?> not scheduled today<?php endif; ?>
                 </div>
                 <div class="kpi-card kpi-present">
                     <span class="kpi-icon"><i class="fas fa-check-circle" style="color:#15803d;font-size:20px;"></i></span>
@@ -3158,9 +3294,11 @@ function liveApplyPage(html) {
     // First-attendance maps used by the Attendance Log popup (NOT STARTED rows)
     const byId   = html.match(/const _firstAttendanceById\s*=\s*(\{[\s\S]*?\});/);
     const byName = html.match(/const _firstAttendanceByName\s*=\s*(\{[\s\S]*?\});/);
+    const bySched = html.match(/const _schedById\s*=\s*(\{[\s\S]*?\});\s*\n/); // NEW (student schedule)
     try {
         if (byId)   { const o = JSON.parse(byId[1]);   Object.keys(_firstAttendanceById).forEach(k => delete _firstAttendanceById[k]);   Object.assign(_firstAttendanceById, o); }
         if (byName) { const o = JSON.parse(byName[1]); Object.keys(_firstAttendanceByName).forEach(k => delete _firstAttendanceByName[k]); Object.assign(_firstAttendanceByName, o); }
+        if (bySched) { const o = JSON.parse(bySched[1]); Object.keys(_schedById).forEach(k => delete _schedById[k]); Object.assign(_schedById, o); }
     } catch (e) {}
 
     // Refresh open popups that show live data
@@ -3759,6 +3897,21 @@ const _firstAttendanceByName = <?php
     }
     echo json_encode((object)$fa_by_name);
 ?>;
+/* NEW (student schedule): each student's training days (0=Sun…6=Sat numbers, null = every weekday) and dated schedule
+   changes, so the Attendance Log never shows ABSENT / INCOMPLETE on a day the student is not scheduled and has no entry. */
+const _schedById = <?= json_encode(attsch_js_map($student_sched)) ?>;
+function isNotScheduled(row, dateStr){
+    const id = row.student_id ?? row.user_id ?? row.id;
+    if (id === undefined || id === null || !Object.prototype.hasOwnProperty.call(_schedById, String(id))) return false; // unknown student: keep server status
+    const s = _schedById[String(id)];
+    let days = s.c;
+    for (const h of (s.h || [])) { if (h[0] > dateStr) { days = h[1]; break; } }
+    if (days === null || days === undefined) return false;
+    const dow = new Date(dateStr + 'T00:00:00').getDay();
+    if (days.indexOf(dow) !== -1) return false;
+    return !['am_time_in','am_time_out','pm_time_in','pm_time_out'].some(k => attHasReal(row[k]));
+}
+function attHasReal(v){ if (v === null || v === undefined) return false; const t = String(v).trim().toLowerCase(); return t !== '' && t !== '-' && t !== 'missed'; } // the log popup shows '-' for empty and 'MISSED' for missed
 function isBeforeFirstAttendance(row, dateStr){
     const id = row.student_id ?? row.user_id ?? row.id;
     let first;
@@ -3888,7 +4041,11 @@ function renderAttPage(){
         if(!_attIsWeekend && _attData && _attData.date && (r.status==='ABSENT'||r.status==='INCOMPLETE') && isBeforeFirstAttendance(r,_attData.date)){
             r = Object.assign({}, r, {status:'NOT STARTED', am_time_in:null, am_time_out:null, pm_time_in:null, pm_time_out:null});
         }
-        const rowNum=start+i+1,cls=(r.status==='NOT STARTED'?'pending':(statusClass[r.status]||''));
+        // NEW (student schedule): not a duty day for this student and nothing recorded → NOT SCHEDULED, never ABSENT
+        if(!_attIsWeekend && _attData && _attData.date && (r.status==='ABSENT'||r.status==='INCOMPLETE') && isNotScheduled(r,_attData.date)){
+            r = Object.assign({}, r, {status:'NOT SCHEDULED', am_time_in:null, am_time_out:null, pm_time_in:null, pm_time_out:null});
+        }
+        const rowNum=start+i+1,cls=(r.status==='NOT STARTED'?'pending':(r.status==='NOT SCHEDULED'?'nosched':(statusClass[r.status]||'')));
         if(_attIsWeekend){return`<tr class="day-off-row"><td style="padding:8px 6px;text-align:center;color:#aaa;font-size:11px;">${rowNum}</td><td style="padding:8px 10px;">${escH(r.name)}</td><td class="day-off" style="text-align:center;">DAY OFF</td></tr>`;}
         return`<tr><td style="padding:8px 6px;text-align:center;color:#aaa;font-size:11px;white-space:nowrap;">${rowNum}</td><td style="padding:8px 10px;white-space:nowrap;">${escH(r.name)}</td><td style="text-align:center;padding:5px;">${mkTime(r.am_time_in)}</td><td style="text-align:center;padding:5px;">${mkPhoto(r.am_time_in_photo)}</td><td style="text-align:center;padding:5px;">${mkTime(r.am_time_out)}</td><td style="text-align:center;padding:5px;">${mkPhoto(r.am_time_out_photo)}</td><td style="text-align:center;padding:5px;">${mkTime(r.pm_time_in)}</td><td style="text-align:center;padding:5px;">${mkPhoto(r.pm_time_in_photo)}</td><td style="text-align:center;padding:5px;">${mkTime(r.pm_time_out)}</td><td style="text-align:center;padding:5px;">${mkPhoto(r.pm_time_out_photo)}</td><td class="${cls}" style="text-align:center;padding:5px;font-weight:700;">${escH(r.status)}</td></tr>`;
     }).join('');
