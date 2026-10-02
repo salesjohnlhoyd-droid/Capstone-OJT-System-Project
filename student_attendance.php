@@ -84,6 +84,11 @@ function getSettings($conn, $company_id, $date) {
             $per = attsch_periods(attsch_load($conn, [(int)$user_id]), $user_id, $date);
             if (!$per['am']) foreach (['am_time_in_start','am_time_in_end','am_time_out_start','am_time_out_end'] as $k) $s[$k] = null;
             if (!$per['pm']) foreach (['pm_time_in_start','pm_time_in_end','pm_time_out_start','pm_time_out_end'] as $k) $s[$k] = null;
+            // NEW (OJT ends at the required hours): after the day the student reached the course's required hours
+            // nothing is required any more — both duties behave as skipped (no sign-in, no "missed", no late request).
+            if (ojtend_is_after(ojtend_dates($conn, [(int)$user_id]), $user_id, $date)) {
+                foreach (['am_time_in_start','am_time_in_end','am_time_out_start','am_time_out_end','pm_time_in_start','pm_time_in_end','pm_time_out_start','pm_time_out_end'] as $k) $s[$k] = null;
+            }
         } catch (\Throwable $e) {}
     }
     return $s;
@@ -305,6 +310,86 @@ if (!function_exists('attsch_js_map')) {
     }
 }
 
+/* ════════════════════════════════════════════════════════════════════
+   NEW (OJT ends at the required hours): a student's OJT ends on the day their
+   rendered duty hours (all logs, all companies — same total as the Student List
+   and the OJT End marker) reach the "Total Required Hours" of their course on
+   course_offering.php. From the next day on, nothing is required of the student:
+   no Absent / Missed / Incomplete, no new sign-ins. A student without a Course
+   Offering (or without a total) simply never ends. A day that holds a real entry
+   is always shown as recorded.
+   ════════════════════════════════════════════════════════════════════ */
+if (!function_exists('ojtend_dates')) {
+    // [student_id => 'Y-m-d' (the day the required hours were reached)]; students who have not reached them are left out
+    function ojtend_dates($conn, array $ids): array {
+        static $cache = [];
+        $ids = array_values(array_unique(array_filter(array_map('intval', $ids))));
+        sort($ids);
+        if (empty($ids)) return [];
+        $key = implode(',', $ids);
+        if (isset($cache[$key])) return $cache[$key];
+        $out = [];
+        try {
+            $norm = function($c) { $c = preg_replace('/\s+/', ' ', trim((string)$c)); return function_exists('mb_strtolower') ? mb_strtolower($c) : strtolower($c); };
+            $hasCol = function($table, $col) use ($conn) {
+                $r = $conn->query("SHOW COLUMNS FROM `$table` LIKE '" . $conn->real_escape_string($col) . "'");
+                return $r && $r->num_rows > 0;
+            };
+            $rules = [];
+            $r = $conn->query("SELECT course, total_hours FROM course_offerings");
+            if ($r) { while ($row = $r->fetch_assoc()) { if ((int)$row['total_hours'] > 0) $rules[$norm($row['course'])] = (int)$row['total_hours']; } }
+            if (empty($rules)) return $cache[$key] = [];
+
+            $courses = [];
+            if ($hasCol('users', 'course')) {
+                $r = $conn->query("SELECT id, course FROM users WHERE id IN ($key)");
+                if ($r) { while ($row = $r->fetch_assoc()) if (trim((string)$row['course']) !== '') $courses[(int)$row['id']] = $row['course']; }
+            }
+            if ($hasCol('student_information', 'course')) {
+                $r = $conn->query("SELECT user_id, MAX(course) AS course FROM student_information WHERE user_id IN ($key) GROUP BY user_id");
+                if ($r) { while ($row = $r->fetch_assoc()) if (!isset($courses[(int)$row['user_id']]) && trim((string)$row['course']) !== '') $courses[(int)$row['user_id']] = $row['course']; }
+            }
+
+            $need = [];
+            foreach ($ids as $i) { $k = $norm($courses[$i] ?? ''); if ($k !== '' && isset($rules[$k])) $need[$i] = (int)round($rules[$k] * 3600); }
+            if (empty($need)) return $cache[$key] = [];
+
+            $sec = function($p) {
+                return "GREATEST(0, COALESCE(CASE
+                    WHEN {$p}_time_in  IS NOT NULL AND {$p}_time_in  != '' AND {$p}_time_in  != 'missed'
+                     AND {$p}_time_out IS NOT NULL AND {$p}_time_out != '' AND {$p}_time_out != 'missed'
+                    THEN CASE
+                        WHEN {$p}_time_in LIKE '%-%-% %' AND {$p}_time_out LIKE '%-%-% %'
+                        THEN TIMESTAMPDIFF(SECOND, {$p}_time_in, {$p}_time_out)
+                        ELSE (TIME_TO_SEC(TIME({$p}_time_out)) - TIME_TO_SEC(TIME({$p}_time_in)))
+                    END
+                    ELSE 0
+                END, 0))";
+            };
+            $needList = implode(',', array_keys($need));
+            $r = $conn->query("SELECT user_id, date, SUM(" . $sec('am') . " + " . $sec('pm') . ") AS secs
+                               FROM attendance_logs WHERE user_id IN ($needList) GROUP BY user_id, date ORDER BY user_id, date ASC");
+            $running = [];
+            if ($r) {
+                while ($row = $r->fetch_assoc()) {
+                    $u = (int)$row['user_id'];
+                    if (isset($out[$u])) continue;
+                    $running[$u] = ($running[$u] ?? 0) + (int)round((float)$row['secs']);
+                    if ($running[$u] >= $need[$u]) $out[$u] = $row['date'];
+                }
+            }
+        } catch (\Throwable $e) { $out = []; }
+        return $cache[$key] = $out;
+    }
+}
+if (!function_exists('ojtend_is_after')) {
+    // true when $day is after the student's OJT end date (the day the required hours were reached)
+    function ojtend_is_after(array $endMap, $studentId, string $day): bool {
+        $e = $endMap[(int)$studentId] ?? null;
+        return $e !== null && $day > $e;
+    }
+}
+
 // ================= AUTO-MISSED CHECK & MARKING =================
 function autoMarkMissed($conn, $user_id, $company_id, $date, $current_time) {
     if ((int)date('w', strtotime($date)) === 0 || (int)date('w', strtotime($date)) === 6) return [];
@@ -477,6 +562,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET' && isset($_GET['action']) && $_GET['act
     $rows = $res->get_result()->fetch_all(MYSQLI_ASSOC);
     $log_map = [];
     $sched_map = attsch_load($conn, [(int)$user_id]); // NEW (student schedule)
+    $end_map   = ojtend_dates($conn, [(int)$user_id]); // NEW (OJT ends at the required hours)
     foreach ($rows as $row) {
         $amIn  = $row['am_time_in'];
         $amOut = $row['am_time_out'];
@@ -520,6 +606,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET' && isset($_GET['action']) && $_GET['act
         if ($day_str < $ojt_start)   $status = 'before_start';
         elseif ($is_wknd)            $status = 'dayoff';
         elseif ($day_str > $today)   $status = 'future';
+        elseif (empty($entry['has_real']) && ojtend_is_after($end_map, $user_id, $day_str)) $status = 'ojt_ended'; // NEW (OJT ends at the required hours): OJT already completed
         elseif (empty($entry['has_real']) && !attsch_is_scheduled($sched_map, $user_id, $day_str)) $status = 'noschedule'; // NEW (student schedule): not a duty day → never absent
         elseif (!$entry)             $status = 'A';
         else                         $status = $entry['status'];
@@ -849,11 +936,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
 
     // Block late requests for skipped duty periods
     if (in_array($type, ['am_time_in','am_time_out']) && isAmSkipped($setting)) {
-        echo json_encode(['success' => false, 'message' => 'AM duty is not required for your company or schedule.']);
+        echo json_encode(['success' => false, 'message' => 'AM duty is not required for your company, schedule or completed OJT.']);
         exit;
     }
     if (in_array($type, ['pm_time_in','pm_time_out']) && isPmSkipped($setting)) {
-        echo json_encode(['success' => false, 'message' => 'PM duty is not required for your company or schedule.']);
+        echo json_encode(['success' => false, 'message' => 'PM duty is not required for your company, schedule or completed OJT.']);
         exit;
     }
 
@@ -1199,11 +1286,15 @@ $active_step = get_active_step(
 );
 if ($is_weekend) $active_step = 'weekend';
 
+// NEW (OJT ends at the required hours): the day the student reached the course's required hours (null = not reached yet)
+$ojt_end_date     = ojtend_dates($conn, [(int)$user_id])[(int)$user_id] ?? null;
+$ojt_ended_today  = !$is_weekend && $ojt_end_date !== null && $date > $ojt_end_date && !attsch_has_real_entry($attendance ?? null);
+
 // NEW (student schedule): today is not a duty day for this student (neither Day nor Evening schedule) and nothing was recorded
 $sched_today      = attsch_periods(attsch_load($conn, [(int)$user_id]), $user_id, $date);
-$not_sched_today  = !$is_weekend && !$sched_today['am'] && !$sched_today['pm'] && !attsch_has_real_entry($attendance ?? null);
+$not_sched_today  = !$is_weekend && !$ojt_ended_today && !$sched_today['am'] && !$sched_today['pm'] && !attsch_has_real_entry($attendance ?? null);
 $sched_note_today = '';
-if (!$is_weekend && !$not_sched_today && ($sched_today['am'] xor $sched_today['pm'])) {
+if (!$is_weekend && !$not_sched_today && !$ojt_ended_today && ($sched_today['am'] xor $sched_today['pm'])) {
     $sched_note_today = $sched_today['am'] ? 'Today you are scheduled for the Day (AM) duty only.' : 'Today you are scheduled for the Evening (PM) duty only.';
 }
 
@@ -3362,6 +3453,13 @@ body { background: var(--grid-bg); color: #2d3748; font-family: 'Segoe UI', Taho
             <p>No attendance entry required on weekends.</p>
         </div>
 
+        <?php elseif ($ojt_ended_today): ?>
+        <div class="weekend-banner">
+            <span class="wb-icon"><i class="fas fa-flag-checkered"></i></span>
+            <h3>OJT Completed</h3>
+            <p>You reached your required OJT hours on <?= htmlspecialchars(date('F j, Y', strtotime($ojt_end_date))) ?>. No more attendance entries are needed — congratulations!</p>
+        </div>
+
         <?php elseif ($not_sched_today): ?>
         <div class="weekend-banner">
             <span class="wb-icon"><i class="fas fa-calendar-xmark"></i></span>
@@ -3439,7 +3537,7 @@ body { background: var(--grid-bg); color: #2d3748; font-family: 'Segoe UI', Taho
         <?php endif; ?>
 
         <!-- Skipped duty notices (informational) -->
-        <?php if (!$is_weekend && $todaySettings && !$not_sched_today): ?>
+        <?php if (!$is_weekend && $todaySettings && !$not_sched_today && !$ojt_ended_today): ?>
             <?php if ($am_skipped): ?>
             <div class="skipped-duty-notice">
                 <span class="sdn-icon"><i class="fas fa-circle-info"></i></span>

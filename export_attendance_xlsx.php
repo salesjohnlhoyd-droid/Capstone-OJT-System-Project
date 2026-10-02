@@ -202,7 +202,88 @@ if (!function_exists('attsch_js_map')) {
     }
 }
 
+/* ════════════════════════════════════════════════════════════════════
+   NEW (OJT ends at the required hours): a student's OJT ends on the day their
+   rendered duty hours (all logs, all companies — same total as the Student List
+   and the OJT End marker) reach the "Total Required Hours" of their course on
+   course_offering.php. From the next day on, nothing is required of the student:
+   no Absent / Missed / Incomplete, no new sign-ins. A student without a Course
+   Offering (or without a total) simply never ends. A day that holds a real entry
+   is always shown as recorded.
+   ════════════════════════════════════════════════════════════════════ */
+if (!function_exists('ojtend_dates')) {
+    // [student_id => 'Y-m-d' (the day the required hours were reached)]; students who have not reached them are left out
+    function ojtend_dates($conn, array $ids): array {
+        static $cache = [];
+        $ids = array_values(array_unique(array_filter(array_map('intval', $ids))));
+        sort($ids);
+        if (empty($ids)) return [];
+        $key = implode(',', $ids);
+        if (isset($cache[$key])) return $cache[$key];
+        $out = [];
+        try {
+            $norm = function($c) { $c = preg_replace('/\s+/', ' ', trim((string)$c)); return function_exists('mb_strtolower') ? mb_strtolower($c) : strtolower($c); };
+            $hasCol = function($table, $col) use ($conn) {
+                $r = $conn->query("SHOW COLUMNS FROM `$table` LIKE '" . $conn->real_escape_string($col) . "'");
+                return $r && $r->num_rows > 0;
+            };
+            $rules = [];
+            $r = $conn->query("SELECT course, total_hours FROM course_offerings");
+            if ($r) { while ($row = $r->fetch_assoc()) { if ((int)$row['total_hours'] > 0) $rules[$norm($row['course'])] = (int)$row['total_hours']; } }
+            if (empty($rules)) return $cache[$key] = [];
+
+            $courses = [];
+            if ($hasCol('users', 'course')) {
+                $r = $conn->query("SELECT id, course FROM users WHERE id IN ($key)");
+                if ($r) { while ($row = $r->fetch_assoc()) if (trim((string)$row['course']) !== '') $courses[(int)$row['id']] = $row['course']; }
+            }
+            if ($hasCol('student_information', 'course')) {
+                $r = $conn->query("SELECT user_id, MAX(course) AS course FROM student_information WHERE user_id IN ($key) GROUP BY user_id");
+                if ($r) { while ($row = $r->fetch_assoc()) if (!isset($courses[(int)$row['user_id']]) && trim((string)$row['course']) !== '') $courses[(int)$row['user_id']] = $row['course']; }
+            }
+
+            $need = [];
+            foreach ($ids as $i) { $k = $norm($courses[$i] ?? ''); if ($k !== '' && isset($rules[$k])) $need[$i] = (int)round($rules[$k] * 3600); }
+            if (empty($need)) return $cache[$key] = [];
+
+            $sec = function($p) {
+                return "GREATEST(0, COALESCE(CASE
+                    WHEN {$p}_time_in  IS NOT NULL AND {$p}_time_in  != '' AND {$p}_time_in  != 'missed'
+                     AND {$p}_time_out IS NOT NULL AND {$p}_time_out != '' AND {$p}_time_out != 'missed'
+                    THEN CASE
+                        WHEN {$p}_time_in LIKE '%-%-% %' AND {$p}_time_out LIKE '%-%-% %'
+                        THEN TIMESTAMPDIFF(SECOND, {$p}_time_in, {$p}_time_out)
+                        ELSE (TIME_TO_SEC(TIME({$p}_time_out)) - TIME_TO_SEC(TIME({$p}_time_in)))
+                    END
+                    ELSE 0
+                END, 0))";
+            };
+            $needList = implode(',', array_keys($need));
+            $r = $conn->query("SELECT user_id, date, SUM(" . $sec('am') . " + " . $sec('pm') . ") AS secs
+                               FROM attendance_logs WHERE user_id IN ($needList) GROUP BY user_id, date ORDER BY user_id, date ASC");
+            $running = [];
+            if ($r) {
+                while ($row = $r->fetch_assoc()) {
+                    $u = (int)$row['user_id'];
+                    if (isset($out[$u])) continue;
+                    $running[$u] = ($running[$u] ?? 0) + (int)round((float)$row['secs']);
+                    if ($running[$u] >= $need[$u]) $out[$u] = $row['date'];
+                }
+            }
+        } catch (\Throwable $e) { $out = []; }
+        return $cache[$key] = $out;
+    }
+}
+if (!function_exists('ojtend_is_after')) {
+    // true when $day is after the student's OJT end date (the day the required hours were reached)
+    function ojtend_is_after(array $endMap, $studentId, string $day): bool {
+        $e = $endMap[(int)$studentId] ?? null;
+        return $e !== null && $day > $e;
+    }
+}
+
 $exp_sched = attsch_load($conn, array_keys($exp_students)); // NEW (student schedule)
+$exp_ojt_end = ojtend_dates($conn, array_keys($exp_students)); // NEW (OJT ends at the required hours)
 
 // ── Logs ──────────────────────────────────────────────────────────────────────
 $log_res = $conn->query("
@@ -270,6 +351,8 @@ foreach ($exp_students as $sid => $stu) {
             $row[] = 'OFF';
         } elseif ($d > $today_str) {
             $row[] = '';
+        } elseif (empty($exp_has_entry[$sid][$d]) && ojtend_is_after($exp_ojt_end, $sid, $d)) {
+            $row[] = ''; // NEW (OJT ends at the required hours): the student already completed the OJT
         } elseif (empty($exp_has_entry[$sid][$d]) && !attsch_is_scheduled($exp_sched, $sid, $d)) {
             $row[] = 'NOT SCHEDULED'; // NEW (student schedule): not a duty day for this student — never absent
         } elseif ($d === $today_str && empty($exp_has_entry[$sid][$d])) {

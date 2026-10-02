@@ -454,6 +454,86 @@ if (!function_exists('attsch_js_map')) {
 }
 
 /* ════════════════════════════════════════════════════════════════════
+   NEW (OJT ends at the required hours): a student's OJT ends on the day their
+   rendered duty hours (all logs, all companies — same total as the Student List
+   and the OJT End marker) reach the "Total Required Hours" of their course on
+   course_offering.php. From the next day on, nothing is required of the student:
+   no Absent / Missed / Incomplete, no new sign-ins. A student without a Course
+   Offering (or without a total) simply never ends. A day that holds a real entry
+   is always shown as recorded.
+   ════════════════════════════════════════════════════════════════════ */
+if (!function_exists('ojtend_dates')) {
+    // [student_id => 'Y-m-d' (the day the required hours were reached)]; students who have not reached them are left out
+    function ojtend_dates($conn, array $ids): array {
+        static $cache = [];
+        $ids = array_values(array_unique(array_filter(array_map('intval', $ids))));
+        sort($ids);
+        if (empty($ids)) return [];
+        $key = implode(',', $ids);
+        if (isset($cache[$key])) return $cache[$key];
+        $out = [];
+        try {
+            $norm = function($c) { $c = preg_replace('/\s+/', ' ', trim((string)$c)); return function_exists('mb_strtolower') ? mb_strtolower($c) : strtolower($c); };
+            $hasCol = function($table, $col) use ($conn) {
+                $r = $conn->query("SHOW COLUMNS FROM `$table` LIKE '" . $conn->real_escape_string($col) . "'");
+                return $r && $r->num_rows > 0;
+            };
+            $rules = [];
+            $r = $conn->query("SELECT course, total_hours FROM course_offerings");
+            if ($r) { while ($row = $r->fetch_assoc()) { if ((int)$row['total_hours'] > 0) $rules[$norm($row['course'])] = (int)$row['total_hours']; } }
+            if (empty($rules)) return $cache[$key] = [];
+
+            $courses = [];
+            if ($hasCol('users', 'course')) {
+                $r = $conn->query("SELECT id, course FROM users WHERE id IN ($key)");
+                if ($r) { while ($row = $r->fetch_assoc()) if (trim((string)$row['course']) !== '') $courses[(int)$row['id']] = $row['course']; }
+            }
+            if ($hasCol('student_information', 'course')) {
+                $r = $conn->query("SELECT user_id, MAX(course) AS course FROM student_information WHERE user_id IN ($key) GROUP BY user_id");
+                if ($r) { while ($row = $r->fetch_assoc()) if (!isset($courses[(int)$row['user_id']]) && trim((string)$row['course']) !== '') $courses[(int)$row['user_id']] = $row['course']; }
+            }
+
+            $need = [];
+            foreach ($ids as $i) { $k = $norm($courses[$i] ?? ''); if ($k !== '' && isset($rules[$k])) $need[$i] = (int)round($rules[$k] * 3600); }
+            if (empty($need)) return $cache[$key] = [];
+
+            $sec = function($p) {
+                return "GREATEST(0, COALESCE(CASE
+                    WHEN {$p}_time_in  IS NOT NULL AND {$p}_time_in  != '' AND {$p}_time_in  != 'missed'
+                     AND {$p}_time_out IS NOT NULL AND {$p}_time_out != '' AND {$p}_time_out != 'missed'
+                    THEN CASE
+                        WHEN {$p}_time_in LIKE '%-%-% %' AND {$p}_time_out LIKE '%-%-% %'
+                        THEN TIMESTAMPDIFF(SECOND, {$p}_time_in, {$p}_time_out)
+                        ELSE (TIME_TO_SEC(TIME({$p}_time_out)) - TIME_TO_SEC(TIME({$p}_time_in)))
+                    END
+                    ELSE 0
+                END, 0))";
+            };
+            $needList = implode(',', array_keys($need));
+            $r = $conn->query("SELECT user_id, date, SUM(" . $sec('am') . " + " . $sec('pm') . ") AS secs
+                               FROM attendance_logs WHERE user_id IN ($needList) GROUP BY user_id, date ORDER BY user_id, date ASC");
+            $running = [];
+            if ($r) {
+                while ($row = $r->fetch_assoc()) {
+                    $u = (int)$row['user_id'];
+                    if (isset($out[$u])) continue;
+                    $running[$u] = ($running[$u] ?? 0) + (int)round((float)$row['secs']);
+                    if ($running[$u] >= $need[$u]) $out[$u] = $row['date'];
+                }
+            }
+        } catch (\Throwable $e) { $out = []; }
+        return $cache[$key] = $out;
+    }
+}
+if (!function_exists('ojtend_is_after')) {
+    // true when $day is after the student's OJT end date (the day the required hours were reached)
+    function ojtend_is_after(array $endMap, $studentId, string $day): bool {
+        $e = $endMap[(int)$studentId] ?? null;
+        return $e !== null && $day > $e;
+    }
+}
+
+/* ════════════════════════════════════════════════════════════════════
    UPDATED (Live updates instead of auto page reload): a small fingerprint
    of everything this page displays (attendance logs, late requests,
    schedules, assigned students, course rules and today's date). The page
@@ -521,6 +601,7 @@ if (isset($_GET['export']) && $_GET['export'] == '1') {
     }
     $exp_first = attm_first_attendance_map($conn, array_keys($exp_students)); // UPDATED (Start = first attendance)
     $exp_sched = attsch_load($conn, array_keys($exp_students)); // NEW (student schedule)
+    $exp_ojt_end = ojtend_dates($conn, array_keys($exp_students)); // NEW (OJT ends at the required hours)
 
     $log_res = $conn->query("
         SELECT user_id, date, am_time_in, am_time_out, pm_time_in, pm_time_out
@@ -578,6 +659,8 @@ if (isset($_GET['export']) && $_GET['export'] == '1') {
                 $row[] = '';
             } elseif (attm_before_start($exp_first, $sid, $d)) {
                 $row[] = ''; // UPDATED: before first attendance — not absent / missed
+            } elseif (empty($exp_has_entry[$sid][$d]) && ojtend_is_after($exp_ojt_end, $sid, $d)) {
+                $row[] = ''; // NEW (OJT ends at the required hours): the student already completed the OJT
             } elseif (empty($exp_has_entry[$sid][$d]) && !attsch_is_scheduled($exp_sched, $sid, $d)) {
                 $row[] = 'NOT SCHEDULED'; // NEW (student schedule): not a duty day for this student — never absent
             } elseif ($d === date('Y-m-d') && empty($exp_has_entry[$sid][$d])) {
@@ -1099,6 +1182,12 @@ if ($today_dow === 0 || $today_dow === 6) {
         $ts_nr = $conn->query("SELECT user_id, am_time_in, am_time_out, pm_time_in, pm_time_out FROM attendance_logs WHERE company_id=$company_id AND date='$today_str'");
         if ($ts_nr) { while ($tn = $ts_nr->fetch_assoc()) { $ts_rows_today[(int)$tn['user_id']] = $tn; if (attsch_has_real_entry($tn)) $ts_real_today[(int)$tn['user_id']] = true; } }
     } catch (\Throwable $e) {}
+    $ts_end = ojtend_dates($conn, $ts_all_ids); // NEW (OJT ends at the required hours)
+    $ts_completed_count = 0;
+    $ts_started = array_values(array_filter($ts_started, function($sid) use ($ts_end, $ts_real_today, $today_str, &$ts_completed_count) {
+        if (ojtend_is_after($ts_end, $sid, $today_str) && empty($ts_real_today[(int)$sid])) { $ts_completed_count++; return false; }
+        return true;
+    }));
     $ts_not_sched_count = 0;
     $ts_started = array_values(array_filter($ts_started, function($sid) use ($ts_sched, $ts_real_today, $today_str, &$ts_not_sched_count) {
         if (attsch_is_scheduled($ts_sched, $sid, $today_str) || !empty($ts_real_today[(int)$sid])) return true;
@@ -1152,6 +1241,7 @@ if ($today_dow === 0 || $today_dow === 6) {
             'day_off'    => 0,
             'total'      => $total,
             'not_scheduled' => $ts_not_sched_count, // NEW (student schedule)
+            'completed'     => $ts_completed_count, // NEW (OJT ends at the required hours)
         ];
     }
 }
@@ -1212,6 +1302,7 @@ $res = $conn->query("
 while ($row = $res->fetch_assoc()) { $students[$row['id']] = $row; }
 $student_first_attendance = attm_first_attendance_map($conn, array_keys($students)); // UPDATED (Start = first attendance)
 $student_sched = attsch_load($conn, array_keys($students)); // NEW (student schedule)
+$student_ojt_end = ojtend_dates($conn, array_keys($students)); // NEW (OJT ends at the required hours)
 
 /* ════════════════════════════════════════════════════════════════════
    UPDATED (Start / End indicators in the Monthly Attendance Summary):
@@ -1413,6 +1504,8 @@ foreach ($all_chart_months as $ym) {
 
         foreach ($students as $sid => $s) {
             if (attm_before_start($student_first_attendance, $sid, $day_str)) continue; // UPDATED: not started yet
+            // NEW (OJT ends at the required hours): after the student's OJT end date nothing is counted unless something was recorded
+            if (ojtend_is_after($student_ojt_end, $sid, $day_str) && !attsch_has_real_entry($all_logs[$sid][$day_str] ?? null)) continue;
             // NEW (student schedule): not a duty day for this student and nothing recorded → not counted at all
             if (!attsch_has_real_entry($all_logs[$sid][$day_str] ?? null) && !attsch_is_scheduled($student_sched, $sid, $day_str)) continue;
             if (isset($all_logs[$sid][$day_str])) {
@@ -1851,6 +1944,7 @@ body { margin: 0; display: flex; min-height: 100vh; font-family: 'Segoe UI', Tah
 .sm-mark-end   { color:#A02A2A; }
 .sm-mark-est   { opacity:.55; }
 .sm-table td.sm-nosched { background:#eff6ff; color:#2563eb; font-style:italic; } /* NEW (student schedule): not scheduled that day */
+.sm-table td.sm-ended { background:#f1f5f9; } /* NEW (OJT ends at the required hours) */
 .sm-table td.sm-before-start { background:#f8fafc; color:#cbd5e1; } /* UPDATED: before first attendance */
 .sm-table td.sm-has-mark { box-shadow:inset 0 0 0 1px rgba(21,101,192,.25); }
 .sm-table tbody tr:hover td { filter:brightness(0.97); }
@@ -2528,7 +2622,7 @@ tr.day-off-row td { background:#ede7f6; color:#512da8; font-style:italic; }
                     <span class="sm-legend-item"><i class="fas fa-play-circle sm-mark-start" style="font-size:10px;"></i><span style="color:#2C5A2C;">OJT Start</span></span>
                     <span class="sm-legend-item"><i class="fas fa-stop-circle sm-mark-end" style="font-size:10px;"></i><span style="color:#A02A2A;">OJT End</span></span>
                     <span class="sm-legend-item"><i class="fas fa-stop-circle sm-mark-end sm-mark-est" style="font-size:10px;"></i><span style="color:#A02A2A;">OJT End (est.)</span></span>
-                    <span class="sm-legend-item"><span class="sm-legend-dot" style="background:#f8fafc;border:1px solid #e2e8f0;"></span><span style="color:#64748b;">Blank — Before first attendance</span></span>
+                    <span class="sm-legend-item"><span class="sm-legend-dot" style="background:#f8fafc;border:1px solid #e2e8f0;"></span><span style="color:#64748b;">Blank — Before first attendance / after OJT completion</span></span>
                 </div>
 
                 <div id="summaryTableWrapper">
@@ -2570,11 +2664,14 @@ tr.day-off-row td { background:#ede7f6; color:#512da8; font-style:italic; }
                                 if ($is_wkd) {
                                     $val = 'O'; $cls = 'sm-off';
                                 } elseif ($d > date("Y-m-d")) {
+                                    // NEW (OJT ends at the required hours): nothing is shown for upcoming days after the OJT end date
                                     // NEW (student schedule): upcoming days the student is not scheduled on carry the marker too
-                                    if (!attm_before_start($student_first_attendance, $id, $d) && !attsch_is_scheduled($student_sched, $id, $d)) { $val = 'N'; $cls = 'sm-nosched'; }
+                                    if (!attm_before_start($student_first_attendance, $id, $d) && !ojtend_is_after($student_ojt_end, $id, $d) && !attsch_is_scheduled($student_sched, $id, $d)) { $val = 'N'; $cls = 'sm-nosched'; }
                                     else { $val = ''; $cls = ''; }
                                 } elseif (attm_before_start($student_first_attendance, $id, $d)) {
                                     $val = ''; $cls = 'sm-before-start'; // UPDATED: before first attendance — not absent / missed
+                                } elseif (empty($logs_has_entry[$id][$d]) && ojtend_is_after($student_ojt_end, $id, $d)) {
+                                    $val = ''; $cls = 'sm-before-start sm-ended'; // NEW (OJT ends at the required hours): OJT already completed
                                 } elseif (empty($logs_has_entry[$id][$d]) && !attsch_is_scheduled($student_sched, $id, $d)) {
                                     $val = 'N'; $cls = 'sm-nosched'; // NEW (student schedule): not scheduled on this day → not absent
                                 } elseif ($d === date("Y-m-d") && empty($logs_has_entry[$id][$d])) {
@@ -2714,7 +2811,7 @@ tr.day-off-row td { background:#ede7f6; color:#512da8; font-style:italic; }
             </div>
             <div class="panel-card-body" style="padding:14px 16px;">
                 <div style="font-size:11px; color:#9ca3af; margin-bottom:10px; font-weight:600;">
-                    <?= date("l, F j") ?> &middot; <?= $today_stats['total'] ?> student<?= $today_stats['total'] !== 1 ? 's' : '' ?><?php if (!empty($today_stats['not_scheduled'])): ?> &middot; <?= (int)$today_stats['not_scheduled'] ?> not scheduled today<?php endif; ?>
+                    <?= date("l, F j") ?> &middot; <?= $today_stats['total'] ?> student<?= $today_stats['total'] !== 1 ? 's' : '' ?><?php if (!empty($today_stats['not_scheduled'])): ?> &middot; <?= (int)$today_stats['not_scheduled'] ?> not scheduled today<?php endif; ?><?php if (!empty($today_stats['completed'])): ?> &middot; <?= (int)$today_stats['completed'] ?> completed OJT<?php endif; ?>
                 </div>
                 <div class="kpi-card kpi-present">
                     <span class="kpi-icon"><i class="fas fa-check-circle" style="color:#15803d;font-size:20px;"></i></span>
@@ -3339,10 +3436,12 @@ function liveApplyPage(html) {
     // First-attendance maps used by the Attendance Log popup (NOT STARTED rows)
     const byId   = html.match(/const _firstAttendanceById\s*=\s*(\{[\s\S]*?\});/);
     const byName = html.match(/const _firstAttendanceByName\s*=\s*(\{[\s\S]*?\});/);
+    const byEnd = html.match(/const _ojtEndById\s*=\s*(\{[\s\S]*?\});\s*\n/); // NEW (OJT ends at the required hours)
     const bySched = html.match(/const _schedById\s*=\s*(\{[\s\S]*?\});\s*\n/); // NEW (student schedule)
     try {
         if (byId)   { const o = JSON.parse(byId[1]);   Object.keys(_firstAttendanceById).forEach(k => delete _firstAttendanceById[k]);   Object.assign(_firstAttendanceById, o); }
         if (byName) { const o = JSON.parse(byName[1]); Object.keys(_firstAttendanceByName).forEach(k => delete _firstAttendanceByName[k]); Object.assign(_firstAttendanceByName, o); }
+        if (byEnd) { const o = JSON.parse(byEnd[1]); Object.keys(_ojtEndById).forEach(k => delete _ojtEndById[k]); Object.assign(_ojtEndById, o); }
         if (bySched) { const o = JSON.parse(bySched[1]); Object.keys(_schedById).forEach(k => delete _schedById[k]); Object.assign(_schedById, o); }
     } catch (e) {}
 
@@ -3945,6 +4044,8 @@ const _firstAttendanceByName = <?php
 /* NEW (student schedule): each student's Day (AM duty) / Evening (PM duty) training days (0=Sun…6=Sat numbers, null = both
    duties every weekday) and dated schedule changes, so the Attendance Log judges a student only on the duties they are scheduled for. */
 const _schedById = <?= json_encode(attsch_js_map($student_sched)) ?>;
+/* NEW (OJT ends at the required hours): the day each student reached the course's required hours; later days are never ABSENT / INCOMPLETE. */
+const _ojtEndById = <?= json_encode((object)array_map('strval', $student_ojt_end)) ?>;
 function schedPeriods(row, dateStr){
     const both = {am:true, pm:true};
     const id = row.student_id ?? row.user_id ?? row.id;
@@ -4105,12 +4206,19 @@ function renderAttPage(){
             r = Object.assign({}, r, {status:'NOT STARTED', am_time_in:null, am_time_out:null, pm_time_in:null, pm_time_out:null});
         }
         // NEW (student schedule): not a duty day for this student and nothing recorded → NOT SCHEDULED, never ABSENT
+        if(!_attIsWeekend && _attData && _attData.date && (r.status==='ABSENT'||r.status==='INCOMPLETE')){
+            const eid = r.student_id ?? r.user_id ?? r.id;
+            const eEnd = (eid !== undefined && eid !== null) ? _ojtEndById[String(eid)] : undefined;
+            if (eEnd && _attData.date > eEnd && !['am_time_in','am_time_out','pm_time_in','pm_time_out'].some(k => attHasReal(r[k]))) {
+                r = Object.assign({}, r, {status:'OJT COMPLETED', am_time_in:null, am_time_out:null, pm_time_in:null, pm_time_out:null});
+            }
+        }
         if(!_attIsWeekend && _attData && _attData.date && (r.status==='ABSENT'||r.status==='INCOMPLETE'||r.status==='PRESENT')){
             const ss = schedStatus(r,_attData.date);
             if (ss === 'NOT SCHEDULED') r = Object.assign({}, r, {status:'NOT SCHEDULED', am_time_in:null, am_time_out:null, pm_time_in:null, pm_time_out:null});
             else if (ss) r = Object.assign({}, r, {status:ss});
         }
-        const rowNum=start+i+1,cls=(r.status==='NOT STARTED'?'pending':(r.status==='NOT SCHEDULED'?'nosched':(statusClass[r.status]||'')));
+        const rowNum=start+i+1,cls=(r.status==='NOT STARTED'?'pending':((r.status==='NOT SCHEDULED'||r.status==='OJT COMPLETED')?'nosched':(statusClass[r.status]||'')));
         if(_attIsWeekend){return`<tr class="day-off-row"><td style="padding:8px 6px;text-align:center;color:#aaa;font-size:11px;">${rowNum}</td><td style="padding:8px 10px;">${escH(r.name)}</td><td class="day-off" style="text-align:center;">DAY OFF</td></tr>`;}
         return`<tr><td style="padding:8px 6px;text-align:center;color:#aaa;font-size:11px;white-space:nowrap;">${rowNum}</td><td style="padding:8px 10px;white-space:nowrap;">${escH(r.name)}</td><td style="text-align:center;padding:5px;">${mkTime(r.am_time_in)}</td><td style="text-align:center;padding:5px;">${mkPhoto(r.am_time_in_photo)}</td><td style="text-align:center;padding:5px;">${mkTime(r.am_time_out)}</td><td style="text-align:center;padding:5px;">${mkPhoto(r.am_time_out_photo)}</td><td style="text-align:center;padding:5px;">${mkTime(r.pm_time_in)}</td><td style="text-align:center;padding:5px;">${mkPhoto(r.pm_time_in_photo)}</td><td style="text-align:center;padding:5px;">${mkTime(r.pm_time_out)}</td><td style="text-align:center;padding:5px;">${mkPhoto(r.pm_time_out_photo)}</td><td class="${cls}" style="text-align:center;padding:5px;font-weight:700;">${escH(r.status)}</td></tr>`;
     }).join('');
