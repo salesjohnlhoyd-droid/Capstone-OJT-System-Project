@@ -743,11 +743,15 @@ function renderApplicantRow($conn, $company_id, $company_name, $app, $currentCou
     $dayRaw   = trim((string)($app['day_sched'] ?? ''));
     $eveRaw   = trim((string)($app['evening_sched'] ?? ''));
     $hasSched = ($dayRaw !== '' || $eveRaw !== '');
-    $schedCell = '<div class="apl-sched-line"><span class="apl-sched-k">Day</span><span class="apl-sched-v">' . $h(aplSchedLabel($dayRaw)) . '</span></div>'
+    $schedCell = '<div class="apl-sched-row"><div class="apl-sched-lines">'
+        . '<div class="apl-sched-line"><span class="apl-sched-k">Day</span><span class="apl-sched-v">' . $h(aplSchedLabel($dayRaw)) . '</span></div>'
         . '<div class="apl-sched-line"><span class="apl-sched-k">Evening</span><span class="apl-sched-v">' . $h(aplSchedLabel($eveRaw)) . '</span></div>'
+        . '</div>'
         . ($hasSched
             ? '<button type="button" class="apl-sched-edit" onclick="openSchedModal(' . $id . ')" title="Set up a new schedule for this student"><i class="fas fa-pen"></i> Edit</button>'
-            : '<div class="apl-sched-note">Not set by the student yet.</div>');
+            : '')
+        . '</div>'
+        . ($hasSched ? '' : '<div class="apl-sched-note">Not set by the student yet.</div>');
 
     return '<tr id="appRow' . $id . '" class="applicant-row"'
         . ' data-app-id="' . $id . '"'
@@ -2357,13 +2361,28 @@ $result = $stmt->get_result();
         #applicantTable .apl-app-actions { flex-wrap: nowrap; }
         #applicantTable td:nth-child(6) { min-width: 86px; }
         /* NEW (schedule change): Schedule column + the "Set Up New Schedule" popup (same look as #rejectModal) */
-        #applicantTable td.apl-sched { min-width: 150px; font-size: 12.5px; color: #334155; }
+        #applicantTable td.apl-sched { font-size: 12.5px; color: #334155; }
+        .apl-sched-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+        .apl-sched-lines { min-width: 0; }
         .apl-sched-line { display: flex; gap: 6px; line-height: 1.5; white-space: nowrap; }
         .apl-sched-k { font-weight: 700; color: #64748b; min-width: 52px; }
         .apl-sched-v { color: #1e293b; }
         .apl-sched-note { font-size: 11.5px; color: #94a3b8; font-style: italic; }
-        .apl-sched-edit { margin-top: 6px; display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px; border-radius: 7px; border: 1px solid #c7d2fe; background: #f8f7ff; color: var(--neust-maroon); font-size: 11.5px; font-weight: 700; cursor: pointer; }
+        .apl-sched-edit { flex-shrink: 0; margin: 0; display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px; border-radius: 7px; border: 1px solid #c7d2fe; background: #f8f7ff; color: var(--neust-maroon); font-size: 11.5px; font-weight: 700; cursor: pointer; }
         .apl-sched-edit:hover { background: #ece9ff; }
+        /* Column widths: every column keeps its own minimum width and the table has a minimum width, so a narrow
+           window (or an open side menu) makes the table scroll inside .apl-table-wrap instead of squeezing the
+           columns into each other. Later in the sheet than the older nth-child rules, so these win. */
+        #applicantTable { min-width: 1000px; }
+        #applicantTable th, #applicantTable td { padding-left: 10px; padding-right: 10px; }
+        #applicantTable th:nth-child(1), #applicantTable td:nth-child(1) { min-width: 190px; }
+        #applicantTable .apl-student { min-width: 0; }
+        #applicantTable th:nth-child(2), #applicantTable td:nth-child(2) { min-width: 110px; }
+        #applicantTable .apl-course { min-width: 0; }
+        #applicantTable th:nth-child(3), #applicantTable td:nth-child(3) { min-width: 215px; }
+        #applicantTable th:nth-child(4), #applicantTable td:nth-child(4) { min-width: 150px; white-space: nowrap; }
+        #applicantTable th:nth-child(5), #applicantTable td:nth-child(5) { min-width: 130px; }
+        #applicantTable th:nth-child(6), #applicantTable td:nth-child(6) { min-width: 80px; }
         /* "Set Up New Schedule" popup + its confirmation — the same design as company_list.php's popups:
            square bordered box, header with title + close button, sticky action bar (like #placementMismatchModal),
            and the centred icon dialog (like #cancelConfirmModal). */
