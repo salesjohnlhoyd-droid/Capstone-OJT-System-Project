@@ -2392,7 +2392,6 @@ $result = $stmt->get_result();
         #schedModal .sm-box { background: #fff; border: 1px solid #C3CADA; border-radius: 0; width: 620px; max-width: 94%; max-height: calc(100vh - 40px); max-height: calc(100dvh - 40px); display: flex; flex-direction: column; padding: 16px 24px 0 24px; box-sizing: border-box; text-align: left; animation: popIn 0.3s ease; }
         #schedModal .sm-header { display: flex; justify-content: space-between; align-items: center; flex-shrink: 0; margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px solid #C3CADA; }
         #schedModal .sm-header h3 { margin: 0; color: #1B2A4A; font-size: 15px; font-family: inherit; text-transform: uppercase; letter-spacing: 0.4px; }
-        #schedModal .sm-header h3 i { color: #A0850A; margin-right: 6px; }
         #schedModal .sm-close { background: none; border: none; font-size: 24px; line-height: 1; padding: 0 4px; cursor: pointer; color: #5A6272; transition: color 0.2s; }
         #schedModal .sm-close:hover { color: #1B2A4A; }
         #schedModal .sm-body { overflow-y: auto; flex: 1 1 auto; min-height: 0; }
@@ -2425,16 +2424,37 @@ $result = $stmt->get_result();
             #schedModal .sm-actions { flex-direction: column-reverse; }
             #schedModal .sm-actions button { width: 100%; justify-content: center; }
         }
-        #schedConfirmModal .sc-box { background: #fff; border: 1px solid #C3CADA; border-radius: 0; padding: 32px 28px; text-align: center; width: 440px; max-width: 92%; box-shadow: none; animation: popIn 0.3s cubic-bezier(0.34,1.56,0.64,1); }
-        #schedConfirmModal .sc-icon { font-size: 42px; margin-bottom: 12px; display: block; }
-        #schedConfirmModal h3 { margin: 0 0 10px; color: #A02A2A; font-size: 18px; font-family: inherit; }
-        #schedConfirmModal p { font-size: 14px; color: #5A6272; margin: 0 0 14px; line-height: 1.5; }
-        #schedConfirmModal p strong { color: #1e293b; }
-        #schedConfirmModal .sc-actions { display: flex; gap: 10px; justify-content: center; margin-top: 6px; }
-        #schedConfirmModal .sc-actions button { flex: 1; padding: 11px 24px; border: none; border-radius: 0; cursor: pointer; font-size: 14px; font-weight: 600; font-family: inherit; color: #fff; transition: opacity 0.2s; }
+        /* Confirmation: a review screen (student, current -> new table, what happens, the reason) - no icons */
+        #schedConfirmModal { padding: 20px 0; box-sizing: border-box; }
+        #schedConfirmModal .sc-box { background: #fff; border: 1px solid #C3CADA; border-radius: 0; width: 560px; max-width: 94%; max-height: calc(100vh - 40px); max-height: calc(100dvh - 40px); display: flex; flex-direction: column; padding: 16px 24px 0 24px; box-sizing: border-box; text-align: left; animation: popIn 0.3s ease; }
+        #schedConfirmModal .sc-header { flex-shrink: 0; margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px solid #C3CADA; }
+        #schedConfirmModal .sc-header h3 { margin: 0; color: #1B2A4A; font-size: 15px; font-family: inherit; text-transform: uppercase; letter-spacing: 0.4px; }
+        #schedConfirmModal .sc-body { overflow-y: auto; flex: 1 1 auto; min-height: 0; }
+        #schedConfirmModal .sc-lead { font-size: 13px; color: #475569; line-height: 1.5; margin: 0 0 10px; }
+        #schedConfirmModal .sc-student { font-weight: 700; color: #1B2A4A; background: #F0F2F8; border: 1px solid #C3CADA; padding: 7px 10px; margin-bottom: 12px; font-size: 13px; }
+        #schedConfirmModal .sc-diff { width: 100%; border-collapse: collapse; margin: 0 0 14px; font-size: 12.5px; text-align: left; border: 1px solid #C3CADA; }
+        #schedConfirmModal .sc-diff th { background: #F0F2F8; color: #1B2A4A; padding: 6px 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.3px; font-size: 11px; border-bottom: 1px solid #C3CADA; }
+        #schedConfirmModal .sc-diff td { padding: 8px 10px; border-top: 1px solid #DCE1EC; color: #2d3748; vertical-align: top; }
+        #schedConfirmModal .sc-diff td:first-child { font-weight: 700; color: #1e293b; white-space: nowrap; width: 1%; }
+        #schedConfirmModal .sc-diff td.sc-new { font-weight: 700; color: #1B2A4A; background: #EAF3EA; }
+        #schedConfirmModal .sc-diff td.sc-same { color: #5A6272; }
+        #schedConfirmModal .sc-diff td.sc-same small { display: block; font-size: 10.5px; color: #8A93A6; }
+        #schedConfirmModal .sc-h { font-size: 11px; font-weight: 700; color: #1B2A4A; text-transform: uppercase; letter-spacing: 0.3px; margin: 0 0 6px; }
+        #schedConfirmModal .sc-steps { margin: 0 0 14px; padding: 0 0 0 20px; font-size: 13px; color: #475569; line-height: 1.55; }
+        #schedConfirmModal .sc-steps li { margin-bottom: 4px; }
+        #schedConfirmModal .sc-steps strong { color: #1e293b; }
+        #schedConfirmModal .sc-reason { font-size: 12.5px; color: #2d3748; background: #FAF3DC; border: 1px solid #E6D9A8; padding: 8px 10px; margin: 0 0 12px; line-height: 1.5; word-break: break-word; white-space: pre-line; }
+        #schedConfirmModal .sc-actions { display: flex; gap: 12px; justify-content: flex-end; flex-shrink: 0; background: #fff; margin-top: 4px; padding: 10px 0 12px; border-top: 1px solid #C3CADA; }
+        #schedConfirmModal .sc-actions button { padding: 10px 24px; border-radius: 0; font-weight: 600; cursor: pointer; font-size: 12px; text-transform: uppercase; letter-spacing: 0.3px; font-family: inherit; transition: opacity 0.2s; }
         #schedConfirmModal .sc-actions button:hover { opacity: 0.88; }
-        #schedConfirmModal .sc-btn-keep { background: #DCE1EC !important; color: #2d3748 !important; }
-        #schedConfirmModal .sc-btn-confirm { background: #A02A2A; }
+        #schedConfirmModal .sc-btn-keep { background: #fff; color: #1B2A4A; border: 1px solid #C3CADA; }
+        #schedConfirmModal .sc-btn-confirm { background: #1B2A4A; color: #fff; border: 1px solid #1B2A4A; }
+        @media (max-width: 600px) {
+            #schedConfirmModal .sc-box { padding: 14px 14px 0 14px; }
+            #schedConfirmModal .sc-actions { flex-direction: column-reverse; }
+            #schedConfirmModal .sc-actions button { width: 100%; }
+            #schedConfirmModal .sc-diff td:first-child { white-space: normal; }
+        }
         .cv-top-toast.is-error i { color: #f87171; } /* an error notice: same popup, red icon (as company_list.php) */
 
         /* ══ ADJUSTMENT: icon buttons + tooltips (Application column) ══ */
@@ -2734,7 +2754,7 @@ $result = $stmt->get_result();
 <div id="schedModal" role="dialog" aria-modal="true" aria-labelledby="schedModalTitle">
     <div class="sm-box">
         <div class="sm-header">
-            <h3 id="schedModalTitle"><i class="fas fa-calendar-days"></i> Set Up New Schedule</h3>
+            <h3 id="schedModalTitle">Set Up New Schedule</h3>
             <button type="button" class="sm-close" aria-label="Close" onclick="closeSchedModal()">&times;</button>
         </div>
         <div class="sm-body">
@@ -2762,10 +2782,23 @@ $result = $stmt->get_result();
 
 <div id="schedConfirmModal" role="alertdialog" aria-modal="true" aria-labelledby="schedConfirmTitle">
     <div class="sc-box">
-        <span class="sc-icon"><i class="fas fa-triangle-exclamation" style="color:#A0850A;"></i></span>
-        <h3 id="schedConfirmTitle">Set New Schedule?</h3>
-        <p id="schedConfirmMsg"></p>
-        <p>This removes the student's <strong>Student/University Contract</strong> if one is on file (the database record and the uploaded file), so a new one has to be submitted and validated again. The student and the administrator will be notified by email with your reason.</p>
+        <div class="sc-header"><h3 id="schedConfirmTitle">Confirm New Schedule</h3></div>
+        <div class="sc-body">
+            <p class="sc-lead">Please review the change below before saving it.</p>
+            <div class="sc-student" id="schedConfirmStudent">—</div>
+            <table class="sc-diff">
+                <thead><tr><th>Schedule</th><th>Current</th><th>New</th></tr></thead>
+                <tbody id="schedConfirmRows"></tbody>
+            </table>
+            <div class="sc-h">When you confirm</div>
+            <ol class="sc-steps">
+                <li>The student's schedule is updated.</li>
+                <li>The student's <strong>Student/University Contract</strong> is removed (the record and the uploaded file), if one is on file. The student has to submit a new one and have it validated again.</li>
+                <li>The student and the administrator are notified by email, together with your reason.</li>
+            </ol>
+            <div class="sc-h">Your reason</div>
+            <div class="sc-reason" id="schedConfirmReason"></div>
+        </div>
         <div class="sc-actions">
             <button type="button" class="sc-btn-keep" onclick="closeSchedConfirm()">No, Go Back</button>
             <button type="button" class="sc-btn-confirm" id="schedConfirmYes" onclick="schedConfirmYes()">Yes, Set Schedule</button>
@@ -4698,8 +4731,15 @@ function schedContinue() {
     if (!_schedApp || !schedValidate()) return;
     var day = schedCollect('schedDayChips'), eve = schedCollect('schedEveChips');
     _schedPending = { day: day, eve: eve };
-    document.getElementById('schedConfirmMsg').innerHTML =
-        'Set <strong>' + escHtml(_schedApp.name) + "</strong>'s schedule to Day: <strong>" + escHtml(schedLabel(day)) + '</strong> / Evening: <strong>' + escHtml(schedLabel(eve)) + '</strong>?';
+    document.getElementById('schedConfirmStudent').textContent = _schedApp.name;
+    var row = function (label, oldV, newV) {
+        var same = (schedNorm(oldV) === schedNorm(newV));
+        return '<tr><td>' + label + '</td><td>' + escHtml(schedLabel(oldV)) + '</td>' +
+            (same ? '<td class="sc-same">' + escHtml(schedLabel(newV)) + '<small>No change</small></td>'
+                  : '<td class="sc-new">' + escHtml(schedLabel(newV)) + '</td>') + '</tr>';
+    };
+    document.getElementById('schedConfirmRows').innerHTML = row('Day', _schedApp.day, day) + row('Evening', _schedApp.eve, eve);
+    document.getElementById('schedConfirmReason').textContent = document.getElementById('schedReason').value.trim();
     document.getElementById('schedConfirmModal').style.display = 'flex';
     setTimeout(function () { var y = document.getElementById('schedConfirmYes'); if (y) y.focus(); }, 60);
 }
