@@ -578,20 +578,57 @@ function endorsementAcceptBlockMessage($conn, $student_id, $company_id) {
    or rejected after the student's Student/University Contract requirement has been VERIFIED by the administrator
    (the requirements row must hold a file with status 'Verified'). Returns a message while it is still blocked,
    or null. Applications without an uploaded letter (and legacy ones) are not affected. */
-function studentContractVerified($conn, $student_id) {
+/* administrator.php writes "Verified" at once and keeps an Undo toast up for up to 5 minutes (verify_toast_gate, one row
+   per live toast, removed when the toast ends or is undone, expired after 305 s). While the toast of the student's
+   contract is live, the verification is not final, so the contract still counts as NOT verified here. The row's
+   requirement_type says which requirement the toast is for; a toast without a type (written by an older
+   administrator.php) is treated as a possible contract toast, so the page errs on the side of waiting. Fails open on errors. */
+function contractToastActive($conn, $student_id) {
+    try {
+        static $tableOk = null, $typeOk = null;
+        if ($tableOk === null) {
+            $t = $conn->query("SHOW TABLES LIKE 'verify_toast_gate'");
+            $tableOk = ($t && $t->num_rows > 0);
+            $typeOk = false;
+            if ($tableOk) { $c = $conn->query("SHOW COLUMNS FROM verify_toast_gate LIKE 'requirement_type'"); $typeOk = ($c && $c->num_rows > 0); }
+        }
+        if (!$tableOk) return false;
+        $since = time() - 305;
+        $sid   = (int)$student_id;
+        $sql = "SELECT 1 FROM verify_toast_gate WHERE student_id = ? AND created_ts >= ?"
+             . ($typeOk ? " AND (requirement_type IS NULL OR requirement_type = 'student_contract')" : "") . " LIMIT 1";
+        $q = $conn->prepare($sql);
+        $q->bind_param("ii", $sid, $since);
+        $q->execute();
+        $live = (bool)$q->get_result()->fetch_row();
+        $q->close();
+        return $live;
+    } catch (\Throwable $e) {
+        error_log('add_ojt_student.php: contract toast check failed: ' . $e->getMessage());
+        return false;
+    }
+}
+// 'verified' | 'toast' (verified, but the administrator's undo toast is still live) | 'unverified'
+function studentContractState($conn, $student_id) {
     $q = $conn->prepare("SELECT 1 FROM requirements WHERE user_id = ? AND requirement_type = 'student_contract'
                          AND status = 'Verified' AND file_name IS NOT NULL AND LENGTH(file_name) > 0 LIMIT 1");
     $q->bind_param("i", $student_id);
     $q->execute();
     $ok = (bool)$q->get_result()->fetch_row();
     $q->close();
-    return $ok;
+    if (!$ok) return 'unverified';
+    return contractToastActive($conn, (int)$student_id) ? 'toast' : 'verified';
+}
+function studentContractVerified($conn, $student_id) {
+    return studentContractState($conn, $student_id) === 'verified';
 }
 function contractBlockMessage($conn, $student_id, $company_id) {
     try {
         $e = getEndorsementRow($conn, $student_id, $company_id);
         if (!$e || empty($e['has_file'])) return null;          // the rule starts once the letter is uploaded
-        if (studentContractVerified($conn, (int)$student_id)) return null;
+        $state = studentContractState($conn, (int)$student_id);
+        if ($state === 'verified') return null;
+        if ($state === 'toast') return "The administrator's verification of the student's Student/University Contract is not final yet (it can still be undone for a few minutes). The application can be accepted or rejected once it is final.";
         return "The student's Student/University Contract has not been verified yet. The application can be accepted or rejected once the administrator verifies it.";
     } catch (\Throwable $e) {
         error_log('add_ojt_student.php: contract gate check failed: ' . $e->getMessage());
@@ -635,7 +672,15 @@ function fetchApplicantRows($conn, $company_id) {
     $st->execute();
     $res = $st->get_result();
     $rows = [];
-    while ($r = $res->fetch_assoc()) $rows[] = $r;
+    while ($r = $res->fetch_assoc()) {
+        // NEW (contract gate): the administrator's Verified toast of the contract is still live -> not verified yet
+        $r['contract_toast'] = 0;
+        if ((int)($r['contract_verified'] ?? 0) > 0 && !empty($r['endo_has_file']) && contractToastActive($conn, (int)$r['student_id'])) {
+            $r['contract_verified'] = 0;
+            $r['contract_toast']    = 1;
+        }
+        $rows[] = $r;
+    }
     $st->close();
     return aplGroupBatches($rows);
 }
@@ -665,7 +710,7 @@ function applicantTableSignature($rows) {
     $parts = [];
     foreach ($rows as $r) {
         $parts[] = [(int)$r['id'], $r['endo_id'] ?? null, $r['endo_status'] ?? null, $r['endo_uploaded_at'] ?? null, $r['endo_remark'] ?? null,
-                    $r['day_sched'] ?? null, $r['evening_sched'] ?? null, (int)($r['contract_verified'] ?? 0)]; // schedule / contract: the table re-renders when they change
+                    $r['day_sched'] ?? null, $r['evening_sched'] ?? null, (int)($r['contract_verified'] ?? 0), (int)($r['contract_toast'] ?? 0)]; // schedule / contract: the table re-renders when they change
     }
     return md5(json_encode($parts));
 }
@@ -761,7 +806,9 @@ function renderApplicantRow($conn, $company_id, $company_name, $app, $currentCou
     $isBatch   = ($batchId !== '' && (int)($app['batch_size'] ?? 1) > 1);
     $bidJs     = $h(json_encode($batchId));
     // ADJUSTMENT: icon buttons with tooltips (the tooltip sits on a wrapper so it also shows on the disabled Accept).
-    $contractTip = "Waiting for the student's Student/University Contract to be verified";
+    $contractTip = !empty($app['contract_toast'])
+        ? "Waiting for the administrator to finalize the contract verification"
+        : "Waiting for the student's Student/University Contract to be verified";
     $acceptTip = $contractBlocked ? $contractTip : ($canAccept ? ($isBatch ? 'Accept the whole batch' : 'Accept application') : "Waiting for the student's uploaded endorsement letter"); // ADJUSTMENT
     $rejectTip = $contractBlocked ? $contractTip : ($isBatch ? 'Reject the whole batch' : 'Reject application');
     $applicationCell = '<div class="apl-app-actions">'
@@ -772,7 +819,7 @@ function renderApplicantRow($conn, $company_id, $company_name, $app, $currentCou
         .   '<button type="button" class="endo-btn reject apl-icon-btn" aria-label="' . $h($rejectTip) . '"' . ($contractBlocked ? ' disabled' : ' onclick="' . ($isBatch ? 'rejectBatch(' . $bidJs . ')' : 'openRejectModal(' . $id . ')') . '"') . '><i class="fas fa-times"></i></button>'
         . '</span>'
         . '</div>'
-        . ($contractBlocked ? '<div class="endo-note">Waiting for the Student/University Contract to be verified.</div>'
+        . ($contractBlocked ? '<div class="endo-note">' . (!empty($app['contract_toast']) ? 'Waiting for the administrator to finalize the contract verification.' : 'Waiting for the Student/University Contract to be verified.') . '</div>'
             : ($canAccept ? '' : '<div class="endo-note">Waiting for the uploaded letter.</div>')); // ADJUSTMENT
 
     /* NEW (schedule change): the student's Day / Evening Schedule from AccomForm.php + an Edit button */

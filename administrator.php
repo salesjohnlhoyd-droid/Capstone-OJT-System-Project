@@ -50,7 +50,17 @@ function cv_vt_ensure($conn) {
         $conn->query("CREATE TABLE IF NOT EXISTS verify_toast_gate ( undo_token VARCHAR(64) NOT NULL PRIMARY KEY, student_id INT NOT NULL, created_ts BIGINT NOT NULL, KEY idx_vtg_student (student_id) )");
         $done = true;
     } catch (\Throwable $e) { error_log('verify_toast_gate ensure: ' . $e->getMessage()); return false; }
+    // NEW (this adjustment): which requirement the toast is for ('student_contract', '__photo', …). add_ojt_student.php reads it so
+    // the company's Accept / Reject buttons wait for the Student/University Contract toast specifically. Optional: without the
+    // column everything behaves exactly as before.
+    try { $conn->query("ALTER TABLE verify_toast_gate ADD COLUMN IF NOT EXISTS requirement_type VARCHAR(50) NULL"); } catch (\Throwable $e) { error_log('verify_toast_gate type column: ' . $e->getMessage()); }
     return $done;
+}
+function cv_vt_has_type($conn) {
+    static $has = null;
+    if ($has !== null) return $has;
+    try { $r = $conn->query("SHOW COLUMNS FROM verify_toast_gate LIKE 'requirement_type'"); $has = ($r && $r->num_rows > 0); } catch (\Throwable $e) { $has = false; }
+    return $has;
 }
 function cv_vt_table_exists($conn, $table) {
     $r = $conn->query("SHOW TABLES LIKE '" . $conn->real_escape_string($table) . "'");
@@ -116,23 +126,28 @@ function cv_vt_restore_expired($conn) {   // toasts that were never ended (tab c
         foreach ($ids as $sid) cv_vt_restore_if_idle($conn, $sid);
     } catch (\Throwable $e) { error_log('verify_toast_gate restore_expired: ' . $e->getMessage()); }
 }
-function cv_vt_mark($conn, $student_id, $token) {
+function cv_vt_mark($conn, $student_id, $token, $type = '') {
     try {
         $student_id = (int)$student_id; $token = (string)$token;
         if ($student_id <= 0 || $token === '' || !cv_vt_ensure($conn)) return false;
         $old = time() - (int)CV_VT_WINDOW_SECONDS;
         $conn->query("DELETE FROM verify_toast_gate WHERE created_ts < " . (int)$old);
         $now = time();
-        $st = $conn->prepare("REPLACE INTO verify_toast_gate (undo_token, student_id, created_ts) VALUES (?, ?, ?)");
-        $st->bind_param('sii', $token, $student_id, $now);
+        if ($type !== '' && cv_vt_has_type($conn)) {
+            $st = $conn->prepare("REPLACE INTO verify_toast_gate (undo_token, student_id, created_ts, requirement_type) VALUES (?, ?, ?, ?)");
+            $st->bind_param('siis', $token, $student_id, $now, $type);
+        } else {
+            $st = $conn->prepare("REPLACE INTO verify_toast_gate (undo_token, student_id, created_ts) VALUES (?, ?, ?)");
+            $st->bind_param('sii', $token, $student_id, $now);
+        }
         $st->execute(); $st->close();
         return true;
     } catch (\Throwable $e) { error_log('verify_toast_gate mark: ' . $e->getMessage()); return false; }
 }
-function cv_vt_reserve($conn, $student_id) {   // returns the temporary token (or '' when it could not be recorded)
+function cv_vt_reserve($conn, $student_id, $type = '') {   // returns the temporary token (or '' when it could not be recorded)
     try {
         $tmp = 'tmp_' . bin2hex(random_bytes(8));
-        if (!cv_vt_mark($conn, $student_id, $tmp)) return '';
+        if (!cv_vt_mark($conn, $student_id, $tmp, $type)) return '';
         cv_vt_stash_hold($conn, $student_id);   // a held application cannot be released by anything while the toast is active
         return $tmp;
     } catch (\Throwable $e) { return ''; }
@@ -1117,7 +1132,7 @@ if (isset($_POST['ajax_update_photo'])) {
         exit;
     }
 
-    $vtTmp = ($status === 'Verified') ? cv_vt_reserve($conn, $user_id) : '';   // ADJUSTMENT: hold the student's held application BEFORE Verified is written
+    $vtTmp = ($status === 'Verified') ? cv_vt_reserve($conn, $user_id, '__photo') : '';   // ADJUSTMENT: hold the student's held application BEFORE Verified is written
     // ── DB WRITE: only for non-Denied; Denied is deferred until toast expires ──
     if ($status !== 'Denied') {
         if ($status === 'Verified') {
@@ -1158,7 +1173,7 @@ if (isset($_POST['ajax_update_photo'])) {
         'new_status'   => $status,
         'new_remark'   => $remark,
     ], 'Profile Photo');
-    if ($status === 'Verified') { cv_vt_mark($conn, $user_id, $undoToken); cv_vt_clear($conn, $vtTmp); }   // ADJUSTMENT: the entry now carries the toast's undo token
+    if ($status === 'Verified') { cv_vt_mark($conn, $user_id, $undoToken, '__photo'); cv_vt_clear($conn, $vtTmp); }   // ADJUSTMENT: the entry now carries the toast's undo token
 
     // Store deferred email
     if (!isset($_SESSION['pending_emails'])) $_SESSION['pending_emails'] = [];
@@ -1316,7 +1331,7 @@ if (isset($_POST['ajax_update_requirement'])) {
         exit;
     }
 
-    $vtTmp = ($status === 'Verified') ? cv_vt_reserve($conn, $user_id) : '';   // ADJUSTMENT: hold the student's held application BEFORE Verified is written
+    $vtTmp = ($status === 'Verified') ? cv_vt_reserve($conn, $user_id, $type) : '';   // ADJUSTMENT: hold the student's held application BEFORE Verified is written
     // ── DB WRITE: only for non-Denied; Denied is deferred until toast expires ──
     if ($status !== 'Denied') {
         if ($status === 'Verified') {
@@ -1358,7 +1373,7 @@ if (isset($_POST['ajax_update_requirement'])) {
         'new_status'       => $status,
         'new_remark'       => $remark,
     ], $undoLabel);
-    if ($status === 'Verified') { cv_vt_mark($conn, $user_id, $undoToken); cv_vt_clear($conn, $vtTmp); }   // ADJUSTMENT: the entry now carries the toast's undo token
+    if ($status === 'Verified') { cv_vt_mark($conn, $user_id, $undoToken, $type); cv_vt_clear($conn, $vtTmp); }   // ADJUSTMENT: the entry now carries the toast's undo token
 
     // Store deferred email
     if (!isset($_SESSION['pending_emails'])) $_SESSION['pending_emails'] = [];
