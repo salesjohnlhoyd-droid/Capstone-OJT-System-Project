@@ -2861,7 +2861,12 @@ body { background: var(--grid-bg); color: #2d3748; font-family: 'Segoe UI', Taho
     background: #F3F5F9; border: 1px solid var(--grid-border); border-radius: 0; min-height: 34px; box-sizing: border-box;
 }
 #lateReqBox .lr-window-warn { margin: 0; padding: 7px 10px; min-height: 34px; box-sizing: border-box; font-size: 12px; align-items: center; flex-wrap: wrap; column-gap: 4px; }
-#lateReqBox .lr-camera-wrap { aspect-ratio: 4 / 3; margin-bottom: 0; border: 1px solid var(--grid-border); }
+/* Enlarged camera: two of the three columns (the reason box takes the third and matches its height).
+   Height is capped by the window so the popup stays on screen; the video simply crops to fit. */
+#lateReqBox .lr-camera-wrap { aspect-ratio: 4 / 3; max-height: max(220px, calc(100vh - 340px)); width: 100%; margin-bottom: 0; border: 1px solid var(--grid-border); }
+#lateReqBox .lr-camera-label { font-size: 11px; padding: 4px 12px; }
+#lateReqBox .lr-camera-corner { width: 26px; height: 26px; }
+#lateReqBox .lr-reason-group { align-self: stretch; }
 #lateReqBox .lr-photo-preview { margin-top: 6px; }
 #lateReqBox .lr-reason-group { display: flex; flex-direction: column; }
 #lateReqBox .lr-textarea {
@@ -2929,7 +2934,7 @@ body { background: var(--grid-bg); color: #2d3748; font-family: 'Segoe UI', Taho
                          Submit before <strong id="lr-deadline-time">—</strong> — after that this entry is permanently missed.
                     </div>
                 </div>
-                <div class="lr-group">
+                <div class="lr-group lr-span-2 lr-photo-group">
                     <div class="lr-type-label">Photo</div>
                     <div class="lr-camera-wrap">
                         <video id="lr-video-preview" autoplay playsinline muted></video>
@@ -2939,7 +2944,7 @@ body { background: var(--grid-bg); color: #2d3748; font-family: 'Segoe UI', Taho
                     </div>
                     <div class="lr-photo-preview" id="lr-photo-wrap"></div>
                 </div>
-                <div class="lr-group lr-span-2 lr-reason-group">
+                <div class="lr-group lr-reason-group">
                     <label class="lr-label" for="lr-reason">Reason <span style="color:#A02A2A">*</span></label>
                     <textarea class="lr-textarea" id="lr-reason" placeholder="Describe what happened and why you were unable to sign in/out on time…"></textarea>
                     <div class="lr-help"><i class="fas fa-circle-info"></i> Explain why you missed this entry. Your company will review it.</div>
