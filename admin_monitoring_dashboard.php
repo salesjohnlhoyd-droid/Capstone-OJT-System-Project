@@ -26,6 +26,44 @@ $conn->query("CREATE TABLE IF NOT EXISTS admin_application_approvals (
 $app_request_count_res = $conn->query("SELECT COUNT(*) as total FROM admin_application_approvals");
 $app_request_count = (int)(($app_request_count_res ? $app_request_count_res->fetch_assoc()['total'] : 0));
 
+// ============================================================================
+// NEW (this adjustment): STUDENT REQUIREMENT SUBMISSIONS — side-menu indicator.
+// A student's new / re-uploaded requirement is recorded as a notification by
+// administrator.php (cv_sru_detect()) and counts toward the Student Validation
+// indicator next to the application requests — the same count administrator.php
+// shows. Same helpers as administrator.php (created once per session, so every
+// admin page can count them). Fully guarded: if anything fails the count simply
+// stays the application requests only.
+// ============================================================================
+if (!function_exists('cv_sru_ensure')) {
+    function cv_sru_ensure($conn) {
+        if (!empty($_SESSION['cv_sru_ready'])) return true;
+        try {
+            $conn->query("CREATE TABLE IF NOT EXISTS student_requirement_upload_notifications (
+                id INT AUTO_INCREMENT PRIMARY KEY, user_id INT NOT NULL, detail TEXT NULL,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                admin_viewed TINYINT(1) NOT NULL DEFAULT 0, KEY idx_sru_viewed (admin_viewed), KEY idx_sru_user (user_id))");
+            $conn->query("CREATE TABLE IF NOT EXISTS student_requirement_upload_watch (
+                user_id INT NOT NULL, requirement_type VARCHAR(100) NOT NULL, file_len BIGINT NOT NULL DEFAULT 0,
+                PRIMARY KEY (user_id, requirement_type))");
+            $conn->query("CREATE TABLE IF NOT EXISTS student_requirement_upload_meta (id TINYINT NOT NULL PRIMARY KEY, initialized TINYINT(1) NOT NULL DEFAULT 0)");
+            $_SESSION['cv_sru_ready'] = 1;
+            return true;
+        } catch (\Throwable $e) { return false; }
+    }
+    // unviewed submissions of active (not archived) students
+    function cv_sru_count($conn) {
+        try {
+            if (!cv_sru_ensure($conn)) return 0;
+            $r = $conn->query("SELECT COUNT(*) AS total FROM student_requirement_upload_notifications n
+                               INNER JOIN users u ON u.id = n.user_id WHERE n.admin_viewed = 0 AND COALESCE(u.is_archived, 0) = 0");
+            $row = $r ? $r->fetch_assoc() : null;
+            return (int)($row['total'] ?? 0);
+        } catch (\Throwable $e) { return 0; }
+    }
+}
+try { $app_request_count += cv_sru_count($conn); } catch (\Throwable $e) { /* indicator keeps the application-request count */ }
+
 // Determine page title for sidebar
 $pageTitle = "Monitoring Dashboard";
 
@@ -1089,6 +1127,7 @@ if(isset($_GET['load_messages'])){
         /* loading page + popup — administrator.php look (already Field ops grid) */
         #globalLoadingOverlay { position: fixed; inset: 0; z-index: 20000; display: flex; align-items: center; justify-content: center; background: rgba(238, 241, 246, 0.92); opacity: 1; visibility: visible; transition: opacity 0.35s ease, visibility 0.35s ease; }
         #globalLoadingOverlay.hidden { opacity: 0; visibility: hidden; pointer-events: none; }
+        #globalLoadingOverlay.gl-instant { transition: none; }   /* appears on the very next paint while leaving the page */
         .global-loading-box { display: flex; flex-direction: column; align-items: center; gap: 16px; animation: globalLoadingPop 0.35s ease; }
         .global-loading-spinner { width: 54px; height: 54px; border-radius: 50%; border: 5px solid #A3AFC7; border-top-color: #1B2A4A; animation: globalLoadingSpin 0.85s linear infinite; }
         .global-loading-text { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; font-size: 13px; font-weight: 700; color: #1B2A4A; text-transform: uppercase; letter-spacing: 0.6px; display: flex; align-items: center; gap: 8px; }
@@ -1268,12 +1307,81 @@ if(isset($_GET['load_messages'])){
      unchanged; fetch / XMLHttpRequest keep working exactly as before.
      ══════════════════════════════════════════════════════════════════════ -->
 <style>
-    html.cv-booting::before { content: ''; position: fixed; left: 50%; top: 50%; width: 54px; height: 54px; margin: -44px 0 0 -32px; border-radius: 50%;
-        border: 5px solid #A3AFC7; border-top-color: #1B2A4A; z-index: 20002; animation: cvBootSpin 0.85s linear infinite; }
+    /* the first-paint ring: exactly where the page's own spinner is; its size and look come from the shared ring rule below,
+       and it carries on from the previous page's loading page (--cv-ring-delay). CLEAN-UP (audit): two rules merged into one. */
+    html.cv-booting::before { content: ''; position: fixed; left: 50%; top: 50%; margin: -47.5px 0 0 -32px; z-index: 20002;
+        animation: cvRingSpin 1s steps(12, end) infinite; animation-delay: var(--cv-ring-delay, 0s); }
     html.cv-booting::after { content: 'LOADING'; position: fixed; inset: 0; z-index: 20001; display: flex; align-items: center; justify-content: center;
-        padding-top: 70px; box-sizing: border-box; background: rgba(238, 241, 246, 0.92); color: #1B2A4A;
+        padding: 80px 20.7px 0 0; box-sizing: border-box; background: rgba(238, 241, 246, 0.92); color: #1B2A4A;   /* UPDATED (this adjustment): label exactly where the page's own label is */
         font: 700 13px 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; letter-spacing: 0.6px; }
-    @keyframes cvBootSpin { to { transform: rotate(360deg); } }
+    /* NEW (this adjustment): ENHANCED LOADING RING — instead of one solid arc sweeping round, 12 rounded segments
+       in the site's navy that fade from dark to light around the circle and tick round (like a classic activity
+       indicator). Same 64 px footprint and position as before, so nothing else moves. Used by the first-paint
+       cover AND by this page's own loading page, so both always look identical. */
+    html.cv-booting::before,
+    #globalLoadingOverlay .global-loading-spinner {
+        width: 64px; height: 64px; border: 0; border-radius: 50%; box-sizing: border-box;
+        background: conic-gradient(from 0deg, rgba(27,42,74,0.12) 0deg, rgba(27,42,74,0.35) 120deg, rgba(27,42,74,0.7) 240deg, #1B2A4A 330deg, #1B2A4A 360deg);
+        -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 9px), #000 calc(100% - 8px)),
+                      repeating-conic-gradient(from 5deg, #000 0deg 20deg, transparent 20deg 30deg);
+        -webkit-mask-composite: source-in;
+                mask: radial-gradient(farthest-side, transparent calc(100% - 9px), #000 calc(100% - 8px)),
+                      repeating-conic-gradient(from 5deg, #000 0deg 20deg, transparent 20deg 30deg);
+                mask-composite: intersect;
+        will-change: transform;   /* FIX: the ring keeps turning on the compositor while this large page is busy loading (no pause) — same as administrator.php */
+    }
+    #globalLoadingOverlay .global-loading-spinner { animation: cvRingSpin 1s steps(12, end) infinite; }
+    @keyframes cvRingSpin { to { transform: rotate(360deg); } }
+    /* NEW (this adjustment): the animated dots after "LOADING", like the page's own loading page, so nothing changes
+       when the page's loading page takes over */
+    /* UPDATED (this adjustment): the three dots fade one after another exactly like the page's own dots
+       (same 1.2 s cycle, 0.2 s apart), so they simply carry on when the page's loading page takes over */
+    html.cv-booting body::before { content: '.'; position: fixed; left: calc(50% + 29.75px); top: calc(50% + 32.5px); z-index: 20003;
+        font: 700 13px/15px 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; letter-spacing: 0.6px; color: rgba(27,42,74,0);
+        animation: cvBootDots 1.2s linear infinite; animation-delay: var(--cv-dots-delay, 0s); pointer-events: none; }
+    @keyframes cvBootDots {
+        0.0% { color: rgba(27,42,74,0.0); text-shadow: 4.23px 0 rgba(27,42,74,0.075), 8.47px 0 rgba(27,42,74,0.424); }
+        2.5% { color: rgba(27,42,74,0.0); text-shadow: 4.23px 0 rgba(27,42,74,0.052), 8.47px 0 rgba(27,42,74,0.342); }
+        5.0% { color: rgba(27,42,74,0.0); text-shadow: 4.23px 0 rgba(27,42,74,0.034), 8.47px 0 rgba(27,42,74,0.273); }
+        7.5% { color: rgba(27,42,74,0.0); text-shadow: 4.23px 0 rgba(27,42,74,0.02), 8.47px 0 rgba(27,42,74,0.215); }
+        10.0% { color: rgba(27,42,74,0.0); text-shadow: 4.23px 0 rgba(27,42,74,0.01), 8.47px 0 rgba(27,42,74,0.166); }
+        12.5% { color: rgba(27,42,74,0.0); text-shadow: 4.23px 0 rgba(27,42,74,0.004), 8.47px 0 rgba(27,42,74,0.126); }
+        15.0% { color: rgba(27,42,74,0.0); text-shadow: 4.23px 0 rgba(27,42,74,0.001), 8.47px 0 rgba(27,42,74,0.094); }
+        17.5% { color: rgba(27,42,74,0.0); text-shadow: 4.23px 0 rgba(27,42,74,0.0), 8.47px 0 rgba(27,42,74,0.067); }
+        20.0% { color: rgba(27,42,74,0.0); text-shadow: 4.23px 0 rgba(27,42,74,0.0), 8.47px 0 rgba(27,42,74,0.046); }
+        22.5% { color: rgba(27,42,74,0.071); text-shadow: 4.23px 0 rgba(27,42,74,0.0), 8.47px 0 rgba(27,42,74,0.029); }
+        25.0% { color: rgba(27,42,74,0.221); text-shadow: 4.23px 0 rgba(27,42,74,0.0), 8.47px 0 rgba(27,42,74,0.017); }
+        27.5% { color: rgba(27,42,74,0.409); text-shadow: 4.23px 0 rgba(27,42,74,0.0), 8.47px 0 rgba(27,42,74,0.008); }
+        30.0% { color: rgba(27,42,74,0.576); text-shadow: 4.23px 0 rgba(27,42,74,0.0), 8.47px 0 rgba(27,42,74,0.002); }
+        32.5% { color: rgba(27,42,74,0.706); text-shadow: 4.23px 0 rgba(27,42,74,0.0), 8.47px 0 rgba(27,42,74,0.0); }
+        35.0% { color: rgba(27,42,74,0.802); text-shadow: 4.23px 0 rgba(27,42,74,0.0), 8.47px 0 rgba(27,42,74,0.0); }
+        37.5% { color: rgba(27,42,74,0.874); text-shadow: 4.23px 0 rgba(27,42,74,0.015), 8.47px 0 rgba(27,42,74,0.0); }
+        40.0% { color: rgba(27,42,74,0.925); text-shadow: 4.23px 0 rgba(27,42,74,0.113), 8.47px 0 rgba(27,42,74,0.0); }
+        42.5% { color: rgba(27,42,74,0.96); text-shadow: 4.23px 0 rgba(27,42,74,0.283), 8.47px 0 rgba(27,42,74,0.0); }
+        45.0% { color: rgba(27,42,74,0.983); text-shadow: 4.23px 0 rgba(27,42,74,0.468), 8.47px 0 rgba(27,42,74,0.0); }
+        47.5% { color: rgba(27,42,74,0.996); text-shadow: 4.23px 0 rgba(27,42,74,0.623), 8.47px 0 rgba(27,42,74,0.0); }
+        50.0% { color: rgba(27,42,74,1.0); text-shadow: 4.23px 0 rgba(27,42,74,0.741), 8.47px 0 rgba(27,42,74,0.0); }
+        52.5% { color: rgba(27,42,74,0.967); text-shadow: 4.23px 0 rgba(27,42,74,0.829), 8.47px 0 rgba(27,42,74,0.0); }
+        55.0% { color: rgba(27,42,74,0.905); text-shadow: 4.23px 0 rgba(27,42,74,0.893), 8.47px 0 rgba(27,42,74,0.038); }
+        57.5% { color: rgba(27,42,74,0.815); text-shadow: 4.23px 0 rgba(27,42,74,0.938), 8.47px 0 rgba(27,42,74,0.163); }
+        60.0% { color: rgba(27,42,74,0.705); text-shadow: 4.23px 0 rgba(27,42,74,0.969), 8.47px 0 rgba(27,42,74,0.346); }
+        62.5% { color: rgba(27,42,74,0.591); text-shadow: 4.23px 0 rgba(27,42,74,0.989), 8.47px 0 rgba(27,42,74,0.524); }
+        65.0% { color: rgba(27,42,74,0.487); text-shadow: 4.23px 0 rgba(27,42,74,0.998), 8.47px 0 rgba(27,42,74,0.666); }
+        67.5% { color: rgba(27,42,74,0.395); text-shadow: 4.23px 0 rgba(27,42,74,0.992), 8.47px 0 rgba(27,42,74,0.773); }
+        70.0% { color: rgba(27,42,74,0.317); text-shadow: 4.23px 0 rgba(27,42,74,0.95), 8.47px 0 rgba(27,42,74,0.852); }
+        72.5% { color: rgba(27,42,74,0.252); text-shadow: 4.23px 0 rgba(27,42,74,0.878), 8.47px 0 rgba(27,42,74,0.91); }
+        75.0% { color: rgba(27,42,74,0.198); text-shadow: 4.23px 0 rgba(27,42,74,0.779), 8.47px 0 rgba(27,42,74,0.95); }
+        77.5% { color: rgba(27,42,74,0.152); text-shadow: 4.23px 0 rgba(27,42,74,0.667), 8.47px 0 rgba(27,42,74,0.977); }
+        80.0% { color: rgba(27,42,74,0.115); text-shadow: 4.23px 0 rgba(27,42,74,0.555), 8.47px 0 rgba(27,42,74,0.993); }
+        82.5% { color: rgba(27,42,74,0.084); text-shadow: 4.23px 0 rgba(27,42,74,0.455), 8.47px 0 rgba(27,42,74,1.0); }
+        85.0% { color: rgba(27,42,74,0.059); text-shadow: 4.23px 0 rgba(27,42,74,0.368), 8.47px 0 rgba(27,42,74,0.981); }
+        87.5% { color: rgba(27,42,74,0.04); text-shadow: 4.23px 0 rgba(27,42,74,0.294), 8.47px 0 rgba(27,42,74,0.929); }
+        90.0% { color: rgba(27,42,74,0.024); text-shadow: 4.23px 0 rgba(27,42,74,0.233), 8.47px 0 rgba(27,42,74,0.848); }
+        92.5% { color: rgba(27,42,74,0.013); text-shadow: 4.23px 0 rgba(27,42,74,0.182), 8.47px 0 rgba(27,42,74,0.743); }
+        95.0% { color: rgba(27,42,74,0.006); text-shadow: 4.23px 0 rgba(27,42,74,0.139), 8.47px 0 rgba(27,42,74,0.629); }
+        97.5% { color: rgba(27,42,74,0.001); text-shadow: 4.23px 0 rgba(27,42,74,0.104), 8.47px 0 rgba(27,42,74,0.52); }
+        100.0% { color: rgba(27,42,74,0.0); text-shadow: 4.23px 0 rgba(27,42,74,0.075), 8.47px 0 rgba(27,42,74,0.424); }
+    }
 </style>
 <script>
 (function () {
@@ -1285,13 +1393,140 @@ if(isset($_GET['load_messages'])){
     // ── 1) first paint: covered until this page's own loading overlay exists ──
     root.classList.add('cv-booting');
     function releaseBoot() { root.classList.remove('cv-booting'); }
+    /* NEW (this adjustment): the loading animation no longer starts over midway. When the page's own loading page
+       takes over from this cover, its spinner continues from the same angle, its dots continue in the same rhythm,
+       and its pop-in is not replayed (it is already on screen). Only for this one hand-over, and only if the cover
+       was actually painted; any later showing of the loading page (e.g. "Saving") animates exactly as before. */
+    var cvBootStart = (window.performance && performance.now) ? performance.now() : Date.now();
+    var cvCoverPainted = false;
+    /* NEW (this adjustment): ONE loading page from the side-menu click / refresh until the new page is ready.
+       The page being left saves the moment its loading page appeared (see "pagehide" below); this page picks it
+       up and simply carries on from there — same ring position, same dots, no second pop-in, nothing drawn twice.
+       Used once, only if recent (15 s); a first visit (nothing saved) behaves as before. */
+    var CV_LOADER_KEY = 'cvLoaderEpoch', cvCarriedOver = false;
+    var CV_PHASE_KEY = 'cvLoaderPhase', cvRingAt0 = null, cvDotsAt0 = null, cvPhaseReadAt = 0;   // NEW (loader sync fix)
+    try {
+        var cvEpoch = parseInt(sessionStorage.getItem(CV_LOADER_KEY) || '', 10);
+        sessionStorage.removeItem(CV_LOADER_KEY);
+        var cvSince = cvEpoch ? Date.now() - cvEpoch : -1;
+        if (cvSince >= 0 && cvSince < 15000) {
+            cvCarriedOver = true; cvCoverPainted = true;
+            cvBootStart = cvBootStart - cvSince;
+            root.style.setProperty('--cv-ring-delay', (-((cvSince / 1000) % 1)).toFixed(3) + 's');
+            root.style.setProperty('--cv-dots-delay', (-((cvSince / 1000) % 1.2)).toFixed(3) + 's');
+            /* NEW (loader sync fix): the previous page also handed over where its ring and dots REALLY were in their
+               turn (read from the running animations — see "pagehide" below). The old way assumed the ring started
+               turning the moment the loading page was shown, which is only true for the first loading page after a
+               page opens; a loading page shown later (a link click) had its ring at any angle, so the next page
+               continued from the wrong one — a visible jump. With the real positions it continues exactly. */
+            try {
+                var cvPh = JSON.parse(sessionStorage.getItem(CV_PHASE_KEY) || 'null');
+                if (cvPh && typeof cvPh.ring === 'number' && typeof cvPh.dots === 'number' && Date.now() - cvPh.t >= 0 && Date.now() - cvPh.t < 15000) {
+                    var cvGap = Date.now() - cvPh.t;
+                    cvRingAt0 = (cvPh.ring + cvGap) / 1000; cvDotsAt0 = (cvPh.dots + cvGap) / 1000;
+                    cvPhaseReadAt = (window.performance && performance.now) ? performance.now() : Date.now();
+                    root.style.setProperty('--cv-ring-delay', (-(cvRingAt0 % 1)).toFixed(3) + 's');
+                    root.style.setProperty('--cv-dots-delay', (-(cvDotsAt0 % 1.2)).toFixed(3) + 's');
+                }
+            } catch (e) {}
+        }
+        sessionStorage.removeItem(CV_PHASE_KEY);
+    } catch (e) {}
+    function cvLoaderStartedAt() { return Date.now() - (((window.performance && performance.now) ? performance.now() : Date.now()) - cvBootStart); }
+    if (window.requestAnimationFrame) requestAnimationFrame(function () { requestAnimationFrame(function () { cvCoverPainted = root.classList.contains('cv-booting'); }); });
+    function continueCoverAnimation(ov) {
+        try {
+            if (!cvCoverPainted || !ov || ov.classList.contains('hidden')) return;
+            var now = (window.performance && performance.now) ? performance.now() : Date.now();
+            var elapsed = (now - cvBootStart) / 1000;
+            var elapsedRing = (cvRingAt0 !== null) ? cvRingAt0 + (now - cvPhaseReadAt) / 1000 : elapsed;   // NEW (loader sync fix): the real position, when handed over
+            var elapsedDots = (cvDotsAt0 !== null) ? cvDotsAt0 + (now - cvPhaseReadAt) / 1000 : elapsed;
+            var spinner = ov.querySelector('.global-loading-spinner');
+            if (spinner) spinner.style.animationDelay = (-(elapsedRing % 1)).toFixed(3) + 's';   // UPDATED (this adjustment): the ring's 1 s turn
+            var dots = ov.querySelectorAll('.global-loading-dots span');
+            for (var i = 0; i < dots.length; i++) dots[i].style.animationDelay = (-((elapsedDots - i * 0.2) % 1.2 + 1.2) % 1.2).toFixed(3) + 's';
+            var box = ov.querySelector('.global-loading-box');
+            if (box) {
+                box.style.animation = 'none';   // no second pop-in
+                var restore = new MutationObserver(function () {   // later showings get their pop-in back, as before
+                    if (ov.classList.contains('hidden')) {
+                        restore.disconnect();
+                        setTimeout(function () { box.style.animation = ''; if (spinner) spinner.style.animationDelay = ''; for (var j = 0; j < dots.length; j++) dots[j].style.animationDelay = ''; }, 400);
+                    }
+                });
+                restore.observe(ov, { attributes: true, attributeFilter: ['class'] });
+            }
+        } catch (e) { /* never affects the page */ }
+    }
+    // UPDATED (this adjustment): the cover gives way the instant the page's loading page is in the page (before the
+    // next frame is drawn), so the two are never drawn at the same time
+    var cvHandedOver = false;
+    function cvHandOver(ovEl) {
+        if (cvHandedOver) return;
+        cvHandedOver = true;
+        continueCoverAnimation(ovEl);
+        releaseBoot();
+    }
+    if (window.MutationObserver) {
+        var cvOvWatch = new MutationObserver(function () {
+            var o = document.getElementById('globalLoadingOverlay');
+            if (o) { cvOvWatch.disconnect(); cvHandOver(o); }
+        });
+        cvOvWatch.observe(root, { childList: true, subtree: true });
+        document.addEventListener('DOMContentLoaded', function () { cvOvWatch.disconnect(); });
+    }
     (function waitForOverlay() {
-        if (document.getElementById('globalLoadingOverlay')) { releaseBoot(); return; }
+        var ovEl = document.getElementById('globalLoadingOverlay');
+        if (ovEl) { cvHandOver(ovEl); return; }
         if (document.readyState !== 'loading') { releaseBoot(); return; }   // page without an overlay: never keep it covered
         setTimeout(waitForOverlay, 16);
     })();
     document.addEventListener('DOMContentLoaded', function () { setTimeout(releaseBoot, 0); });
     window.addEventListener('pageshow', function (e) { if (e.persisted) releaseBoot(); });
+
+    /* NEW (this adjustment): remember when this page's loading page appeared, and hand that moment to the next
+       page when this one is left (side-menu link, refresh, redirect) while it is showing — so the next page
+       carries on the same loading page instead of starting a second one. Downloads never leave the page, so
+       they never hand anything over. */
+    var cvShownSince = null;
+    function cvWatchOverlay() {
+        var ov = document.getElementById('globalLoadingOverlay');
+        if (!ov) return;
+        var mark = function () {
+            var shown = !ov.classList.contains('hidden');
+            if (shown && cvShownSince === null) cvShownSince = Date.now();
+            if (!shown) cvShownSince = null;
+        };
+        if (!ov.classList.contains('hidden')) cvShownSince = cvLoaderStartedAt();   // the page's first loading page
+        new MutationObserver(mark).observe(ov, { attributes: true, attributeFilter: ['class'] });
+    }
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', cvWatchOverlay); else cvWatchOverlay();
+    // NEW (loader sync fix): milliseconds into the current turn of an element's running CSS animation (null if unknown)
+    function cvAnimPhase(el, period) {
+        try {
+            if (!el || !el.getAnimations) return null;
+            var list = el.getAnimations();
+            for (var i = 0; i < list.length; i++) {
+                var a = list[i], ct = a.currentTime;
+                if (typeof ct !== 'number' || !a.effect || !a.effect.getComputedTiming) continue;
+                var delay = a.effect.getComputedTiming().delay || 0;
+                return (((ct - delay) % period) + period) % period;
+            }
+        } catch (e) {}
+        return null;
+    }
+    window.addEventListener('pagehide', function () {
+        try {
+            var ov = document.getElementById('globalLoadingOverlay');
+            if (ov && !ov.classList.contains('hidden') && !ov.classList.contains('success-state')) {
+                sessionStorage.setItem(CV_LOADER_KEY, String(cvShownSince !== null ? cvShownSince : Date.now()));
+                // NEW (loader sync fix): where the ring and the dots really are in their turn right now
+                var ringMs = cvAnimPhase(ov.querySelector('.global-loading-spinner'), 1000);
+                var dotsMs = cvAnimPhase(ov.querySelector('.global-loading-dots span'), 1200);
+                if (ringMs !== null && dotsMs !== null) sessionStorage.setItem(CV_PHASE_KEY, JSON.stringify({ t: Date.now(), ring: ringMs, dots: dotsMs }));
+            }
+        } catch (e) {}
+    });
 
     // ── shared: this page's loading overlay ──
     var LABEL = 'Processing', MIN_MS = 350, SAFETY_MS = 30000;
@@ -1383,6 +1618,38 @@ if(isset($_GET['load_messages'])){
         };
     }
 
+    /* NEW (loader sync fix): 'gl-instant' (no fade-in) is only for the moment of leaving; once the overlay is hidden
+       again (navigation cancelled / a download) it is dropped, so later showings fade in as before — same as administrator.php. */
+    document.addEventListener('DOMContentLoaded', function () {
+        try {
+            var ovw = overlay();
+            if (!ovw || !window.MutationObserver) return;
+            new MutationObserver(function () {
+                if (ovw.classList.contains('hidden') && ovw.classList.contains('gl-instant')) ovw.classList.remove('gl-instant');
+            }).observe(ovw, { attributes: true, attributeFilter: ['class'] });
+        } catch (e) { /* never affects the page */ }
+    });
+    /* NEW (loader sync fix — same behaviour as administrator.php's "navigating" flag): once this page is on its way
+       to another page (link click, form submit, reload), nothing may hide the loading page again until the next page
+       has taken over. Before this, this page's own load handler / 4-second safety timer (and the "minimum time"
+       logic) could hide it in the middle of a navigation started in the first seconds after opening the page, so the
+       loading page vanished for a moment and then came back with the next page ("pauses, then continues"). A hide
+       that happens while navigating is undone before the browser paints it. The flag releases itself after 7.5 s
+       (navigation cancelled / a download), a moment before the existing 8 s release below. */
+    var navActive = false, navTimer = null, navObs = null;
+    function navAttach() {
+        if (navObs || !window.MutationObserver) return;
+        var ovn = overlay(); if (!ovn) return;
+        navObs = new MutationObserver(function () {
+            if (navActive && ovn.classList.contains('hidden')) { ovn.classList.add('gl-instant'); ovn.classList.remove('hidden'); }
+        });
+        navObs.observe(ovn, { attributes: true, attributeFilter: ['class'] });
+    }
+    function navStart() { try { navActive = true; navAttach(); clearTimeout(navTimer); navTimer = setTimeout(navEnd, 7500); } catch (e) {} }
+    function navEnd() { navActive = false; clearTimeout(navTimer); }
+    window.cvNavGate = { start: navStart, end: navEnd, active: function () { return navActive; } };
+    window.addEventListener('pageshow', function (e) { if (e.persisted) navEnd(); });
+
     // ── 3) leaving by script (reload / redirect after an action) ──
     var lastFileClick = 0;
     var FILE_RE = /[?&][^=&]*(export|download|print|stream|pdf|preview|blob|file|csv)[^=&]*=|\.(pdf|xlsx?|csv|docx?|zip)(\?|$)/i;
@@ -1397,8 +1664,10 @@ if(isset($_GET['load_messages'])){
     }, true);
     window.addEventListener('beforeunload', function () {
         if (Date.now() - lastFileClick < 2000) return;                             // most likely a file download
+        navStart();                                                                 // NEW (loader sync fix): leaving — keep the loading page up
         var ov = overlay(); if (!ov || !ov.classList.contains('hidden')) return;
         var l = label(); if (l) l.textContent = 'Loading';
+        ov.classList.add('gl-instant');   // NEW (loader sync fix): appears on the very next paint, like administrator.php
         ov.classList.remove('hidden');
         setTimeout(function () { if (!document.hidden) { ov.classList.add('hidden'); } }, 8000);   // still here → it was a download
     });
@@ -1516,16 +1785,16 @@ if(isset($_GET['load_messages'])){
                 <span><?= htmlspecialchars($company['company']) ?></span>
                 <div style="display:flex;gap:8px;align-items:center;">
                     <a href="admin_reports.php?company_id=<?= $company['user_id'] ?>"
-                    class="fo-btn-primary"
+                    class="fo-btn-primary" data-cv-tip="View company report"
                     onclick="event.stopPropagation();">
                         Overview
                     </a>
-                    <button type="button" class="message-btn"
+                    <button type="button" class="message-btn" data-cv-tip="Message this company"
                             onclick="openMessageBox('<?= htmlspecialchars($admin_email) ?>','<?= htmlspecialchars($company['user_email']) ?>','<?= $company['user_id'] ?>')">
                         Open Chat
                     </button>
                     <!-- ADJUSTMENT: apply students (batch) to this company -->
-                    <span class="amd-tip" data-tip="Apply students">
+                    <span class="amd-tip" data-tip="Apply students to company">
                         <button type="button" class="amd-apply-btn" aria-label="Apply students to this company"
                                 onclick="event.preventDefault(); event.stopPropagation(); openApplyStudents(<?= (int)$company['user_id'] ?>, <?= htmlspecialchars(json_encode($company['company'] ?? ''), ENT_QUOTES) ?>);">
                             <i class="fas fa-user-plus"></i>
@@ -1621,7 +1890,7 @@ if(isset($_GET['load_messages'])){
     <div class="apply-box">
         <div class="apply-head">
             <span><i class="fas fa-user-plus"></i> Apply Students &mdash; <span id="applyCoName"></span></span>
-            <button type="button" onclick="closeApplyStudents()" aria-label="Close">&times;</button>
+            <button type="button" onclick="closeApplyStudents()" aria-label="Close" data-cv-tip="Close">&times;</button>
         </div>
         <div class="apply-body">
             <div class="apply-grid">
@@ -1683,16 +1952,16 @@ if(isset($_GET['load_messages'])){
             <div class="apply-error" id="applyError"></div>
         </div>
         <div class="apply-foot">
-            <button type="button" class="ghost" onclick="previewApplyLetter()"><i class="fas fa-eye"></i> Preview Letter</button>
-            <button type="button" class="primary" id="applySubmit" onclick="submitApplyStudents()"><i class="fas fa-paper-plane"></i> Apply &amp; Send Endorsement Letter</button>
+            <button type="button" class="ghost" data-cv-tip="Preview endorsement letter" onclick="previewApplyLetter()"><i class="fas fa-eye"></i> Preview Letter</button>
+            <button type="button" class="primary" id="applySubmit" data-cv-tip="Apply and email letter" onclick="submitApplyStudents()"><i class="fas fa-paper-plane"></i> Apply &amp; Send Endorsement Letter</button>
         </div>
     </div>
 </div>
 <div id="applyPreviewOverlay">
-    <div class="apply-pv-bar"><span><i class="fas fa-envelope-open-text"></i> Endorsement Letter Preview</span><button type="button" onclick="closeApplyPreview()">Close</button></div>
+    <div class="apply-pv-bar"><span><i class="fas fa-envelope-open-text"></i> Endorsement Letter Preview</span><button type="button" data-cv-tip="Close preview" onclick="closeApplyPreview()">Close</button></div>
     <iframe id="applyPreviewFrame" title="Endorsement letter preview"></iframe>
 </div>
-<div id="globalLoadingOverlay" class="hidden">
+<div id="globalLoadingOverlay">
     <div class="global-loading-box">
         <div class="global-loading-spinner"></div>
         <div class="global-loading-text">
@@ -1771,9 +2040,11 @@ if(isset($_GET['load_messages'])){
     function navShow() {
         if (navShown) return;
         navShown = true;
+        if (window.cvNavGate) window.cvNavGate.start();   // nothing may hide the loading page while leaving
         navWasHidden = ov.classList.contains('hidden');
         if (navWasHidden) {
             if (label) { navPrevLabel = label.textContent; label.textContent = 'Loading'; }
+            ov.classList.add('gl-instant');   // no fade-in while leaving
             setHidden(false);
         }
         clearTimeout(navTimer);
@@ -1783,6 +2054,7 @@ if(isset($_GET['load_messages'])){
         clearTimeout(navTimer);
         if (!navShown) return;
         navShown = false;
+        if (window.cvNavGate) window.cvNavGate.end();
         if (navWasHidden) {
             setHidden(true);
             if (label && navPrevLabel !== null) label.textContent = navPrevLabel;
@@ -1835,12 +2107,12 @@ if(isset($_GET['load_messages'])){
     <div class="message-box">
         <div class="message-header">
             <span>Company Chat</span>
-            <span style="cursor:pointer" onclick="closeMessageBox()">✕</span>
+            <span style="cursor:pointer" role="button" data-cv-tip="Close chat" onclick="closeMessageBox()">✕</span>
         </div>
         <div id="chatMessages" class="chat-messages"></div>
         <div class="chat-input">
             <input type="text" id="messageInput" placeholder="Write a message...">
-            <button onclick="sendMessage()">Send</button>
+            <button data-cv-tip="Send message" onclick="sendMessage()">Send</button>
         </div>
     </div>
 </div>
@@ -2103,7 +2375,7 @@ function amdUnpick(id) {
 }
 function amdRenderChips() {
     document.getElementById('applyChips').innerHTML = _amd.picked.map(function (s) {
-        return '<span class="apply-chip">' + amdPhoto(s) + amdEsc(s.name) + '<button type="button" title="Remove" onclick="amdUnpick(' + s.id + ')">&times;</button></span>';
+        return '<span class="apply-chip">' + amdPhoto(s) + amdEsc(s.name) + '<button type="button" title="Remove" data-cv-tip="Remove student" onclick="amdUnpick(' + s.id + ')">&times;</button></span>';
     }).join('');
     amdUpdateEstimate();
 }
@@ -2813,8 +3085,8 @@ window.addEventListener('pageshow', function (e) {
             '<h3 id="cvLogoutTitle"><i class="fas fa-sign-out-alt"></i> Log Out</h3>' +
             '<p id="cvLogoutMsg">Are you sure you want to Log out? You need to login again to access your Account.</p>' +
             '<div class="cv-logout-actions">' +
-                '<button type="button" class="cv-logout-btn ghost" data-cv-logout="cancel">Cancel</button>' +
-                '<button type="button" class="cv-logout-btn" data-cv-logout="ok"><i class="fas fa-sign-out-alt"></i> Log out</button>' +
+                '<button type="button" class="cv-logout-btn ghost" data-cv-logout="cancel" data-cv-tip="Stay signed in">Cancel</button>' +
+                '<button type="button" class="cv-logout-btn" data-cv-logout="ok" data-cv-tip="Sign out now"><i class="fas fa-sign-out-alt"></i> Log out</button>' +
             '</div>' +
         '</div>';
     document.body.appendChild(overlay);
@@ -3123,8 +3395,16 @@ window.addEventListener('pageshow', function (e) {
         });
     }
 
+    // NEW (this adjustment): new requirement submission → administrator.php opens that student's requirements
+    function openStudentUpload(id, uid) {
+        var view = g('cvViewStudentUpload');
+        if (typeof view === 'function') { view(parseInt(id, 10), parseInt(uid, 10)); return; }
+        goTo('administrator.php?open_student_upload=' + encodeURIComponent(id) + '&uid=' + encodeURIComponent(uid));
+    }
+
     function go(spec) {
         var p = String(spec || '').split(':');
+        if (p[0] === 'studentupload') { openStudentUpload(p[1], p[2]); return; }
         if (p[0] === 'notif') openNotif(p[1], p[2], p[3]);
         else if (p[0] === 'app') openApp(p[1]);
         else if (p[0] === 'recovery') openRecovery(p[1]);
@@ -3151,8 +3431,9 @@ window.addEventListener('pageshow', function (e) {
     if (params.get('open_notif')) spec = 'notif:' + params.get('open_notif') + ':' + (params.get('uid') || 0) + ':' + (params.get('type') || 'new_request');
     else if (params.get('open_app_request')) spec = 'app:' + params.get('open_app_request');
     else if (params.get('open_recovery')) spec = 'recovery:' + params.get('open_recovery');
+    else if (params.get('open_student_upload')) spec = 'studentupload:' + params.get('open_student_upload') + ':' + (params.get('uid') || 0);   // NEW (this adjustment)
     if (spec) {
-        ['open_notif', 'uid', 'type', 'open_app_request', 'open_recovery'].forEach(function (k) { params.delete(k); });
+        ['open_notif', 'uid', 'type', 'open_app_request', 'open_recovery', 'open_student_upload'].forEach(function (k) { params.delete(k); });
         if (window.history.replaceState) {
             var q = params.toString();
             window.history.replaceState({}, document.title, window.location.pathname + (q ? '?' + q : '') + window.location.hash);
@@ -3160,6 +3441,97 @@ window.addEventListener('pageshow', function (e) {
         var start = function () { setTimeout(function () { go(spec); }, 600); };
         if (document.readyState === 'complete') start(); else window.addEventListener('load', start);
     }
+})();
+</script>
+<!-- ══════════════════════════════════════════════════════════════════════
+     NEW (this adjustment) — NEW REQUIREMENT SUBMISSION POPUP + INDICATOR
+     Same design and behaviour as the other popups on this page (and as
+     company_validation.php's "uploaded new requirement document(s)" popup):
+     checked right away and then every 4 s; submissions that were already
+     waiting when the page opened do not pop up; each one pops up once (a
+     further file merged into it pops up again, listing everything); clicking
+     it opens that student's requirements (administrator.php). The Student Validation indicator is
+     kept in step with the Inbox total (application requests + submissions).
+     Ported from administrator.php: the submissions list, the detection and the
+     indicator count all come from administrator.php?student_upload_list=1, so
+     every admin page shows the same popups once, whichever page is open.
+     ══════════════════════════════════════════════════════════════════════ -->
+<script>
+(function () {
+    'use strict';
+    if (window._cvStudentUploadPopupReady) return;
+    window._cvStudentUploadPopupReady = true;
+    var SRU_ENDPOINT    = 'administrator.php?student_upload_list=1';
+    var SRU_POLL_MS     = 4000;
+    var SRU_TOAST_MS    = 7000;
+    var SRU_STORE_KEY   = 'cvStudentUploadKnown';
+    var SRU_STORE_FRESH = 45000;
+    var known = null, inFlight = false;
+    function esc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
+    function sigOf(r) { return String(r.id) + '@' + String(r.sig || ''); }
+    function readStore() {
+        try {
+            var o = JSON.parse(sessionStorage.getItem(SRU_STORE_KEY) || 'null');
+            if (!o || !Array.isArray(o.ids) || (Date.now() - (o.ts || 0)) > SRU_STORE_FRESH) return null;
+            return new Set(o.ids.map(String));
+        } catch (e) { return null; }
+    }
+    function writeStore() { if (!known) return; try { sessionStorage.setItem(SRU_STORE_KEY, JSON.stringify({ ids: Array.from(known), ts: Date.now() })); } catch (e) {} }
+    function layoutToasts() {
+        if (typeof window.cvLayoutTopToasts === 'function') { window.cvLayoutTopToasts(); return; }
+        var top = 30, undo = document.getElementById('undoToast');
+        if (undo && undo.classList.contains('show')) top = Math.max(top, undo.getBoundingClientRect().bottom + 12);
+        document.querySelectorAll('.cv-top-toast').forEach(function (el) { el.style.top = top + 'px'; top += el.offsetHeight + 12; });
+    }
+    function showPopup(r) {
+        var labels = (r.items || []).map(function (i) { return i.label || i.key || ''; }).filter(Boolean);
+        var what = labels.length === 1 ? 'a new requirement: ' + labels[0] : (labels.length + ' new requirements: ' + labels.join(', '));
+        var div = document.createElement('div');
+        div.className = 'cv-top-toast';
+        div.setAttribute('role', 'status');
+        if (r.kind === 'schedule') {   // NEW (this adjustment): schedule changed by the company supervisor → the new Application SIT needs validation
+            div.innerHTML = '<i class="fas fa-calendar-days"></i><span><strong>' + esc(r.full_name || 'A student') + '</strong>\u2019s schedule was changed by the company supervisor \u2014 the new Application SIT needs validation.</span>';
+        } else if (r.kind === 'placement') {   // NEW (this adjustment): preferred placement replaced → the new Application SIT needs validation
+            div.innerHTML = '<i class="fas fa-right-left"></i><span><strong>' + esc(r.full_name || 'A student') + '</strong> replaced the preferred placement \u2014 the new Application SIT needs validation.</span>';
+        } else {
+            div.innerHTML = '<i class="fas fa-file-arrow-up"></i><span><strong>' + esc(r.full_name || 'A student') + '</strong> submitted ' + esc(what) + ' \u2014 check the Application Requests inbox.</span>';
+        }
+        document.body.appendChild(div);
+        if (window.cvTagToast) window.cvTagToast(div, 'studentupload:' + r.id + ':' + r.user_id);   // clickable
+        layoutToasts();
+        requestAnimationFrame(function () { div.classList.add('show'); });
+        setTimeout(function () { div.classList.remove('show'); setTimeout(function () { div.remove(); layoutToasts(); }, 400); }, SRU_TOAST_MS);
+    }
+    function setBadge(count) {
+        var badge = document.getElementById('sidebarAppBadge');
+        if (!badge) return;
+        count = parseInt(count, 10) || 0;
+        badge.textContent = count;
+        badge.style.display = count > 0 ? 'inline-flex' : 'none';
+    }
+    function poll() {
+        if (inFlight || document.hidden) return;
+        inFlight = true;
+        fetch(SRU_ENDPOINT, { credentials: 'same-origin', cache: 'no-store' })
+            .then(function (r) { return r.json(); })
+            .then(function (d) {
+                inFlight = false;
+                if (!d || !d.success || !Array.isArray(d.rows)) return;
+                var now = new Set(d.rows.map(sigOf));
+                setBadge(d.count);
+                if (typeof window.cvRenderStudentUploads === 'function') window.cvRenderStudentUploads(d.rows);   // administrator.php's Inbox, if open
+                if (known === null) { known = readStore() || now; if (known === now) { writeStore(); return; } }
+                var fresh = d.rows.filter(function (r) { return !known.has(sigOf(r)); });
+                known = now; writeStore();
+                fresh.forEach(showPopup);
+            })
+            .catch(function () { inFlight = false; });
+    }
+    setTimeout(function () { poll(); setInterval(poll, SRU_POLL_MS); }, 0);
+    document.addEventListener('visibilitychange', function () { if (!document.hidden && known !== null) poll(); });
+    window.addEventListener('focus', function () { if (known !== null) poll(); });
+    window.addEventListener('pageshow', function (e) { if (e.persisted) poll(); });
+    window.addEventListener('pagehide', writeStore);
 })();
 </script>
 </body>
