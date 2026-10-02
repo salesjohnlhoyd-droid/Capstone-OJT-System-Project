@@ -2695,12 +2695,11 @@ body { background: var(--grid-bg); color: #2d3748; font-family: 'Segoe UI', Taho
 }
 .action-btn:hover { filter: brightness(1.1); box-shadow: 0 6px 16px rgba(27,42,74,.32); }
 .action-btn:active { transform: translateY(2px); border-bottom-width: 2px; box-shadow: none; }
-.action-btn.am-in  { background: var(--grid-gold);  color: var(--grid-navy-deep); }
-.action-btn.am-out { background: var(--grid-red-strong); }
-.action-btn.pm-in  { background: var(--grid-blue); }
-.action-btn.pm-out { background: var(--grid-green-strong); }
+/* Consistent scheme: sign in = blue, sign out = yellow, red is reserved for late requests */
+.action-btn.am-in, .action-btn.pm-in   { background: var(--grid-blue); color: #fff; }
+.action-btn.am-out, .action-btn.pm-out { background: var(--grid-gold); color: var(--grid-navy-deep); }
 .action-btn:focus-visible { outline: 3px solid var(--grid-gold); outline-offset: 2px; }
-.action-btn.am-in .btn-spinner { border-color: rgba(18,32,63,.3); border-top-color: var(--grid-navy-deep); }
+.action-btn.am-out .btn-spinner, .action-btn.pm-out .btn-spinner { border-color: rgba(18,32,63,.3); border-top-color: var(--grid-navy-deep); }
 
 /* Late-request buttons */
 .late-req-btn, .lr-btn-submit {
