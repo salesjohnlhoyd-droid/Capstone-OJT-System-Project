@@ -2867,6 +2867,17 @@ body { background: var(--grid-bg); color: #2d3748; font-family: 'Segoe UI', Taho
 #lateReqBox .lr-camera-label { font-size: 11px; padding: 4px 12px; }
 #lateReqBox .lr-camera-corner { width: 26px; height: 26px; }
 #lateReqBox .lr-reason-group { align-self: stretch; }
+
+/* Right-hand column: Entry Type, Deadline and Reason stacked beside the camera.
+   Camera = columns 1-2 across all three rows; the Reason box takes the leftover height. */
+#lateReqBox .lr-grid { grid-template-rows: auto auto 1fr; }
+#lateReqBox .lr-photo-group    { grid-column: 1 / span 2; grid-row: 1 / span 3; }
+#lateReqBox .lr-type-group     { grid-column: 3; grid-row: 1; }
+#lateReqBox .lr-deadline-group { grid-column: 3; grid-row: 2; }
+#lateReqBox .lr-reason-group   { grid-column: 3; grid-row: 3; min-height: 0; }
+#lateReqBox .lr-reason-group .lr-textarea { min-height: 120px; }
+/* No deadline for this entry: hide its (otherwise empty) label too, so no stray heading is left */
+#lateReqBox .lr-deadline-group:has(#lr-window-warn[style*="display: none"]) { display: none; }
 #lateReqBox .lr-photo-preview { margin-top: 6px; }
 #lateReqBox .lr-reason-group { display: flex; flex-direction: column; }
 #lateReqBox .lr-textarea {
@@ -2888,13 +2899,17 @@ body { background: var(--grid-bg); color: #2d3748; font-family: 'Segoe UI', Taho
 #lateReqBox .lr-btn-submit { background: var(--grid-red-strong); color: #fff; border: none; border-bottom: 3px solid rgba(0,0,0,.25); }
 #lateReqBox .lr-btn-submit:hover { background: #A81F25; }
 @media (max-width: 900px) {
-    #lateReqBox .lr-grid { grid-template-columns: 1fr 1fr; }
+    #lateReqBox .lr-grid { grid-template-columns: 1fr 1fr; grid-template-rows: none; }
     #lateReqBox .lr-span-2 { grid-column: 1 / -1; }
+    #lateReqBox .lr-photo-group, #lateReqBox .lr-reason-group { grid-column: 1 / -1; grid-row: auto; }
+    #lateReqBox .lr-type-group     { grid-column: 1; grid-row: auto; }
+    #lateReqBox .lr-deadline-group { grid-column: 2; grid-row: auto; }
+    #lateReqBox .lr-camera-wrap { max-height: max(200px, 38vh); }
 }
 @media (max-width: 640px) {
     #lateReqBox { padding: 14px 14px 0; }
     #lateReqBox .lr-grid { grid-template-columns: 1fr; }
-    #lateReqBox .lr-span-2 { grid-column: auto; }
+    #lateReqBox .lr-span-2, #lateReqBox .lr-type-group, #lateReqBox .lr-deadline-group { grid-column: auto; }
     #lateReqBox .lr-textarea { min-height: 110px; }
     #lateReqBox .lr-footer button { flex: 1; }
 }
@@ -2924,11 +2939,11 @@ body { background: var(--grid-bg); color: #2d3748; font-family: 'Segoe UI', Taho
         </div>
         <div class="lr-body">
             <div class="lr-grid">
-                <div class="lr-group">
+                <div class="lr-group lr-type-group">
                     <div class="lr-type-label">Entry Type</div>
                     <div class="lr-type-val" id="lr-type-display">—</div>
                 </div>
-                <div class="lr-group lr-span-2">
+                <div class="lr-group lr-deadline-group">
                     <div class="lr-type-label">Deadline</div>
                     <div class="lr-window-warn" id="lr-window-warn" style="display:none;">
                          Submit before <strong id="lr-deadline-time">—</strong> — after that this entry is permanently missed.
