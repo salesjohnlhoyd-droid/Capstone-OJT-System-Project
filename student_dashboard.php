@@ -1549,7 +1549,9 @@ a { color: inherit; text-decoration: none; }
                         $badge .= '⏳';
                     }
 
-                    $hrs_label = ($hrs > 0) ? "{$hrs}h" : '';
+                    // Same exact-seconds duration as the tooltip and Detailed Log (e.g. "3h 9m"), not a rounded decimal
+                    $cell_secs = (int)($dd['seconds'] ?? 0);
+                    $hrs_label = ($cell_secs > 0) ? fmtDuration($cell_secs) : (($hrs > 0) ? "{$hrs}h" : '');
                     echo "<div class=\"cal-day {$cls}{$ring}\" data-tip=\"{$tip}\">
                         <span class=\"day-num\">{$num}</span>
                         <span class=\"day-badge\">{$badge}</span>
