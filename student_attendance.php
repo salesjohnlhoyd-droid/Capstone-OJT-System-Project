@@ -2753,6 +2753,30 @@ body { background: var(--grid-bg); color: #2d3748; font-family: 'Segoe UI', Taho
     #history-drawer { width: 100%; max-width: 100%; }
     #lateReqBox { width: calc(100% - 24px); max-width: 440px; }
 }
+
+/* ══ Popup notification (same as company_list.php's .cv-top-toast) ══
+   Square navy bar with a slate frame at the TOP of the page, status icon,
+   fades out by itself, several stack downward (newest below). It never
+   blocks the page (pointer-events:none). showToast() renders into it. */
+.cv-top-toast {
+    position: fixed; top: 30px; left: 50%; transform: translateX(-50%);
+    background: #1B2A4A; color: #E3E8F1;
+    border: 1px solid #55668C; border-radius: 0;
+    padding: 14px 20px;
+    box-shadow: 0 8px 24px rgba(27,42,74,0.30);
+    display: flex; align-items: center; gap: 12px;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    font-size: 12.5px; line-height: 1.45;
+    z-index: 10020; width: max-content; max-width: min(440px, calc(100vw - 24px));
+    opacity: 0; transition: opacity 0.35s, top 0.3s ease;
+    pointer-events: none;
+}
+.cv-top-toast.show { opacity: 1; }
+.cv-top-toast i { color: #8FD18F; font-size: 18px; flex-shrink: 0; }
+.cv-top-toast strong { color: #ffffff; font-weight: 700; }
+.cv-top-toast.is-error i { color: #f87171; }
+.cv-top-toast.is-warning i { color: #F7C600; }
+@media (prefers-reduced-motion: reduce) { .cv-top-toast { transition: none; } }
     </style>
 </head>
 <body>
@@ -3261,11 +3285,51 @@ navigator.mediaDevices.getUserMedia({video:{facingMode:'user'}})
 /* ── toast ── */
 let toastTimer;
 function showToast(msg, type='') {
-    const t = document.getElementById('toast');
-    t.textContent = msg;
-    t.className = 'show ' + type;
-    clearTimeout(toastTimer);
-    toastTimer = setTimeout(()=>{ t.className=''; }, 4200);
+    const text = String(msg == null ? '' : msg).trim();
+    if (!text) return;
+    try {
+        const kind  = (type === 'success' || type === 'error' || type === 'warning') ? type : 'info';
+        const icons = { success: 'fa-circle-check', error: 'fa-circle-exclamation', warning: 'fa-triangle-exclamation', info: 'fa-circle-info' };
+
+        /* The same message already on screen is refreshed, not stacked again. */
+        const dupe = Array.from(document.querySelectorAll('.cv-top-toast')).find(el => el.dataset.msg === text);
+        if (dupe) { clearTimeout(dupe._t); dupe._t = setTimeout(() => cvHideTopToast(dupe), 4200); return; }
+
+        const div = document.createElement('div');
+        div.className = 'cv-top-toast' + (kind === 'error' ? ' is-error' : kind === 'warning' ? ' is-warning' : '');
+        div.dataset.msg = text;
+        div.setAttribute('role', kind === 'error' ? 'alert' : 'status');
+        const icon = document.createElement('i');
+        icon.className = 'fas ' + icons[kind];
+        const span = document.createElement('span');
+        span.textContent = text;            /* textContent: server messages are never parsed as HTML */
+        div.appendChild(icon);
+        div.appendChild(span);
+        document.body.appendChild(div);
+        cvLayoutTopToasts();
+        requestAnimationFrame(() => div.classList.add('show'));
+        div._t = setTimeout(() => cvHideTopToast(div), 4200);
+    } catch (e) {
+        /* Fallback: the original bottom toast. */
+        const t = document.getElementById('toast');
+        if (!t) return;
+        t.textContent = text;
+        t.className = 'show ' + type;
+        clearTimeout(toastTimer);
+        toastTimer = setTimeout(() => { t.className = ''; }, 4200);
+    }
+}
+function cvHideTopToast(div) {
+    if (!div || !div.parentNode) return;
+    div.classList.remove('show');
+    setTimeout(() => { if (div.parentNode) div.parentNode.removeChild(div); cvLayoutTopToasts(); }, 400);
+}
+function cvLayoutTopToasts() {
+    let top = 30;
+    document.querySelectorAll('.cv-top-toast').forEach(el => {
+        el.style.top = top + 'px';
+        top += el.offsetHeight + 12;
+    });
 }
 
 /* ── time helpers ── */
