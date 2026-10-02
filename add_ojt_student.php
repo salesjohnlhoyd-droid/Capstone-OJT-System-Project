@@ -189,6 +189,224 @@ function buildEndorsementRejectedEmail($studentName, $companyName, $remark, $rea
     ]);
 }
 
+/* ================= NEW (schedule change): STUDENT TRAINING SCHEDULE =================
+   The Day / Evening Schedule a student sets on AccomForm.php lives in student_information
+   (day_sched, evening_sched) as Monday–Friday acronyms ("MWF", "TTh", "None" …).
+   The helpers below read / validate / label those values exactly like AccomForm.php does. */
+function aplSchedDays() {
+    return ['M' => 'Mon', 'T' => 'Tue', 'W' => 'Wed', 'Th' => 'Thu', 'F' => 'Fri'];
+}
+function aplParseSched($value) {
+    $value  = trim((string)$value);
+    $result = ['none' => false, 'days' => [], 'legacy' => ''];
+    if ($value === '') return $result;
+    if (strcasecmp($value, 'None') === 0) { $result['none'] = true; return $result; }
+    $rest  = $value;
+    $found = [];
+    while ($rest !== '') {
+        if (stripos($rest, 'Th') === 0)    { $found['Th'] = true; $rest = substr($rest, 2); }
+        elseif (stripos($rest, 'M') === 0) { $found['M']  = true; $rest = substr($rest, 1); }
+        elseif (stripos($rest, 'T') === 0) { $found['T']  = true; $rest = substr($rest, 1); }
+        elseif (stripos($rest, 'W') === 0) { $found['W']  = true; $rest = substr($rest, 1); }
+        elseif (stripos($rest, 'F') === 0) { $found['F']  = true; $rest = substr($rest, 1); }
+        else { $found = []; break; }
+    }
+    if (empty($found)) { $result['legacy'] = $value; return $result; }
+    foreach (aplSchedDays() as $acr => $name) {
+        if (isset($found[$acr])) $result['days'][] = $acr;
+    }
+    return $result;
+}
+// "MWF" -> "Mon, Wed, Fri"; "None" -> "None"; empty -> "Not set"
+function aplSchedLabel($value) {
+    $p = aplParseSched($value);
+    if ($p['none']) return 'None';
+    if (!empty($p['days'])) {
+        $names = aplSchedDays();
+        return implode(', ', array_map(fn($a) => $names[$a], $p['days']));
+    }
+    return $p['legacy'] !== '' ? $p['legacy'] : 'Not set';
+}
+// Returns the clean acronym string ("MWF" / "None"), or null when the value is not a valid Mon–Fri schedule.
+function aplNormalizeSched($value) {
+    $value = trim((string)$value);
+    if ($value === '') return null;
+    if (strcasecmp($value, 'None') === 0) return 'None';
+    $p = aplParseSched($value);
+    if ($p['legacy'] !== '' || empty($p['days'])) return null;
+    return implode('', $p['days']);
+}
+
+/* History of schedule changes made by company supervisors. administrator.php reads it to bring the student
+   back for validation (same idea as the placement-replaced flow) and AccomForm.php shows it to the student. */
+function ensureScheduleChangesTable($conn) {
+    static $ok = null;
+    if ($ok !== null) return $ok;
+    try {
+        $conn->query("CREATE TABLE IF NOT EXISTS student_schedule_changes (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            student_id INT NOT NULL,
+            company_id INT NOT NULL,
+            old_day_sched VARCHAR(100) NULL,
+            old_evening_sched VARCHAR(100) NULL,
+            new_day_sched VARCHAR(100) NULL,
+            new_evening_sched VARCHAR(100) NULL,
+            reason TEXT NULL,
+            contract_removed TINYINT(1) NOT NULL DEFAULT 0,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            KEY idx_ssc_student (student_id),
+            KEY idx_ssc_company (company_id))");
+        return $ok = true;
+    } catch (\Throwable $e) {
+        error_log('add_ojt_student.php: student_schedule_changes ensure failed: ' . $e->getMessage());
+        return $ok = false;
+    }
+}
+
+/* Removes the verified copies of the student's Student/University Contract from uploads/<First>_<Middle>_<Last>/.
+   Same rules as company_list.php (cl_remove_application_sit): the folder name and file names are rebuilt exactly
+   like administrator.php builds them when it verifies a requirement
+   (<Label>_verified_<time>.<ext> / <Label>_<n>_verified_<time>.<ext>), only matching regular files are deleted,
+   the folder must resolve inside uploads/, and a folder shared by two students with the same name is left alone.
+   Never throws; the caller only reads the summary. */
+function aplStudentUploadFolder($first, $middle, $last) {
+    $f = preg_replace("/[^a-zA-Z0-9]/", "_", (string)$first);
+    $m = preg_replace("/[^a-zA-Z0-9]/", "_", (string)$middle);
+    $l = preg_replace("/[^a-zA-Z0-9]/", "_", (string)$last);
+    return !empty($m) ? $f . "_" . $m . "_" . $l : $f . "_" . $l;
+}
+function aplContractFiles($dir, $labels) {
+    $out  = [];
+    $alts = [];
+    foreach ((array)$labels as $lbl) {
+        $s = preg_replace('/[^a-zA-Z0-9]/', '_', (string)$lbl);
+        if (trim($s, '_') === '') continue;
+        $alts[strtolower($s)] = preg_quote($s, '/');
+    }
+    if (!$alts) return $out;
+    $re = '/^(?:' . implode('|', $alts) . ')(?:_\d+)?_verified_\d+(?:_\d+)?\.[A-Za-z0-9]{1,5}$/i';
+    $names = @scandir($dir);
+    if (!is_array($names)) return $out;
+    foreach ($names as $n) {
+        if ($n === '.' || $n === '..') continue;
+        $path = $dir . DIRECTORY_SEPARATOR . $n;
+        if (is_link($path) || !is_file($path)) continue;
+        if (preg_match($re, $n)) $out[] = $path;
+    }
+    return $out;
+}
+function aplRemoveContractFiles($conn, $student_id) {
+    $res = ['files_removed' => 0, 'files_failed' => 0, 'folder' => '', 'note' => ''];
+    try {
+        $uq = $conn->prepare("SELECT first_name, middle_name, last_name FROM users WHERE id = ?");
+        $uq->bind_param("i", $student_id);
+        $uq->execute();
+        $u = $uq->get_result()->fetch_assoc();
+        $uq->close();
+        if (!$u || trim((string)$u['first_name']) === '' || trim((string)$u['last_name']) === '') { $res['note'] = 'student name incomplete'; return $res; }
+        $folder = aplStudentUploadFolder($u['first_name'], $u['middle_name'], $u['last_name']);
+        $res['folder'] = $folder;
+
+        $cq = $conn->prepare("SELECT first_name, middle_name, last_name FROM users WHERE id <> ? AND role = 'student' AND first_name = ? AND last_name = ?");
+        $fn = (string)$u['first_name']; $ln = (string)$u['last_name'];
+        $cq->bind_param("iss", $student_id, $fn, $ln);
+        $cq->execute();
+        $cres = $cq->get_result();
+        while ($o = $cres->fetch_assoc()) {
+            if (aplStudentUploadFolder($o['first_name'], $o['middle_name'], $o['last_name']) === $folder) {
+                $cq->close();
+                $res['note'] = 'folder shared with another student';
+                error_log("add_ojt_student.php: contract files of student " . $student_id . " left in place - folder '" . $folder . "' is shared with another student");
+                return $res;
+            }
+        }
+        $cq->close();
+
+        $base = realpath(__DIR__ . DIRECTORY_SEPARATOR . 'uploads');
+        if ($base === false) { $res['note'] = 'no uploads folder'; return $res; }
+        $dir = realpath($base . DIRECTORY_SEPARATOR . $folder);
+        if ($dir === false || !is_dir($dir)) { $res['note'] = 'no student folder'; return $res; }
+        if (strpos($dir . DIRECTORY_SEPARATOR, $base . DIRECTORY_SEPARATOR) !== 0 || $dir === $base) {
+            $res['note'] = 'folder outside uploads';
+            error_log("add_ojt_student.php: refusing to clean '" . $dir . "' (outside uploads)");
+            return $res;
+        }
+        foreach (aplContractFiles($dir, ['Student/University Contract', 'Student/University contract']) as $file) {
+            if (@unlink($file)) $res['files_removed']++;
+            else { $res['files_failed']++; error_log("add_ojt_student.php: could not delete contract file " . $file); }
+        }
+    } catch (\Throwable $e) {
+        error_log("add_ojt_student.php: contract folder cleanup failed for student " . $student_id . ": " . $e->getMessage());
+    }
+    return $res;
+}
+
+// Active administrators that have an e-mail address (the recipients of the schedule-change notice).
+function aplAdminRecipients($conn) {
+    $out = [];
+    try {
+        $hasActive = false;
+        $c = $conn->query("SHOW COLUMNS FROM admins LIKE 'is_active'");
+        if ($c && $c->num_rows > 0) $hasActive = true;
+        $r = $conn->query("SELECT first_name, middle_name, last_name, email FROM admins WHERE email IS NOT NULL AND email <> ''" . ($hasActive ? " AND COALESCE(is_active, 1) = 1" : ""));
+        $seen = [];
+        if ($r) while ($a = $r->fetch_assoc()) {
+            $em = trim((string)$a['email']);
+            if (!filter_var($em, FILTER_VALIDATE_EMAIL) || isset($seen[strtolower($em)])) continue;
+            $seen[strtolower($em)] = true;
+            $out[] = ['email' => $em, 'name' => trim(preg_replace('/\s+/', ' ', ($a['first_name'] ?? '') . ' ' . ($a['last_name'] ?? ''))) ?: 'Administrator'];
+        }
+    } catch (\Throwable $e) {
+        error_log('add_ojt_student.php: admin recipients lookup failed: ' . $e->getMessage());
+    }
+    return $out;
+}
+
+/* Schedule changed — e-mail to the STUDENT (formal, friendly, informative; the supervisor's reason is attached). */
+function buildScheduleChangedStudentEmail($studentName, $companyName, $oldDay, $oldEve, $newDay, $newEve, $reason, $contractRemoved = true) {
+    $h = fn($v) => htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8');
+    return buildOjtEmail([
+        'theme'        => 'warning',
+        'heading'      => 'Your OJT Schedule Has Been Updated',
+        'name'         => $studentName,
+        'paragraphs'   => [
+            "We hope you are doing well. We would like to let you know that your OJT supervisor at <strong>" . $h($companyName) . "</strong> has set up a new training schedule for you.",
+            "<strong style='color:#374151;'>Previous schedule</strong><br>Day: " . $h(aplSchedLabel($oldDay)) . "<br>Evening: " . $h(aplSchedLabel($oldEve)),
+            "<strong style='color:#16a34a;'>New schedule</strong><br>Day: <strong>" . $h(aplSchedLabel($newDay)) . "</strong><br>Evening: <strong>" . $h(aplSchedLabel($newEve)) . "</strong>",
+            ($contractRemoved
+                ? "Because your Student/University Contract was prepared with your previous schedule in mind, it has been removed from your requirements. Please prepare a new Student/University Contract that reflects your updated schedule and upload it on the <strong>Requirements</strong> page of the OJT portal. The administrator will validate it once it has been submitted, and some portal features may stay limited until then."
+                : "Please prepare a Student/University Contract that reflects your updated schedule and upload it on the <strong>Requirements</strong> page of the OJT portal. The administrator will validate it once it has been submitted, and some portal features may stay limited until then."),
+        ],
+        'reason_label' => 'Reason for the change',
+        'reason'       => $reason,
+        'note'         => "If anything is unclear, please reach out to your OJT supervisor or the administrator. Thank you for your understanding and cooperation.",
+        'signoff'      => ojtEmailSignoff('Warm regards', $companyName),
+    ]);
+}
+
+/* Schedule changed — e-mail to the ADMINISTRATOR. */
+function buildScheduleChangedAdminEmail($adminName, $studentName, $course, $companyName, $supervisorName, $oldDay, $oldEve, $newDay, $newEve, $reason, $contractRemoved = true) {
+    $h = fn($v) => htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8');
+    $who = ($supervisorName !== '' ? "<strong>" . $h($supervisorName) . "</strong> of " : '') . "<strong>" . $h($companyName) . "</strong>";
+    return buildOjtEmail([
+        'theme'        => 'warning',
+        'heading'      => 'Student Schedule Updated - Contract Re-validation Required',
+        'name'         => $adminName,
+        'paragraphs'   => [
+            "Good day. This is to inform you that " . $who . " has updated the training schedule of <strong>" . $h($studentName) . "</strong>" . ($course !== '' ? " (" . $h($course) . ")" : '') . ".",
+            "<strong style='color:#374151;'>Previous schedule</strong><br>Day: " . $h(aplSchedLabel($oldDay)) . "<br>Evening: " . $h(aplSchedLabel($oldEve)),
+            "<strong style='color:#16a34a;'>New schedule</strong><br>Day: <strong>" . $h(aplSchedLabel($newDay)) . "</strong><br>Evening: <strong>" . $h(aplSchedLabel($newEve)) . "</strong>",
+            ($contractRemoved
+                ? "As a result, the student's Student/University Contract (the record and its stored file copies) has been removed and the student has returned to your validation list. The student has been notified by email and asked to upload a new contract that reflects the updated schedule."
+                : "The student had no Student/University Contract on file at the time, and has returned to your validation list. The student has been notified by email and asked to upload a contract that reflects the updated schedule."),
+        ],
+        'reason_label' => 'Reason given by the supervisor',
+        'reason'       => $reason,
+        'note'         => "Please review and validate the new Student/University Contract once the student submits it. Thank you.",
+        'signoff'      => "Best regards,<br><strong>Atate On the Job Training System</strong>",
+    ]);
+}
+
 /* ================= HELPER: build full application card data =================
    Shared by the initial (server-rendered) inbox loop AND the
    check_new_applications AJAX polling endpoint, so both paths always
@@ -377,6 +595,7 @@ function endoStatusMeta($status) {
 function fetchApplicantRows($conn, $company_id) {
     $st = $conn->prepare("
         SELECT a.*, u.first_name, u.last_name, u.email, u.course, si.student_photo,
+               si.day_sched, si.evening_sched,
                el.id AS endo_id, el.validation_status AS endo_status, el.validation_remark AS endo_remark,
                el.uploaded_at AS endo_uploaded_at, el.sent_at AS endo_sent_at, el.uploaded_mime AS endo_mime,
                el.uploaded_name AS endo_uploaded_name, el.batch_id AS endo_batch_id,
@@ -420,7 +639,8 @@ function aplGroupBatches(array $rows) {
 function applicantTableSignature($rows) {
     $parts = [];
     foreach ($rows as $r) {
-        $parts[] = [(int)$r['id'], $r['endo_id'] ?? null, $r['endo_status'] ?? null, $r['endo_uploaded_at'] ?? null, $r['endo_remark'] ?? null];
+        $parts[] = [(int)$r['id'], $r['endo_id'] ?? null, $r['endo_status'] ?? null, $r['endo_uploaded_at'] ?? null, $r['endo_remark'] ?? null,
+                    $r['day_sched'] ?? null, $r['evening_sched'] ?? null]; // schedule: the table re-renders when it changes
     }
     return md5(json_encode($parts));
 }
@@ -526,8 +746,20 @@ function renderApplicantRow($conn, $company_id, $company_name, $app, $currentCou
         . '</div>'
         . ($canAccept ? '' : '<div class="endo-note">Waiting for the uploaded letter.</div>'); // ADJUSTMENT
 
+    /* NEW (schedule change): the student's Day / Evening Schedule from AccomForm.php + an Edit button */
+    $dayRaw   = trim((string)($app['day_sched'] ?? ''));
+    $eveRaw   = trim((string)($app['evening_sched'] ?? ''));
+    $hasSched = ($dayRaw !== '' || $eveRaw !== '');
+    $schedCell = '<div class="apl-sched-line"><span class="apl-sched-k">Day</span><span class="apl-sched-v">' . $h(aplSchedLabel($dayRaw)) . '</span></div>'
+        . '<div class="apl-sched-line"><span class="apl-sched-k">Evening</span><span class="apl-sched-v">' . $h(aplSchedLabel($eveRaw)) . '</span></div>'
+        . ($hasSched
+            ? '<button type="button" class="apl-sched-edit" onclick="openSchedModal(' . $id . ')" title="Set up a new schedule for this student"><i class="fas fa-pen"></i> Edit</button>'
+            : '<div class="apl-sched-note">Not set by the student yet.</div>');
+
     return '<tr id="appRow' . $id . '" class="applicant-row"'
         . ' data-app-id="' . $id . '"'
+        . ' data-day-sched="' . $h($dayRaw) . '"'
+        . ' data-evening-sched="' . $h($eveRaw) . '"'
         . ' data-name="' . $h($d['name']) . '"'
         . ' data-email="' . $h($d['email']) . '"'
         . ' data-course="' . $h($d['course']) . '"'
@@ -548,6 +780,7 @@ function renderApplicantRow($conn, $company_id, $company_name, $app, $currentCou
             . ($isBatch ? '<div class="apl-batch-tag"><i class="fas fa-users"></i> Batch of ' . (int)$app['batch_size'] . '</div>' : '') // ADJUSTMENT
         . '</div></div></td>'
         . '<td class="apl-course">' . $h($d['course'] !== '' ? $d['course'] : '—') . '</td>'
+        . '<td class="apl-sched">' . $schedCell . '</td>'
         . '<td><button type="button" class="btn-resume-preview" onclick="openAppFullView(' . $id . ')">View Skill &amp; Experience</button></td>' // ADJUSTMENT: renamed from "Preview Resume"
         . '<td>' . $validationCell . '</td>'
         . '<td>' . $applicationCell . '</td>'
@@ -556,7 +789,7 @@ function renderApplicantRow($conn, $company_id, $company_name, $app, $currentCou
 
 function renderApplicantRowsHtml($conn, $company_id, $company_name, $rows) {
     if (empty($rows)) {
-        return '<tr class="apl-empty-row"><td colspan="5" class="table-empty-state"><i class="fas fa-envelope-open-text"></i>No applicants yet. Applications approved by the administrator appear here.</td></tr>';
+        return '<tr class="apl-empty-row"><td colspan="6" class="table-empty-state"><i class="fas fa-envelope-open-text"></i>No applicants yet. Applications approved by the administrator appear here.</td></tr>';
     }
     $cq = $conn->prepare("SELECT COUNT(*) AS cnt FROM ojt_assignments WHERE company_id = ?");
     $cq->bind_param("i", $company_id);
@@ -932,6 +1165,140 @@ if (isset($_POST['check_applicants_table'])) {
     } catch (\Throwable $e) {
         error_log('check_applicants_table failed: ' . $e->getMessage());
         $out = ['success' => false, 'message' => 'Unable to refresh the applicants table.'];
+    }
+    ob_end_clean();
+    header('Content-Type: application/json');
+    echo json_encode($out, JSON_INVALID_UTF8_SUBSTITUTE);
+    exit;
+}
+
+/* ================= NEW (schedule change): SUPERVISOR SETS A NEW SCHEDULE FOR AN APPLICANT =================
+   1) the student's Day / Evening Schedule (student_information, the values shown on AccomForm.php) is updated;
+   2) the student's Student/University Contract is removed: the `requirements` row (the uploaded file is the blob in
+      that row), the application snapshots of it, and the verified copies in uploads/<student>/ — the same clean-up
+      company_list.php does for the Application SIT when a student replaces the preferred placement;
+   3) the student goes back to "Pending" validation and the change is recorded in student_schedule_changes, which
+      administrator.php reads to show the student again (like a replaced preferred placement);
+   4) the student and the administrator(s) are e-mailed with the supervisor's reason.
+   The database part runs in ONE transaction. Folder clean-up and e-mails run afterwards and can never undo or
+   fail the change — problems are logged and reported in the message. */
+if (isset($_POST['update_student_schedule'])) {
+    ob_start(); // our OWN buffer only — stray warnings must never break the JSON
+    $out = ['success' => false, 'message' => 'The schedule could not be updated. Please try again.'];
+    $inTx = false;
+    try {
+        $appId  = (int)($_POST['app_id'] ?? 0);
+        $reason = trim(preg_replace('/\s+/u', ' ', (string)($_POST['reason'] ?? '')));
+        $newDay = aplNormalizeSched($_POST['day_sched'] ?? '');
+        $newEve = aplNormalizeSched($_POST['evening_sched'] ?? '');
+
+        if ($appId <= 0) throw new RuntimeException('Invalid application.');
+        if ($newDay === null || $newEve === null) throw new RuntimeException('Please choose a Day Schedule and an Evening Schedule (Monday to Friday, or None).');
+        if ($newDay === 'None' && $newEve === 'None') throw new RuntimeException('Day Schedule and Evening Schedule cannot both be "None". Please select at least one schedule.');
+        $reasonLen = function_exists('mb_strlen') ? mb_strlen($reason) : strlen($reason);
+        if ($reasonLen < 10)  throw new RuntimeException('Please give a reason for the change (at least 10 characters).');
+        if ($reasonLen > 500) throw new RuntimeException('The reason is too long (500 characters at most).');
+
+        $q = $conn->prepare("SELECT a.id, a.student_id, u.first_name, u.last_name, u.email, u.course
+                             FROM ojt_applications a INNER JOIN users u ON u.id = a.student_id
+                             WHERE a.id = ? AND a.company_id = ? AND a.phase = 'pending'");
+        $q->bind_param("ii", $appId, $company_id);
+        $q->execute();
+        $app = $q->get_result()->fetch_assoc();
+        $q->close();
+        if (!$app) throw new RuntimeException('This application is no longer in your applicants table.');
+        $sid = (int)$app['student_id'];
+
+        if (!ensureScheduleChangesTable($conn)) throw new RuntimeException('The schedule history could not be prepared. Please try again.');
+
+        $q = $conn->prepare("SELECT day_sched, evening_sched FROM student_information WHERE user_id = ? LIMIT 1");
+        $q->bind_param("i", $sid);
+        $q->execute();
+        $cur = $q->get_result()->fetch_assoc();
+        $q->close();
+        if (!$cur) throw new RuntimeException('This student has not saved the SIT application form (AccomForm) yet, so there is no schedule to change.');
+        $oldDay = (string)($cur['day_sched'] ?? '');
+        $oldEve = (string)($cur['evening_sched'] ?? '');
+        if (aplNormalizeSched($oldDay) === $newDay && aplNormalizeSched($oldEve) === $newEve) {
+            throw new RuntimeException('The new schedule is the same as the current one. Nothing was changed.');
+        }
+
+        $conn->begin_transaction();
+        $inTx = true;
+
+        $u = $conn->prepare("UPDATE student_information SET day_sched = ?, evening_sched = ? WHERE user_id = ?");
+        $u->bind_param("ssi", $newDay, $newEve, $sid);
+        $u->execute();
+        $u->close();
+
+        // the Student/University Contract: the requirement row (= the uploaded file) and its application snapshots
+        $d = $conn->prepare("DELETE FROM requirements WHERE user_id = ? AND requirement_type = 'student_contract'");
+        $d->bind_param("i", $sid);
+        $d->execute();
+        $contractRemoved = $d->affected_rows > 0 ? 1 : 0;
+        $d->close();
+        $d = $conn->prepare("DELETE FROM application_requirements WHERE student_id = ? AND requirement_type = 'student_contract'");
+        $d->bind_param("i", $sid);
+        $d->execute();
+        $d->close();
+
+        // back to "Pending" so administrator.php lists the student again (the same value it stores while a requirement is not verified)
+        try {
+            $v = $conn->prepare("UPDATE users SET validation_status = 'Pending' WHERE id = ?");
+            $v->bind_param("i", $sid);
+            $v->execute();
+            $v->close();
+        } catch (\Throwable $e) { error_log('add_ojt_student.php: validation_status reset failed for student ' . $sid . ': ' . $e->getMessage()); }
+
+        $h = $conn->prepare("INSERT INTO student_schedule_changes
+                (student_id, company_id, old_day_sched, old_evening_sched, new_day_sched, new_evening_sched, reason, contract_removed)
+                VALUES (?,?,?,?,?,?,?,?)");
+        $h->bind_param("iisssssi", $sid, $company_id, $oldDay, $oldEve, $newDay, $newEve, $reason, $contractRemoved);
+        $h->execute();
+        $h->close();
+
+        $conn->commit();
+        $inTx = false;
+
+        // ── after the commit: stored files + e-mails (never able to undo the change) ──
+        $notes = [];
+        $clean = aplRemoveContractFiles($conn, $sid);
+        if (!empty($clean['files_failed'])) $notes[] = (int)$clean['files_failed'] . ' stored contract file(s) could not be deleted from the uploads folder';
+
+        $studentName = trim($app['first_name'] . ' ' . $app['last_name']);
+        $mail = ['student' => false, 'admins' => 0, 'admins_total' => 0];
+        try {
+            if (filter_var((string)$app['email'], FILTER_VALIDATE_EMAIL)) {
+                $mail['student'] = sendMail($app['email'], 'Your OJT Schedule Has Been Updated',
+                    buildScheduleChangedStudentEmail($studentName, $company_name, $oldDay, $oldEve, $newDay, $newEve, $reason, (bool)$contractRemoved));
+            }
+            $admins = aplAdminRecipients($conn);
+            $mail['admins_total'] = count($admins);
+            foreach ($admins as $adm) {
+                if (sendMail($adm['email'], 'Student Schedule Updated: ' . $studentName,
+                        buildScheduleChangedAdminEmail($adm['name'], $studentName, (string)($app['course'] ?? ''), $company_name, $supervisor_name, $oldDay, $oldEve, $newDay, $newEve, $reason, (bool)$contractRemoved))) {
+                    $mail['admins']++;
+                }
+            }
+        } catch (\Throwable $e) { error_log('add_ojt_student.php: schedule change e-mails failed: ' . $e->getMessage()); }
+        if (!$mail['student'])                              $notes[] = "the e-mail to the student could not be sent";
+        if ($mail['admins'] < $mail['admins_total'])        $notes[] = "the e-mail to the administrator could not be sent";
+        if ($mail['admins_total'] === 0)                    $notes[] = "no administrator e-mail address is on file";
+
+        $msg = "Schedule updated for " . $studentName . ". " . ($contractRemoved
+            ? "The Student/University Contract was removed and has to be submitted again."
+            : "No Student/University Contract was on file, so the student has to submit one that reflects the new schedule.");
+        if (!$notes) $msg .= " The student and the administrator were notified by e-mail.";
+        else         $msg .= " Note: " . implode('; ', $notes) . ".";
+        $out = ['success' => true, 'message' => $msg, 'mail' => $mail, 'contract_removed' => (bool)$contractRemoved,
+                'day_sched' => $newDay, 'evening_sched' => $newEve];
+    } catch (RuntimeException $e) {
+        if ($inTx) { try { $conn->rollback(); } catch (\Throwable $e2) {} }
+        $out = ['success' => false, 'message' => $e->getMessage()];
+    } catch (\Throwable $e) {
+        if ($inTx) { try { $conn->rollback(); } catch (\Throwable $e2) {} }
+        error_log('update_student_schedule failed: ' . $e->getMessage());
+        $out = ['success' => false, 'message' => 'The schedule could not be updated. Nothing was changed. Please try again.'];
     }
     ob_end_clean();
     header('Content-Type: application/json');
@@ -1902,14 +2269,14 @@ $result = $stmt->get_result();
         /* ADJUSTMENT: the Skills & Experience column keeps its width whether the side menu is open or
            closed — its header and the "View Skill & Experience" button stay on one line. When space is
            short the table scrolls sideways inside .apl-table-wrap instead of squeezing the column. */
-        #applicantTable th:nth-child(3), #applicantTable td:nth-child(3) { min-width: 200px; white-space: nowrap; }
+        #applicantTable th:nth-child(4), #applicantTable td:nth-child(4) { min-width: 200px; white-space: nowrap; }
         #applicantTable .btn-resume-preview { white-space: nowrap; }
         /* FIX (sideways scroll): the Accept / Reject tooltips were centred on buttons at the table's
            right edge, so even while invisible they stuck out past the table and stretched it.
            They now open leftwards from the button's right edge (the arrow still points at it). */
-        #applicantTable td:nth-child(5) .apl-tip::after { left: auto; right: 0; transform: translateY(4px); }
-        #applicantTable td:nth-child(5) .apl-tip:hover::after,
-        #applicantTable td:nth-child(5) .apl-tip:focus-within::after { transform: translateY(0); }
+        #applicantTable td:nth-child(6) .apl-tip::after { left: auto; right: 0; transform: translateY(4px); }
+        #applicantTable td:nth-child(6) .apl-tip:hover::after,
+        #applicantTable td:nth-child(6) .apl-tip:focus-within::after { transform: translateY(0); }
         .endo-chip { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 700; padding: 4px 10px; border-radius: 20px; white-space: nowrap; }
         .endo-chip.awaiting { background: #fef9c3; color: #854d0e; }
         .endo-chip.pending  { background: #dbeafe; color: #1e40af; }
@@ -1971,11 +2338,41 @@ $result = $stmt->get_result();
         .endo-val-form select, .endo-val-form button { height: 32px; box-sizing: border-box; }
         .endo-val-top .endo-btn.view { width: 100%; max-width: 240px; justify-content: center; box-sizing: border-box; }
         .endo-val-top + .verified-lock { max-width: 240px; box-sizing: border-box; }
-        #applicantTable td:nth-child(4) { min-width: 170px; }
+        #applicantTable td:nth-child(5) { min-width: 170px; }
         /* ADJUSTMENT (alignment): Accept / Reject stay side by side however narrow the table gets
            (e.g. side menu expanded) — they no longer wrap onto two lines. */
         #applicantTable .apl-app-actions { flex-wrap: nowrap; }
-        #applicantTable td:nth-child(5) { min-width: 86px; }
+        #applicantTable td:nth-child(6) { min-width: 86px; }
+        /* NEW (schedule change): Schedule column + the "Set Up New Schedule" popup (same look as #rejectModal) */
+        #applicantTable td.apl-sched { min-width: 150px; font-size: 12.5px; color: #334155; }
+        .apl-sched-line { display: flex; gap: 6px; line-height: 1.5; white-space: nowrap; }
+        .apl-sched-k { font-weight: 700; color: #64748b; min-width: 52px; }
+        .apl-sched-v { color: #1e293b; }
+        .apl-sched-note { font-size: 11.5px; color: #94a3b8; font-style: italic; }
+        .apl-sched-edit { margin-top: 6px; display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px; border-radius: 7px; border: 1px solid #c7d2fe; background: #f8f7ff; color: var(--neust-maroon); font-size: 11.5px; font-weight: 700; cursor: pointer; }
+        .apl-sched-edit:hover { background: #ece9ff; }
+        #schedModal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 4000; justify-content: center; align-items: center; }
+        #schedModalBox { background: white; padding: 26px 28px; border-radius: 14px; width: 480px; max-width: 94%; max-height: 92vh; overflow-y: auto; box-shadow: 0 20px 60px rgba(0,0,0,0.2); animation: popIn 0.3s cubic-bezier(0.34,1.56,0.64,1); }
+        #schedModalBox h3 { margin: 0 0 6px; color: #1e293b; font-size: 16px; display: flex; align-items: center; gap: 8px; }
+        #schedModalBox h3 i { color: #1d4ed8; }
+        #schedModalBox > p { margin: 0 0 12px; font-size: 13px; color: #64748b; line-height: 1.5; }
+        .sched-student { font-weight: 700; color: #1e293b; background: #f1f5f9; border-radius: 8px; padding: 8px 12px; margin-bottom: 12px; font-size: 13.5px; }
+        .sched-group { margin-bottom: 12px; }
+        .sched-label { font-size: 12.5px; font-weight: 700; color: #334155; margin-bottom: 6px; }
+        .sched-current { font-weight: 500; color: #94a3b8; margin-left: 6px; }
+        .sched-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+        .sched-chip { position: relative; }
+        .sched-chip input { position: absolute; opacity: 0; pointer-events: none; }
+        .sched-chip span { display: inline-block; padding: 6px 12px; border: 1px solid #cbd5e1; border-radius: 8px; font-size: 12.5px; font-weight: 700; color: #475569; background: #fff; cursor: pointer; user-select: none; transition: background .15s, color .15s, border-color .15s; }
+        .sched-chip span:hover { background: #f1f5f9; }
+        .sched-chip input:checked + span { background: #1e3a8a; border-color: #1e3a8a; color: #fff; }
+        .sched-chip input:focus-visible + span { outline: 2px solid #1d4ed8; outline-offset: 2px; }
+        #schedReason { width: 100%; height: 84px; padding: 10px; border: 1px solid #ddd; border-radius: 8px; box-sizing: border-box; resize: vertical; font-family: inherit; font-size: 13px; }
+        #schedReason:focus { outline: none; border-color: #1d4ed8; }
+        #schedMsg { min-height: 16px; font-size: 11.5px; color: #b45309; margin: 4px 0 12px; }
+        #schedContinueBtn { padding: 9px 20px; background: #1e3a8a; color: white; border: none; border-radius: 8px; font-weight: 700; cursor: pointer; font-size: 13px; display: flex; align-items: center; gap: 6px; }
+        #schedContinueBtn:hover { opacity: 0.88; }
+        #schedContinueBtn:disabled { opacity: 0.4; cursor: not-allowed; }
 
         /* ══ ADJUSTMENT: icon buttons + tooltips (Application column) ══ */
         /* ══ ADJUSTMENT: batches — inbox batch card, batch tag, shared cells ══ */
@@ -2128,6 +2525,30 @@ $result = $stmt->get_result();
                 </button>
             </div>
         </form>
+    </div>
+</div>
+
+<!-- ── NEW (schedule change): SET UP A NEW SCHEDULE FOR THE STUDENT ── -->
+<div id="schedModal">
+    <div id="schedModalBox" role="dialog" aria-modal="true" aria-labelledby="schedModalTitle">
+        <h3 id="schedModalTitle"><i class="fas fa-calendar-days"></i> Set Up New Schedule</h3>
+        <p>Choose the new Day and Evening Schedule (Monday to Friday) for this student and tell them why it is changing. The reason is sent to the student and the administrator by email.</p>
+        <div class="sched-student" id="schedStudentName">—</div>
+        <div class="sched-group">
+            <div class="sched-label">Day Schedule <span class="sched-current" id="schedCurDay"></span></div>
+            <div class="sched-chips" id="schedDayChips"></div>
+        </div>
+        <div class="sched-group">
+            <div class="sched-label">Evening Schedule <span class="sched-current" id="schedCurEve"></span></div>
+            <div class="sched-chips" id="schedEveChips"></div>
+        </div>
+        <div class="sched-label">Reason for the change <span style="color:#dc2626">*</span></div>
+        <textarea id="schedReason" maxlength="500" placeholder="e.g. Our department needs interns on different days starting next week..." oninput="schedValidate()"></textarea>
+        <div id="schedMsg" role="status"></div>
+        <div class="reject-actions">
+            <button type="button" class="reject-cancel" onclick="closeSchedModal()">Cancel</button>
+            <button type="button" id="schedContinueBtn" onclick="schedContinue()" disabled><i class="fas fa-arrow-right"></i> Continue</button>
+        </div>
     </div>
 </div>
 
@@ -2422,7 +2843,7 @@ $result = $stmt->get_result();
                 <table id="applicantTable" data-sig="<?= htmlspecialchars($applicant_sig) ?>">
                     <thead>
                         <tr>
-                            <th>Student Name</th><th>Course</th><th>Skills &amp; Experience</th><th>Endorsement Letter</th><th>Application</th>
+                            <th>Student Name</th><th>Course</th><th>Schedule</th><th>Skills &amp; Experience</th><th>Endorsement Letter</th><th>Application</th>
                         </tr>
                     </thead>
                     <tbody id="applicantTableBody">
@@ -3455,7 +3876,7 @@ function endoCheckEmptyApplicants() {
     const badge = document.getElementById('applicantCount');
     if (badge) { badge.textContent = count; badge.style.display = count > 0 ? 'inline-flex' : 'none'; }
     if (count === 0 && !tbody.querySelector('.apl-empty-row')) {
-        tbody.innerHTML = '<tr class="apl-empty-row"><td colspan="5" class="table-empty-state"><i class="fas fa-envelope-open-text"></i>No applicants yet. Applications approved by the administrator appear here.</td></tr>';
+        tbody.innerHTML = '<tr class="apl-empty-row"><td colspan="6" class="table-empty-state"><i class="fas fa-envelope-open-text"></i>No applicants yet. Applications approved by the administrator appear here.</td></tr>';
     }
 }
 
@@ -3970,6 +4391,134 @@ function moveAppToTable(appId, btn) {
 }
 
 // ══════════════════════════════════════════════════════════════════════
+// NEW (schedule change): the supervisor sets a new Day / Evening Schedule for an applicant.
+//   Edit → "Set Up New Schedule" popup (days + reason) → Continue → confirmation popup →
+//   server updates the schedule, removes the Student/University Contract and e-mails the
+//   student and the administrator (update_student_schedule handler).
+// ══════════════════════════════════════════════════════════════════════
+var SCHED_DAYS = [['M','Mon'],['T','Tue'],['W','Wed'],['Th','Thu'],['F','Fri']];
+var _schedApp = null; // {id, name, day, eve}
+var _schedBusy = false;
+
+function schedParse(v) { // "MWTh" -> ['M','W','Th'], "None" -> ['None'], anything else -> []
+    v = String(v || '').trim();
+    if (v.toLowerCase() === 'none') return ['None'];
+    var m = v.match(/Th|M|T|W|F/gi) || [];
+    if (m.join('').length !== v.length) return []; // legacy free text
+    return m.map(function (x) { return x.charAt(0).toUpperCase() + x.slice(1).toLowerCase(); });
+}
+function schedLabel(v) {
+    var p = schedParse(v);
+    if (!p.length) return v ? String(v) : 'Not set';
+    if (p[0] === 'None') return 'None';
+    var names = {}; SCHED_DAYS.forEach(function (d) { names[d[0]] = d[1]; });
+    return p.map(function (a) { return names[a] || a; }).join(', ');
+}
+function schedBuildChips(boxId, group, checked) {
+    var box = document.getElementById(boxId);
+    var html = SCHED_DAYS.concat([['None','None']]).map(function (d) {
+        return '<label class="sched-chip"><input type="checkbox" data-group="' + group + '" value="' + d[0] + '"' + (checked.indexOf(d[0]) !== -1 ? ' checked' : '') + '><span>' + d[1] + '</span></label>';
+    }).join('');
+    box.innerHTML = html;
+    box.querySelectorAll('input').forEach(function (cb) {
+        cb.addEventListener('change', function () {
+            if (cb.value === 'None' && cb.checked) box.querySelectorAll('input').forEach(function (o) { if (o !== cb) o.checked = false; });
+            else if (cb.value !== 'None' && cb.checked) { var n = box.querySelector('input[value="None"]'); if (n) n.checked = false; }
+            schedValidate();
+        });
+    });
+}
+function schedCollect(boxId) { // "MWF" / "None" / ""
+    var box = document.getElementById(boxId), none = box.querySelector('input[value="None"]');
+    if (none && none.checked) return 'None';
+    return Array.prototype.map.call(box.querySelectorAll('input:checked'), function (c) { return c.value; })
+        .sort(function (a, b) { return SCHED_DAYS.map(function (d) { return d[0]; }).indexOf(a) - SCHED_DAYS.map(function (d) { return d[0]; }).indexOf(b); }).join('');
+}
+function schedNorm(v) { var p = schedParse(v); return p.length ? (p[0] === 'None' ? 'None' : p.join('')) : String(v || '').trim(); }
+
+function openSchedModal(appId) {
+    var row = document.getElementById('appRow' + appId);
+    if (!row) { showToast('This applicant is no longer in the table.', 'error'); return; }
+    _schedApp = { id: appId, name: row.dataset.name || 'Student', day: row.dataset.daySched || '', eve: row.dataset.eveningSched || '' };
+    document.getElementById('schedStudentName').textContent = _schedApp.name;
+    document.getElementById('schedCurDay').textContent = '(current: ' + schedLabel(_schedApp.day) + ')';
+    document.getElementById('schedCurEve').textContent = '(current: ' + schedLabel(_schedApp.eve) + ')';
+    schedBuildChips('schedDayChips', 'day', schedParse(_schedApp.day));
+    schedBuildChips('schedEveChips', 'eve', schedParse(_schedApp.eve));
+    document.getElementById('schedReason').value = '';
+    document.getElementById('schedMsg').textContent = '';
+    document.getElementById('schedContinueBtn').disabled = true;
+    document.getElementById('schedModal').style.display = 'flex';
+    setTimeout(function () { document.getElementById('schedReason').focus(); }, 60);
+}
+function closeSchedModal() {
+    if (_schedBusy) return;
+    document.getElementById('schedModal').style.display = 'none';
+    _schedApp = null;
+}
+function schedValidate() { // returns true when the form can be continued
+    if (!_schedApp) return false;
+    var day = schedCollect('schedDayChips'), eve = schedCollect('schedEveChips');
+    var reason = document.getElementById('schedReason').value.trim();
+    var msg = '';
+    if (!day || !eve) msg = 'Pick the days for both the Day and the Evening Schedule (or "None").';
+    else if (day === 'None' && eve === 'None') msg = 'Day Schedule and Evening Schedule cannot both be "None".';
+    else if (day === schedNorm(_schedApp.day) && eve === schedNorm(_schedApp.eve)) msg = 'This is the same as the current schedule.';
+    else if (reason.length < 10) msg = 'Please give a reason (at least 10 characters).';
+    document.getElementById('schedMsg').textContent = msg;
+    var ok = (msg === '');
+    document.getElementById('schedContinueBtn').disabled = !ok || _schedBusy;
+    return ok;
+}
+function schedContinue() {
+    if (!_schedApp || !schedValidate()) return;
+    var day = schedCollect('schedDayChips'), eve = schedCollect('schedEveChips');
+    showConfirmPopup(
+        'Confirm New Schedule',
+        'Set ' + _schedApp.name + "'s schedule to Day: " + schedLabel(day) + ' / Evening: ' + schedLabel(eve) + '? ' +
+        "This removes the student's Student/University Contract if one is on file (the database record and the uploaded file), so a new one has to be submitted and validated again. " +
+        'The student and the administrator will be notified by email with your reason.',
+        'proceed',
+        function () { schedSubmit(day, eve); }
+    );
+}
+function schedSubmit(day, eve) {
+    if (!_schedApp || _schedBusy) return;
+    var app = _schedApp, btn = document.getElementById('schedContinueBtn');
+    _schedBusy = true;
+    btn.disabled = true;
+    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Saving…';
+    var fd = new FormData();
+    fd.append('update_student_schedule', '1');
+    fd.append('app_id', app.id);
+    fd.append('day_sched', day);
+    fd.append('evening_sched', eve);
+    fd.append('reason', document.getElementById('schedReason').value.trim());
+    fetch('add_ojt_student.php', { method: 'POST', body: fd })
+        .then(function (r) { return r.json(); })
+        .then(function (res) {
+            _schedBusy = false;
+            btn.innerHTML = '<i class="fas fa-arrow-right"></i> Continue';
+            if (res && res.success) {
+                document.getElementById('schedModal').style.display = 'none';
+                _schedApp = null;
+                showToast(res.message || 'Schedule updated.', 'success');
+                refreshApplicantTable();
+            } else {
+                schedValidate();
+                showToast((res && res.message) || 'The schedule could not be updated.', 'error');
+            }
+        })
+        .catch(function () {
+            _schedBusy = false;
+            btn.innerHTML = '<i class="fas fa-arrow-right"></i> Continue';
+            schedValidate();
+            showToast('Network error. Please try again.', 'error');
+        });
+}
+document.getElementById('schedModal').addEventListener('click', function (e) { if (e.target === this) closeSchedModal(); });
+
+// ══════════════════════════════════════════════════════════════════════
 // ADJUSTMENT: ADMIN BATCHES
 //  • table: batch members on the same page share ONE Endorsement Letter cell
 //    and ONE Application cell (rowspan); still 5 applicants per page
@@ -3979,7 +4528,7 @@ function moveAppToTable(appId, btn) {
 function aplMergeBatchCells() {
     var rows = aplRows();
     rows.forEach(function (r) {                                   // reset
-        [3, 4].forEach(function (i) { var c = r.cells[i]; if (!c) return; c.rowSpan = 1; c.style.display = ''; c.classList.remove('apl-batch-shared'); });
+        [4, 5].forEach(function (i) { var c = r.cells[i]; if (!c) return; c.rowSpan = 1; c.style.display = ''; c.classList.remove('apl-batch-shared'); });
     });
     var visible = rows.filter(function (r) { return r.style.display !== 'none'; });
     for (var i = 0; i < visible.length; ) {
@@ -3987,7 +4536,7 @@ function aplMergeBatchCells() {
         var j = i + 1;
         while (bid && j < visible.length && visible[j].dataset.batch === bid) j++;
         if (bid && j - i > 1) {
-            [3, 4].forEach(function (ci) {
+            [4, 5].forEach(function (ci) {
                 visible[i].cells[ci].rowSpan = j - i;
                 visible[i].cells[ci].classList.add('apl-batch-shared');
                 for (var k = i + 1; k < j; k++) visible[k].cells[ci].style.display = 'none';
