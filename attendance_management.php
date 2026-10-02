@@ -663,6 +663,8 @@ if (!function_exists('attm_lr_evidence')) {
         $sig = [];
         $add = function(string $lvl, string $txt) use (&$sig) { $sig[] = ['level' => $lvl, 'text' => $txt]; };
         $device = '';
+        $detail = null;
+        $set = null;
         try {
             $id   = (int)($r['id'] ?? 0);
             $sid  = (int)($r['student_id'] ?? 0);
@@ -758,6 +760,47 @@ if (!function_exists('attm_lr_evidence')) {
                 }
             }
 
+            // 4b) Late request or overtime? — what the request really means in time, so the supervisor can tell them apart.
+            //     Late     = the Sign Out is credited at the SCHEDULED sign-out time (never later than the submission).
+            //     Overtime = the Sign Out is credited at the moment the request was SENT, so it only makes sense
+            //                when that moment is after the scheduled sign-out.
+            if (in_array($type, ['am_time_out', 'pm_time_out'], true) && $set) {
+                $per = ($type === 'am_time_out') ? 'am' : 'pm';
+                $fmt = function($ts) { return $ts ? date('g:i A', $ts) : null; };
+                $dur = function($sec) { $m = (int)round(max(0, $sec) / 60); return floor($m / 60) . 'h ' . ($m % 60) . 'm'; };
+                $toTs = function($v) use ($date) {
+                    if (!$v || $v === 'missed') return null;
+                    $v = (strpos($v, ' ') === false) ? ($date . ' ' . $v) : $v;
+                    $t = strtotime($v);
+                    return $t === false ? null : $t;
+                };
+                $inTs    = $toTs($log[$per . '_time_in'] ?? null);
+                $schedTs = $toTs($set[$per . '_time_out_start'] ?? null);
+                $sentTs2 = strtotime((string)($r['created_at'] ?? '')) ?: null;
+                $detail = [
+                    'kind' => $kind, 'period' => strtoupper($per),
+                    'in' => $fmt($inTs), 'sched_out' => $fmt($schedTs), 'sent' => $fmt($sentTs2),
+                    'late_credit' => null, 'ot_credit' => null, 'extra_min' => null,
+                ];
+                if ($inTs && $schedTs && $sentTs2) {
+                    $lateOut = min($schedTs, $sentTs2); if ($lateOut < $inTs) $lateOut = $inTs;
+                    $detail['late_credit'] = $dur($lateOut - $inTs);
+                    $detail['ot_credit']   = $dur(max($sentTs2, $inTs) - $inTs);
+                    $extra = (int)round(($sentTs2 - $schedTs) / 60);
+                    $detail['extra_min'] = $extra;
+                    if ($kind === 'overtime') {
+                        if ($extra <= 0) $add('review', 'Marked as OVERTIME, but it was sent before the scheduled ' . strtoupper($per) . ' sign-out (' . $detail['sched_out'] . ') — there is no time beyond the schedule to count. A late request fits better.');
+                        else             $add('info',   'Overtime: sent ' . ($extra >= 60 ? floor($extra / 60) . ' h ' . ($extra % 60) . ' min' : $extra . ' min') . ' after the scheduled sign-out (' . $detail['sched_out'] . '). Allowing it credits ' . $detail['ot_credit'] . ' (sign-in to ' . $detail['sent'] . ').');
+                        if (($sentTs2 - $inTs) / 3600 > 10) $add('review', 'The overtime would make this duty longer than 10 hours.');
+                    } else {
+                        $add('info', 'Late request: allowing it credits only ' . $detail['late_credit'] . ' (sign-in to the scheduled sign-out, ' . $detail['sched_out'] . ').');
+                        if ($extra >= 60) $add('review', 'Marked as a LATE request, but it was sent ' . floor($extra / 60) . ' h ' . ($extra % 60) . ' min after the scheduled sign-out. If the student really kept working until ' . $detail['sent'] . ', it should be an overtime request instead.');
+                    }
+                } elseif ($kind === 'late' && !$inTs) {
+                    $detail['late_credit'] = '0h 0m';
+                }
+            }
+
             // 5) How often this student asks
             $q = $conn->prepare("SELECT COUNT(*) AS n, SUM(status = 'rejected') AS rej FROM late_requests WHERE student_id = ? AND id <> ? AND created_at >= (NOW() - INTERVAL 30 DAY)");
             $q->bind_param("ii", $sid, $id); $q->execute();
@@ -793,7 +836,7 @@ if (!function_exists('attm_lr_evidence')) {
         foreach ($sig as $s) $max = max($max, $rank[$s['level']] ?? 0);
         $level = $max >= 2 ? 'risk' : ($max === 1 ? 'review' : 'ok');
         $label = ['ok' => 'Looks consistent', 'review' => 'Review before approving', 'risk' => 'High risk — verify with the student first'][$level];
-        return ['level' => $level, 'label' => $label, 'signals' => $sig, 'device' => $device];
+        return ['level' => $level, 'label' => $label, 'signals' => $sig, 'device' => $device, 'detail' => $detail];
     }
 }
 
@@ -2871,6 +2914,11 @@ tr.day-off-row td { background:#ede7f6; color:#512da8; font-style:italic; }
 .req-evidence-list li i { margin-top:3px; font-size:11px; flex-shrink:0; }
 .req-evidence-list li.ok i { color:#16a34a; } .req-evidence-list li.info i { color:#64748b; }
 .req-evidence-list li.review i { color:#d97706; } .req-evidence-list li.risk i { color:#dc2626; }
+.req-evidence-detail { display:grid; grid-template-columns:1fr 1fr; gap:1px; background:#e8ebf3; border-top:1px solid #e8ebf3; }
+.req-evidence-detail div { background:#f8f9fd; padding:7px 12px; display:flex; flex-direction:column; gap:1px; }
+.req-evidence-detail span { font-size:10.5px; text-transform:uppercase; letter-spacing:.3px; color:#64748b; }
+.req-evidence-detail strong { font-size:12.5px; color:#1B2A4A; }
+@media (max-width:520px){ .req-evidence-detail { grid-template-columns:1fr; } }
 .req-evidence-device { padding:0 12px 9px; background:#fff; color:#64748b; font-size:11.5px; }
 .req-reason-box { background:#f8f9ff; border:1px solid #e8eaf6; border-radius:8px; padding:10px 13px; font-size:13px; color:#444; line-height:1.55; margin-bottom:10px; }
 .req-reason-label { font-size:10px; font-weight:700; color:#9fa8da; text-transform:uppercase; margin-bottom:4px; }
@@ -4629,7 +4677,7 @@ function renderLiBody(){
             dutyHtml=`<div class="req-duty-info has-late"><div class="req-duty-stat"><strong>AM In</strong>${fmt(req.am_time_in)}</div><div class="req-duty-stat"><strong>AM Out</strong>${fmt(req.am_time_out)}</div><div class="req-duty-stat"><strong>PM In</strong>${fmt(req.pm_time_in)}</div><div class="req-duty-stat"><strong>PM Out</strong>${fmt(req.pm_time_out)}</div></div>`;
         }
         let evidenceHtml='';
-        if(req.evidence){const ev=req.evidence,ico={ok:'fa-circle-check',info:'fa-circle-info',review:'fa-triangle-exclamation',risk:'fa-circle-xmark'};evidenceHtml=`<div class="req-evidence ${escH(ev.level)}"><div class="req-evidence-head"><i class="fas ${ev.level==='ok'?'fa-shield-halved':(ev.level==='review'?'fa-triangle-exclamation':'fa-circle-exclamation')}"></i>Legitimacy check — ${escH(ev.label)}</div><ul class="req-evidence-list">${(ev.signals||[]).map(sg=>`<li class="${escH(sg.level)}"><i class="fas ${ico[sg.level]||'fa-circle-info'}"></i><span>${escH(sg.text)}</span></li>`).join('')}</ul>${ev.device?`<div class="req-evidence-device">Sent from: ${escH(ev.device)}</div>`:''}</div>`;}
+        if(req.evidence){const ev=req.evidence,ico={ok:'fa-circle-check',info:'fa-circle-info',review:'fa-triangle-exclamation',risk:'fa-circle-xmark'};evidenceHtml=`<div class="req-evidence ${escH(ev.level)}"><div class="req-evidence-head"><i class="fas ${ev.level==='ok'?'fa-shield-halved':(ev.level==='review'?'fa-triangle-exclamation':'fa-circle-exclamation')}"></i>Legitimacy check — ${escH(ev.label)}</div><ul class="req-evidence-list">${(ev.signals||[]).map(sg=>`<li class="${escH(sg.level)}"><i class="fas ${ico[sg.level]||'fa-circle-info'}"></i><span>${escH(sg.text)}</span></li>`).join('')}</ul>${ev.detail?`<div class="req-evidence-detail"><div><span>This is a</span><strong>${ev.detail.kind==='overtime'?'OVERTIME request':'LATE request'}</strong></div><div><span>${ev.detail.period} Sign In recorded</span><strong>${ev.detail.in?escH(ev.detail.in):'none'}</strong></div><div><span>Scheduled ${ev.detail.period} Sign Out</span><strong>${ev.detail.sched_out?escH(ev.detail.sched_out):'—'}</strong></div><div><span>Request sent at</span><strong>${ev.detail.sent?escH(ev.detail.sent):'—'}</strong></div><div><span>Credited if allowed as late</span><strong>${ev.detail.late_credit?escH(ev.detail.late_credit):'—'}</strong></div><div><span>Credited if allowed as overtime</span><strong>${ev.detail.ot_credit?escH(ev.detail.ot_credit):'—'}</strong></div></div>`:''}${ev.device?`<div class="req-evidence-device">Sent from: ${escH(ev.device)}</div>`:''}</div>`;}
         html+=`<div class="req-card" id="req-card-${req.id}"><div class="req-card-top"><div class="req-student-info"><div class="req-student-name">${escH(req.first_name)}${req.middle_name?' '+escH(req.middle_name):''} ${escH(req.last_name)}</div><div class="req-meta">${typeBadge}<span>${escH(dateLabel)}</span><span>Submitted ${escH(submitted)}</span></div>${reqKindNote(req)}</div></div>${photoHtml}<div class="req-reason-box"><div class="req-reason-label">Reason</div>${escH(req.reason)}</div>${evidenceHtml}${dutyHtml}${statusSection}</div>`;
     });
     body.innerHTML=html;
