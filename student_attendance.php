@@ -390,6 +390,76 @@ if (!function_exists('ojtend_is_after')) {
     }
 }
 
+/* ════════════════════════════════════════════════════════════════════
+   NEW (late request legitimacy check): evidence the SERVER records for every late / overtime request
+   (the student's browser cannot change it) so the supervisor can judge whether it is genuine:
+     late_requests.submit_ip / submit_ua / photo_hash / photo_valid, and
+     attendance_device_log — the device, network and photo fingerprint of every regular sign-in and late
+     request, which the request is compared against on attendance_management.php.
+   Columns / table are created automatically the first time they are needed (existing databases keep working).
+   ════════════════════════════════════════════════════════════════════ */
+if (!function_exists('ensureLateRequestEvidence')) {
+    function ensureLateRequestEvidence($conn): bool {
+        static $ok = null;
+        if ($ok !== null) return $ok;
+        try {
+            $have = [];
+            $r = $conn->query("SHOW COLUMNS FROM late_requests");
+            if ($r) { while ($c = $r->fetch_assoc()) $have[$c['Field']] = true; }
+            $add = [
+                'submit_ip'   => "VARCHAR(45) NULL",
+                'submit_ua'   => "VARCHAR(255) NULL",
+                'photo_hash'  => "CHAR(64) NULL",
+                'photo_valid' => "TINYINT(1) NULL",
+            ];
+            foreach ($add as $col => $def) {
+                if (!isset($have[$col])) {
+                    try { $conn->query("ALTER TABLE late_requests ADD COLUMN `$col` $def"); } catch (\Throwable $e) { /* added by a parallel request */ }
+                }
+            }
+            $conn->query("CREATE TABLE IF NOT EXISTS attendance_device_log (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                user_id INT NOT NULL,
+                company_id INT NOT NULL,
+                date DATE NOT NULL,
+                slot VARCHAR(20) NOT NULL,
+                kind VARCHAR(12) NOT NULL,
+                ip VARCHAR(45) NULL,
+                ua VARCHAR(255) NULL,
+                photo_hash CHAR(64) NULL,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                KEY idx_adl_user (user_id, created_at),
+                KEY idx_adl_hash (photo_hash)
+            )");
+            $r = $conn->query("SHOW COLUMNS FROM late_requests LIKE 'photo_hash'");
+            return $ok = ($r && $r->num_rows > 0);
+        } catch (\Throwable $e) { return $ok = false; }
+    }
+}
+if (!function_exists('att_client_ip')) {
+    function att_client_ip(): string {
+        $ip = (string)($_SERVER['REMOTE_ADDR'] ?? '');
+        return filter_var($ip, FILTER_VALIDATE_IP) ? $ip : '';
+    }
+}
+if (!function_exists('att_client_ua')) {
+    function att_client_ua(): string {
+        return substr(trim((string)($_SERVER['HTTP_USER_AGENT'] ?? '')), 0, 255);
+    }
+}
+if (!function_exists('att_log_device')) {
+    // remembers which device / network / photo a sign-in or late request came from (best effort — never blocks the student)
+    function att_log_device($conn, $userId, $companyId, string $date, string $slot, string $kind, ?string $photoHash): void {
+        try {
+            if (!ensureLateRequestEvidence($conn)) return;
+            $ip = att_client_ip(); $ua = att_client_ua();
+            $st = $conn->prepare("INSERT INTO attendance_device_log (user_id, company_id, date, slot, kind, ip, ua, photo_hash) VALUES (?,?,?,?,?,?,?,?)");
+            $st->bind_param("iissssss", $userId, $companyId, $date, $slot, $kind, $ip, $ua, $photoHash);
+            $st->execute();
+        } catch (\Throwable $e) {}
+    }
+}
+
 // ================= AUTO-MISSED CHECK & MARKING =================
 function autoMarkMissed($conn, $user_id, $company_id, $date, $current_time) {
     if ((int)date('w', strtotime($date)) === 0 || (int)date('w', strtotime($date)) === 6) return [];
@@ -1008,6 +1078,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
         $image_data = base64_decode($image, true);
         if ($image_data === false || strlen($image_data) < 100) $image_data = null;
     }
+    // NEW (late request legitimacy check): a photo that is not a real, readable image is refused (it cannot be evidence),
+    // and every accepted photo gets a SHA-256 fingerprint so a re-used picture can be recognised later.
+    $photo_hash = null; $photo_valid = null;
+    if ($image_data !== null) {
+        $gi = function_exists('getimagesizefromstring') ? @getimagesizefromstring($image_data) : false;
+        if (!$gi || empty($gi[0]) || empty($gi[1]) || $gi[0] < 32 || $gi[1] < 32) {
+            echo json_encode(['success' => false, 'message' => 'The photo could not be read. Please retake it and submit again.']);
+            exit;
+        }
+        $photo_hash = hash('sha256', $image_data);
+        $photo_valid = 1;
+    } elseif ($image) {
+        echo json_encode(['success' => false, 'message' => 'The photo could not be read. Please retake it and submit again.']);
+        exit;
+    }
 
     $statusPending = 'pending';
     $null = null;
@@ -1036,6 +1121,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
             : 'Could not save your request. Please try again.']);
         exit;
     }
+
+    // NEW (late request legitimacy check): store the server-side evidence next to the request (best effort)
+    try {
+        if (ensureLateRequestEvidence($conn)) {
+            $newId = (int)$ins->insert_id;
+            $ev_ip = att_client_ip(); $ev_ua = att_client_ua();
+            $evu = $conn->prepare("UPDATE late_requests SET submit_ip=?, submit_ua=?, photo_hash=?, photo_valid=? WHERE id=?");
+            $evu->bind_param("sssii", $ev_ip, $ev_ua, $photo_hash, $photo_valid, $newId);
+            $evu->execute();
+            att_log_device($conn, $user_id, $company_id, $date, $type, $requestType, $photo_hash);
+        }
+    } catch (\Throwable $e) {}
 
     $okMsg = $requestType === 'overtime'
         ? 'Overtime request submitted. Waiting for company approval.'
@@ -1184,6 +1281,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && !isset($_POST['action'])) {
         $stmt->send_long_data(1, $image_data);
         $stmt->execute();
     }
+    att_log_device($conn, $user_id, $company_id, $date, $type, 'attendance', hash('sha256', $image_data)); // NEW (late request legitimacy check)
     $_SESSION['attendance_token'] = bin2hex(random_bytes(16));
     $labels = ['am_time_in'=>'AM Sign In','am_time_out'=>'AM Sign Out','pm_time_in'=>'PM Sign In','pm_time_out'=>'PM Sign Out'];
     echo json_encode([

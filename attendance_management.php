@@ -567,6 +567,236 @@ if (!function_exists('attm_live_signature')) {
     }
 }
 
+/* ════════════════════════════════════════════════════════════════════
+   NEW (late request legitimacy check): evidence the SERVER records for every late / overtime request
+   (the student's browser cannot change it) so the supervisor can judge whether it is genuine:
+     late_requests.submit_ip / submit_ua / photo_hash / photo_valid, and
+     attendance_device_log — the device, network and photo fingerprint of every regular sign-in and late
+     request, which the request is compared against on attendance_management.php.
+   Columns / table are created automatically the first time they are needed (existing databases keep working).
+   ════════════════════════════════════════════════════════════════════ */
+if (!function_exists('ensureLateRequestEvidence')) {
+    function ensureLateRequestEvidence($conn): bool {
+        static $ok = null;
+        if ($ok !== null) return $ok;
+        try {
+            $have = [];
+            $r = $conn->query("SHOW COLUMNS FROM late_requests");
+            if ($r) { while ($c = $r->fetch_assoc()) $have[$c['Field']] = true; }
+            $add = [
+                'submit_ip'   => "VARCHAR(45) NULL",
+                'submit_ua'   => "VARCHAR(255) NULL",
+                'photo_hash'  => "CHAR(64) NULL",
+                'photo_valid' => "TINYINT(1) NULL",
+            ];
+            foreach ($add as $col => $def) {
+                if (!isset($have[$col])) {
+                    try { $conn->query("ALTER TABLE late_requests ADD COLUMN `$col` $def"); } catch (\Throwable $e) { /* added by a parallel request */ }
+                }
+            }
+            $conn->query("CREATE TABLE IF NOT EXISTS attendance_device_log (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                user_id INT NOT NULL,
+                company_id INT NOT NULL,
+                date DATE NOT NULL,
+                slot VARCHAR(20) NOT NULL,
+                kind VARCHAR(12) NOT NULL,
+                ip VARCHAR(45) NULL,
+                ua VARCHAR(255) NULL,
+                photo_hash CHAR(64) NULL,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                KEY idx_adl_user (user_id, created_at),
+                KEY idx_adl_hash (photo_hash)
+            )");
+            $r = $conn->query("SHOW COLUMNS FROM late_requests LIKE 'photo_hash'");
+            return $ok = ($r && $r->num_rows > 0);
+        } catch (\Throwable $e) { return $ok = false; }
+    }
+}
+
+if (!function_exists('attm_lr_ua_key')) {
+    // "Chrome / Windows" style key of a user-agent string (used to compare devices)
+    function attm_lr_ua_key(?string $ua): string {
+        $ua = (string)$ua;
+        if ($ua === '') return '';
+        $b = 'Browser';
+        if (preg_match('/Edg(e|A|iOS)?\//i', $ua))        $b = 'Edge';
+        elseif (preg_match('/OPR\/|Opera/i', $ua))         $b = 'Opera';
+        elseif (preg_match('/Firefox|FxiOS/i', $ua))       $b = 'Firefox';
+        elseif (preg_match('/Chrome|CriOS/i', $ua))        $b = 'Chrome';
+        elseif (preg_match('/Safari/i', $ua))              $b = 'Safari';
+        $o = 'Unknown OS';
+        if (preg_match('/Android/i', $ua))                 $o = 'Android';
+        elseif (preg_match('/iPhone|iPad|iPod/i', $ua))    $o = 'iOS';
+        elseif (preg_match('/Windows/i', $ua))             $o = 'Windows';
+        elseif (preg_match('/Mac OS X|Macintosh/i', $ua))  $o = 'Mac';
+        elseif (preg_match('/Linux|X11/i', $ua))           $o = 'Linux';
+        return $b . ' on ' . $o;
+    }
+}
+if (!function_exists('attm_lr_net_key')) {
+    // network of an IP address: IPv4 /24, IPv6 /48 (so a changing last number on the same network still matches)
+    function attm_lr_net_key(?string $ip): string {
+        $ip = (string)$ip;
+        if ($ip === '') return '';
+        if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) { $p = explode('.', $ip); return $p[0] . '.' . $p[1] . '.' . $p[2]; }
+        if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6)) { $b = @inet_pton($ip); return $b === false ? '' : bin2hex(substr($b, 0, 6)); }
+        return '';
+    }
+}
+if (!function_exists('attm_lr_mask_ip')) {
+    function attm_lr_mask_ip(?string $ip): string {
+        $ip = (string)$ip;
+        if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) { $p = explode('.', $ip); return $p[0] . '.' . $p[1] . '.' . $p[2] . '.xxx'; }
+        if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6)) { $p = explode(':', $ip); return implode(':', array_slice($p, 0, 3)) . ':…'; }
+        return '';
+    }
+}
+if (!function_exists('attm_lr_evidence')) {
+    /* Legitimacy check of ONE late / overtime request. Only evidence the server recorded or can verify is used:
+         photo (readable, not re-used), device + network compared with the student's regular sign-ins,
+         the rest of that day's attendance, how long after the window it was sent, how often the student asks,
+         and whether the same reason was already used. Returns
+         ['level' => 'ok'|'review'|'risk', 'label' => string, 'signals' => [['level' => 'ok'|'info'|'review'|'risk', 'text' => string], ...],
+          'device' => 'Chrome on Windows · 203.0.113.xxx'] — never throws. */
+    function attm_lr_evidence($conn, int $companyId, array $r): array {
+        $sig = [];
+        $add = function(string $lvl, string $txt) use (&$sig) { $sig[] = ['level' => $lvl, 'text' => $txt]; };
+        $device = '';
+        try {
+            $id   = (int)($r['id'] ?? 0);
+            $sid  = (int)($r['student_id'] ?? 0);
+            $date = (string)($r['date'] ?? '');
+            $type = (string)($r['type'] ?? '');
+            $kind = (($r['request_type'] ?? 'late') === 'overtime') ? 'overtime' : 'late';
+            $labels = ['am_time_in' => 'AM Sign In', 'am_time_out' => 'AM Sign Out', 'pm_time_in' => 'PM Sign In', 'pm_time_out' => 'PM Sign Out'];
+            $slotLbl = $labels[$type] ?? $type;
+
+            // 1) Photo
+            $hasPhoto = !empty($r['has_photo']) || !empty($r['photo']);
+            if (!$hasPhoto) {
+                $add('review', 'No photo was attached to this request.');
+            } elseif (isset($r['photo_valid']) && $r['photo_valid'] !== null && (int)$r['photo_valid'] === 0) {
+                $add('risk', 'The attached photo is not a valid image.');
+            } else {
+                $hash = (string)($r['photo_hash'] ?? '');
+                $dupMsg = null;
+                if ($hash !== '') {
+                    $q = $conn->prepare("SELECT lr2.student_id, lr2.date, CONCAT(u.first_name, ' ', u.last_name) AS nm FROM late_requests lr2 JOIN users u ON u.id = lr2.student_id WHERE lr2.photo_hash = ? AND lr2.id <> ? ORDER BY lr2.id ASC LIMIT 1");
+                    $q->bind_param("si", $hash, $id); $q->execute();
+                    $d = $q->get_result()->fetch_assoc(); $q->close();
+                    if ($d) {
+                        $dupMsg = ((int)$d['student_id'] === $sid)
+                            ? 'This exact photo was already used in an earlier request of this student (' . date('M j, Y', strtotime($d['date'])) . ').'
+                            : 'This exact photo was already submitted by another student (' . trim($d['nm']) . ', ' . date('M j, Y', strtotime($d['date'])) . ').';
+                    } else {
+                        $q = $conn->prepare("SELECT user_id, date FROM attendance_device_log WHERE photo_hash = ? AND NOT (kind IN ('late','overtime') AND user_id = ? AND date = ? AND slot = ?) ORDER BY id ASC LIMIT 1");
+                        $q->bind_param("siss", $hash, $sid, $date, $type); $q->execute();
+                        $d = $q->get_result()->fetch_assoc(); $q->close();
+                        if ($d) $dupMsg = 'This exact photo was already used for another attendance entry (' . date('M j, Y', strtotime($d['date'])) . ').';
+                    }
+                }
+                if ($dupMsg) $add('risk', $dupMsg);
+                else         $add('ok', 'A readable photo is attached and has not been used before.');
+            }
+
+            // 2) Device / network compared with the student's regular sign-ins (last 60 days)
+            $ip = (string)($r['submit_ip'] ?? ''); $ua = (string)($r['submit_ua'] ?? '');
+            if ($ip !== '' || $ua !== '') $device = trim(attm_lr_ua_key($ua) . ($ip !== '' ? ' · ' . attm_lr_mask_ip($ip) : ''), ' ·');
+            if ($ip === '' && $ua === '') {
+                $add('info', 'Device and network were not recorded for this request (sent before this check existed).');
+            } else {
+                $q = $conn->prepare("SELECT ip, ua FROM attendance_device_log WHERE user_id = ? AND kind = 'attendance' AND created_at >= (NOW() - INTERVAL 60 DAY) ORDER BY id DESC LIMIT 40");
+                $q->bind_param("i", $sid); $q->execute();
+                $hist = $q->get_result()->fetch_all(MYSQLI_ASSOC); $q->close();
+                if (empty($hist)) {
+                    $add('info', 'No earlier sign-ins are recorded to compare this device or network with.');
+                } else {
+                    $uaKey = attm_lr_ua_key($ua); $netKey = attm_lr_net_key($ip);
+                    $sameUa = false; $sameNet = false;
+                    foreach ($hist as $h) {
+                        if ($uaKey !== '' && attm_lr_ua_key($h['ua']) === $uaKey)   $sameUa = true;
+                        if ($netKey !== '' && attm_lr_net_key($h['ip']) === $netKey) $sameNet = true;
+                    }
+                    if ($sameUa && $sameNet)      $add('ok', 'Sent from the same device and network as the student\'s regular sign-ins.');
+                    elseif ($sameUa)              $add('review', 'Sent from a different network than the student\'s regular sign-ins (same device).');
+                    elseif ($sameNet)             $add('review', 'Sent from a different device than the student\'s regular sign-ins (same network).');
+                    else                          $add(count($hist) >= 3 ? 'risk' : 'review', 'Sent from a device and network the student has never signed in from.');
+                }
+            }
+
+            // 3) The rest of that day's attendance
+            $q = $conn->prepare("SELECT am_time_in, am_time_out, pm_time_in, pm_time_out FROM attendance_logs WHERE user_id = ? AND date = ? AND company_id = ? LIMIT 1");
+            $q->bind_param("isi", $sid, $date, $companyId); $q->execute();
+            $log = $q->get_result()->fetch_assoc(); $q->close();
+            $real = 0;
+            foreach (['am_time_in', 'am_time_out', 'pm_time_in', 'pm_time_out'] as $c) { $v = $log[$c] ?? null; if ($v !== null && $v !== '' && $v !== 'missed') $real++; }
+            if ($real === 0) {
+                $add('review', 'The student has no other attendance recorded on this day.');
+            } else {
+                $add('ok', 'The student has ' . $real . ' other recorded entr' . ($real === 1 ? 'y' : 'ies') . ' on this day.');
+            }
+            if ($kind === 'late' && in_array($type, ['am_time_out', 'pm_time_out'], true)) {
+                $inV = $log[$type === 'am_time_out' ? 'am_time_in' : 'pm_time_in'] ?? null;
+                if ($inV === null || $inV === '' || $inV === 'missed') $add('review', 'No ' . ($type === 'am_time_out' ? 'AM' : 'PM') . ' Sign In is recorded for this duty, so there is nothing to sign out from.');
+            }
+
+            // 4) How long after the window it was sent (information)
+            $endKeys = ['am_time_in' => 'am_time_in_end', 'am_time_out' => 'am_time_out_end', 'pm_time_in' => 'pm_time_in_end', 'pm_time_out' => 'pm_time_out_end'];
+            if (isset($endKeys[$type]) && $date !== '') {
+                $q = $conn->prepare("SELECT * FROM attendance_settings WHERE company_id = ? AND (date = ? OR (is_auto = 1 AND date <= ?)) ORDER BY (date = ?) DESC, date DESC LIMIT 1");
+                $q->bind_param("isss", $companyId, $date, $date, $date); $q->execute();
+                $set = $q->get_result()->fetch_assoc(); $q->close();
+                $endT = $set[$endKeys[$type]] ?? null;
+                $sentTs = strtotime((string)($r['created_at'] ?? ''));
+                if ($endT && $sentTs) {
+                    $endTs = strtotime($date . ' ' . $endT);
+                    if ($endTs) {
+                        $mins = (int)round(($sentTs - $endTs) / 60);
+                        if ($mins >= 0) $add('info', 'Sent ' . ($mins >= 60 ? floor($mins / 60) . ' h ' . ($mins % 60) . ' min' : $mins . ' min') . ' after the ' . $slotLbl . ' window closed.');
+                    }
+                }
+            }
+
+            // 5) How often this student asks
+            $q = $conn->prepare("SELECT COUNT(*) AS n, SUM(status = 'rejected') AS rej FROM late_requests WHERE student_id = ? AND id <> ? AND created_at >= (NOW() - INTERVAL 30 DAY)");
+            $q->bind_param("ii", $sid, $id); $q->execute();
+            $f = $q->get_result()->fetch_assoc(); $q->close();
+            $n = (int)($f['n'] ?? 0); $rej = (int)($f['rej'] ?? 0);
+            if ($n >= 5)      $add('risk',   $n . ' other late / overtime requests from this student in the last 30 days.');
+            elseif ($n >= 3)  $add('review', $n . ' other late / overtime requests from this student in the last 30 days.');
+            else              $add('ok',     $n === 0 ? 'No other late requests from this student in the last 30 days.' : $n . ' other late request' . ($n === 1 ? '' : 's') . ' from this student in the last 30 days.');
+            if ($rej >= 2)    $add('review', $rej . ' of this student\'s recent requests were rejected.');
+
+            // 6) The reason
+            $reason = trim((string)($r['reason'] ?? ''));
+            $norm = preg_replace('/[^a-z0-9]+/', ' ', function_exists('mb_strtolower') ? mb_strtolower($reason) : strtolower($reason));
+            $norm = trim($norm);
+            if ($norm !== '') {
+                if ((function_exists('mb_strlen') ? mb_strlen($reason) : strlen($reason)) < 15) $add('review', 'The reason is very short.');
+                $q = $conn->prepare("SELECT student_id, reason FROM late_requests WHERE company_id = ? AND id <> ? AND (student_id = ? OR date = ?) ORDER BY id DESC LIMIT 200");
+                $q->bind_param("iiis", $companyId, $id, $sid, $date); $q->execute();
+                $others = $q->get_result()->fetch_all(MYSQLI_ASSOC); $q->close();
+                $sameSelf = false; $sameOther = false;
+                foreach ($others as $o) {
+                    $on = trim(preg_replace('/[^a-z0-9]+/', ' ', function_exists('mb_strtolower') ? mb_strtolower((string)$o['reason']) : strtolower((string)$o['reason'])));
+                    if ($on === $norm) { if ((int)$o['student_id'] === $sid) $sameSelf = true; else $sameOther = true; }
+                }
+                if ($sameOther)     $add('risk',   'The same reason was submitted by another student on this day.');
+                if ($sameSelf)      $add('review', 'The student used exactly the same reason in an earlier request.');
+            }
+        } catch (\Throwable $e) {
+            $add('info', 'Some checks could not be completed.');
+        }
+        $rank = ['ok' => 0, 'info' => 0, 'review' => 1, 'risk' => 2];
+        $max = 0;
+        foreach ($sig as $s) $max = max($max, $rank[$s['level']] ?? 0);
+        $level = $max >= 2 ? 'risk' : ($max === 1 ? 'review' : 'ok');
+        $label = ['ok' => 'Looks consistent', 'review' => 'Review before approving', 'risk' => 'High risk — verify with the student first'][$level];
+        return ['level' => $level, 'label' => $label, 'signals' => $sig, 'device' => $device];
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // XLSX EXPORT HANDLER
 // (formerly the separate export_attendance_xlsx.php — the Export XLSX button of the
@@ -1156,6 +1386,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_SERVER['HTTP_X_REQUESTED_WI
 
         if (!$lr) { echo json_encode(['success'=>false,'message'=>'Request not found or already processed.']); exit; }
 
+        // NEW (late request legitimacy check): a high-risk request is only approved after the supervisor explicitly confirms the warnings
+        $lrEv = attm_lr_evidence($conn, (int)$company_id, $lr);
+        if ($lrEv['level'] === 'risk' && empty($_POST['confirm_risk'])) {
+            echo json_encode(['success'=>false,'needs_confirm'=>true,'message'=>'This request has high-risk warnings. Review them and confirm again to approve it.','evidence'=>$lrEv]);
+            exit;
+        }
+
         $student_id = $lr['student_id'];
         $lr_date    = $lr['date'];
         $type       = $lr['type'];
@@ -1459,6 +1696,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET'
     header('Content-Type: application/json');
 
     $lrTypeSel = ensureLateRequestTypeColumn($conn) ? 'lr.request_type' : "'late' AS request_type";
+    // NEW (late request legitimacy check): server-recorded evidence; photos sent before this check existed get their fingerprint here
+    $evOk  = ensureLateRequestEvidence($conn);
+    $evSel = $evOk ? ', lr.submit_ip, lr.submit_ua, lr.photo_hash, lr.photo_valid' : '';
+    if ($evOk) {
+        try { $conn->query("UPDATE late_requests SET photo_hash = SHA2(photo, 256) WHERE company_id = " . (int)$company_id . " AND photo IS NOT NULL AND photo_hash IS NULL LIMIT 100"); } catch (\Throwable $e) {}
+    }
     $stmt = $conn->prepare("
         SELECT
             lr.id,
@@ -1469,7 +1712,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET'
             lr.reason,
             lr.status,
             lr.created_at,
-            lr.photo IS NOT NULL AS has_photo,
+            lr.photo IS NOT NULL AS has_photo{$evSel},
             u.first_name,
             u.middle_name,
             u.last_name,
@@ -1504,6 +1747,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET'
         $row['request_type'] = (($row['request_type'] ?? 'late') === 'overtime') ? 'overtime' : 'late';
         $row['has_photo'] = (bool)$row['has_photo'];
         $row['photo_url'] = "late_request_photo.php?id={$row['id']}&t=" . time();
+        // NEW (late request legitimacy check): evidence for the requests still waiting for a decision
+        $row['evidence'] = ($row['status'] === 'pending') ? attm_lr_evidence($conn, (int)$company_id, $row) : null;
+        unset($row['submit_ip'], $row['submit_ua'], $row['photo_hash'], $row['photo_valid']);
     }
     unset($row);
 
@@ -2615,6 +2861,17 @@ tr.day-off-row td { background:#ede7f6; color:#512da8; font-style:italic; }
 .req-kind-badge.overtime { background:#6a1b9a; }
 .req-kind-note { margin-top:8px; font-size:12px; color:#5A6272; line-height:1.5; }
 .req-kind-note strong { color:#1B2A4A; }
+.req-evidence { border:1px solid #e0e4ef; border-radius:8px; margin-bottom:10px; overflow:hidden; font-size:12.5px; }
+.req-evidence-head { display:flex; align-items:center; gap:8px; padding:8px 12px; font-weight:700; }
+.req-evidence.ok .req-evidence-head { background:#ecfdf3; color:#166534; }
+.req-evidence.review .req-evidence-head { background:#fffbeb; color:#92400e; }
+.req-evidence.risk .req-evidence-head { background:#fef2f2; color:#991b1b; }
+.req-evidence-list { list-style:none; margin:0; padding:8px 12px 10px; background:#fff; }
+.req-evidence-list li { display:flex; gap:8px; padding:3px 0; color:#444; line-height:1.45; }
+.req-evidence-list li i { margin-top:3px; font-size:11px; flex-shrink:0; }
+.req-evidence-list li.ok i { color:#16a34a; } .req-evidence-list li.info i { color:#64748b; }
+.req-evidence-list li.review i { color:#d97706; } .req-evidence-list li.risk i { color:#dc2626; }
+.req-evidence-device { padding:0 12px 9px; background:#fff; color:#64748b; font-size:11.5px; }
 .req-reason-box { background:#f8f9ff; border:1px solid #e8eaf6; border-radius:8px; padding:10px 13px; font-size:13px; color:#444; line-height:1.55; margin-bottom:10px; }
 .req-reason-label { font-size:10px; font-weight:700; color:#9fa8da; text-transform:uppercase; margin-bottom:4px; }
 .req-photo-section { margin-bottom:12px; }
@@ -4371,7 +4628,9 @@ function renderLiBody(){
             const fmt=v=>{if(!v||v==='missed')return'—';const t=v.includes(' ')?v.split(' ')[1]:v;const [h,m]=t.split(':').map(Number);const ampm=h>=12?'PM':'AM';const h12=h%12||12;return`${h12}:${String(m).padStart(2,'0')} ${ampm}`;};
             dutyHtml=`<div class="req-duty-info has-late"><div class="req-duty-stat"><strong>AM In</strong>${fmt(req.am_time_in)}</div><div class="req-duty-stat"><strong>AM Out</strong>${fmt(req.am_time_out)}</div><div class="req-duty-stat"><strong>PM In</strong>${fmt(req.pm_time_in)}</div><div class="req-duty-stat"><strong>PM Out</strong>${fmt(req.pm_time_out)}</div></div>`;
         }
-        html+=`<div class="req-card" id="req-card-${req.id}"><div class="req-card-top"><div class="req-student-info"><div class="req-student-name">${escH(req.first_name)}${req.middle_name?' '+escH(req.middle_name):''} ${escH(req.last_name)}</div><div class="req-meta">${typeBadge}<span>${escH(dateLabel)}</span><span>Submitted ${escH(submitted)}</span></div>${reqKindNote(req)}</div></div>${photoHtml}<div class="req-reason-box"><div class="req-reason-label">Reason</div>${escH(req.reason)}</div>${dutyHtml}${statusSection}</div>`;
+        let evidenceHtml='';
+        if(req.evidence){const ev=req.evidence,ico={ok:'fa-circle-check',info:'fa-circle-info',review:'fa-triangle-exclamation',risk:'fa-circle-xmark'};evidenceHtml=`<div class="req-evidence ${escH(ev.level)}"><div class="req-evidence-head"><i class="fas ${ev.level==='ok'?'fa-shield-halved':(ev.level==='review'?'fa-triangle-exclamation':'fa-circle-exclamation')}"></i>Legitimacy check — ${escH(ev.label)}</div><ul class="req-evidence-list">${(ev.signals||[]).map(sg=>`<li class="${escH(sg.level)}"><i class="fas ${ico[sg.level]||'fa-circle-info'}"></i><span>${escH(sg.text)}</span></li>`).join('')}</ul>${ev.device?`<div class="req-evidence-device">Sent from: ${escH(ev.device)}</div>`:''}</div>`;}
+        html+=`<div class="req-card" id="req-card-${req.id}"><div class="req-card-top"><div class="req-student-info"><div class="req-student-name">${escH(req.first_name)}${req.middle_name?' '+escH(req.middle_name):''} ${escH(req.last_name)}</div><div class="req-meta">${typeBadge}<span>${escH(dateLabel)}</span><span>Submitted ${escH(submitted)}</span></div>${reqKindNote(req)}</div></div>${photoHtml}<div class="req-reason-box"><div class="req-reason-label">Reason</div>${escH(req.reason)}</div>${evidenceHtml}${dutyHtml}${statusSection}</div>`;
     });
     body.innerHTML=html;
     filtered.forEach(req=>{if(req.has_photo)loadPhotoIntoFrame(req.id);});
@@ -4403,9 +4662,11 @@ function approveRequest(reqId,btn){
     const req=liRequests.find(r=>r.id===reqId);
     const studentName=req?(req.first_name+(req.middle_name?' '+req.middle_name:'')+' '+req.last_name):null;
     const isOT=!!(req&&req.request_type==='overtime');
-    showCustomConfirm({title:isOT?'Allow Overtime Request?':'Allow Late Request?',message:isOT?"Overtime will be counted from the student's Sign In up to the time this request was submitted.":"The student's time and photo will be recorded.",studentName,type:'approve',onConfirm:()=>{
+    const isRisk=!!(req&&req.evidence&&req.evidence.level==='risk');
+    const baseMsg=isOT?"Overtime will be counted from the student's Sign In up to the time this request was submitted.":"The student's time and photo will be recorded.";
+    showCustomConfirm({title:isOT?'Allow Overtime Request?':'Allow Late Request?',message:isRisk?"High-risk warnings were found in the legitimacy check. Allow only if you have confirmed this with the student. "+baseMsg:baseMsg,studentName,type:'approve',onConfirm:()=>{
         btn.classList.add('loading'); btn.textContent='Processing…';
-        const fd=new FormData(); fd.append('action','approve_late_request'); fd.append('req_id',reqId);
+        const fd=new FormData(); fd.append('action','approve_late_request'); fd.append('req_id',reqId); if(isRisk) fd.append('confirm_risk','1');
         fetch(window.location.pathname,{method:'POST',headers:{'X-Requested-With':'XMLHttpRequest'},body:fd})
         .then(r=>r.json())
         .then(data=>{
