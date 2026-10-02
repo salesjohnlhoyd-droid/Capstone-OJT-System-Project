@@ -1145,8 +1145,7 @@ function missedNoticeHtml($type, $pending_requests, $lrWindowStatuses) {
     } elseif ($status === 'approved') {
         $actionHtml = '<div class="late-req-pending" style="background:#f0fff4;border-color:#EAF3EA;color:#2C5A2C;"> ' . $reqKind . ' approved</div>';
     } elseif ($winStatus === 'open') {
-        $btnLbl = in_array($type, ['am_time_out','pm_time_out'], true) ? 'Submit Late / Overtime Request' : 'Submit Late Request';
-        $actionHtml = '<button class="late-req-btn" onclick="openLateReqModal(\'' . $type . '\')"> ' . $btnLbl . '</button>';
+        $actionHtml = '<button class="late-req-btn" onclick="openLateReqModal(\'' . $type . '\')"> Submit Late Request</button>';
     } else {
         $actionHtml = '<div class="late-req-expired"> Late request window has closed. This entry is permanently missed.</div>';
     }
@@ -2991,11 +2990,11 @@ body { background: var(--grid-bg); color: #2d3748; font-family: 'Segoe UI', Taho
 }
 @media (prefers-reduced-motion: reduce) { #lateReqBox { animation: none; } }
 /* Request type picker (Late Request / Overtime) */
-#lateReqBox .lr-reqtype-title { margin-top: 10px; }
+#lateReqBox .lr-reqtype-title { margin-top: 8px; }
 #lateReqBox .lr-reqtype-options { display: flex; gap: 6px; }
 #lateReqBox .lr-reqtype-opt {
     flex: 1 1 0; display: flex; align-items: center; justify-content: center; gap: 6px;
-    padding: 7px 8px; font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.3px;
+    padding: 5px 8px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.3px;
     color: var(--grid-navy); background: #fff; border: 1px solid var(--grid-border); cursor: pointer;
     user-select: none; transition: background .15s, color .15s, border-color .15s;
 }
@@ -3004,7 +3003,7 @@ body { background: var(--grid-bg); color: #2d3748; font-family: 'Segoe UI', Taho
 #lateReqBox .lr-reqtype-opt.selected { background: var(--grid-navy); color: #fff; border-color: var(--grid-navy); }
 #lateReqBox .lr-reqtype-opt:focus-within { outline: 2px solid var(--grid-navy); outline-offset: 2px; }
 #lateReqBox .lr-reqtype-opt.disabled { opacity: .5; cursor: not-allowed; }
-#lateReqBox #lr-reqtype-desc { min-height: 30px; margin-top: 5px; }
+#lateReqBox #lr-reqtype-desc { margin-top: 3px; }
     </style>
 </head>
 <body>
@@ -3803,8 +3802,7 @@ function buildMissedNoticeHtml(type, winStatusOverride) {
     } else if (status === 'approved') {
         actionHtml = `<div class="late-req-pending" style="background:#f0fff4;border-color:#EAF3EA;color:#2C5A2C;"> ${reqKind} approved</div>`;
     } else if (winStatus === 'open') {
-        const btnLbl = (type === 'am_time_out' || type === 'pm_time_out') ? 'Submit Late / Overtime Request' : 'Submit Late Request';
-        actionHtml = `<button class="late-req-btn" onclick="openLateReqModal('${type}')"> ${btnLbl}</button>`;
+        actionHtml = `<button class="late-req-btn" onclick="openLateReqModal('${type}')"> Submit Late Request</button>`;
     } else {
         actionHtml = `<div class="late-req-expired"> Late request window has closed. This entry is permanently missed.</div>`;
     }
@@ -4080,8 +4078,8 @@ function updateLrRequestTypeUi() {
     const sched = TODAY_SETTINGS ? TODAY_SETTINGS[type.replace('_time_out', '') + '_time_out_start'] : null;
     const descEl = document.getElementById('lr-reqtype-desc');
     descEl.textContent = (kind === 'overtime')
-        ? `Overtime: your ${period} duty is counted from your ${period} Sign In up to the time you submit this request.`
-        : `Late Request: only your ${period} duty is counted, from your ${period} Sign In to the scheduled ${period} Sign Out` + (sched ? ` (${fmt12(sched)}).` : '.');
+        ? `Counts ${period} Sign In to the time you submit.`
+        : `Counts ${period} Sign In to scheduled Sign Out` + (sched ? ` (${fmt12(sched)}).` : '.');
     document.getElementById('lr-reason').placeholder = (kind === 'overtime')
         ? 'Describe the work you did beyond your scheduled sign-out time…'
         : 'Describe what happened and why you were unable to sign in/out on time…';
