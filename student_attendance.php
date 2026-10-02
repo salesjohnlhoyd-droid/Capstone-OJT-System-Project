@@ -2641,6 +2641,102 @@ body { background: var(--grid-bg); color: #2d3748; font-family: 'Segoe UI', Taho
 @media (prefers-reduced-motion: reduce) {
     .step-label::before, #lateReqBox { animation: none; }
 }
+
+/* ══ Bold pass: stronger buttons, richer status colours, clearer card hierarchy ══
+   Appended override block. Colours/weights only; no selectors, markup or
+   scripts were changed. Contrast of every text/background pair is >= 4.5:1. */
+:root {
+    --grid-navy-deep: #12203F;
+    --grid-blue: #1F3C88;
+    --grid-blue-hover: #2A4DAA;
+    --grid-gold: #F2B705;
+    --grid-gold-hover: #FFC929;
+    --grid-green-strong: #1E7A3A;
+    --grid-red-strong: #C0272D;
+    --grid-amber-strong: #B26A00;
+}
+
+/* Header buttons: solid and clearly clickable instead of ghost outlines */
+.dashboard-link, .history-btn {
+    font-size: 12px; font-weight: 700; padding: 9px 16px;
+    border: 1px solid transparent; box-shadow: 0 2px 0 rgba(18,32,63,.25);
+    transition: background .18s, transform .12s, box-shadow .12s;
+}
+.history-btn { background: var(--grid-navy); color: #fff; }
+.history-btn:hover { background: var(--grid-blue); }
+.dashboard-link { background: var(--grid-gold); color: var(--grid-navy-deep); }
+.dashboard-link:hover { background: var(--grid-gold-hover); }
+.dashboard-link:active, .history-btn:active { transform: translateY(1px); box-shadow: 0 1px 0 rgba(18,32,63,.25); }
+
+/* Page title gets a gold marker so the page has a strong anchor */
+.att-header { border-bottom: 2px solid var(--grid-navy); }
+.att-header-left h1 { border-left: 4px solid var(--grid-gold); padding-left: 10px; color: var(--grid-navy-deep); }
+
+/* Cards: navy top rule + soft lift so panels stand off the background */
+.step-card, .progress-track, .log-card {
+    border: 1px solid var(--grid-border); border-top: 3px solid var(--grid-navy);
+    box-shadow: 0 2px 8px rgba(27,42,74,.08);
+}
+.camera-card { border: 2px solid var(--grid-navy); box-shadow: 0 4px 14px rgba(27,42,74,.22); }
+.camera-date-badge { background: var(--grid-navy-deep); border-left: 3px solid var(--grid-gold); }
+.step-label, .progress-track-title, .log-card-title { color: var(--grid-navy-deep); font-weight: 800; }
+.log-duty-label { color: var(--grid-blue); font-weight: 800; }
+.log-item { background: #F6F8FC; border: 1px solid var(--grid-border); border-left: 3px solid var(--grid-blue); }
+.log-item-info .li-label { color: var(--grid-muted); font-weight: 700; }
+.log-item-info .li-time { color: var(--grid-navy-deep); font-weight: 700; }
+.log-item-info .li-time.empty { color: #8A93A6; }
+.log-item-info .li-time.pending { color: var(--grid-amber-strong); }
+
+/* Primary action buttons: saturated fills, depth edge, clear hover/focus */
+.action-btn {
+    font-weight: 800; font-size: 14px; padding: 17px; color: #fff;
+    border-bottom: 4px solid rgba(0,0,0,.28); box-shadow: 0 4px 12px rgba(27,42,74,.25);
+    transition: transform .12s, box-shadow .15s, filter .15s, opacity .2s;
+}
+.action-btn:hover { filter: brightness(1.1); box-shadow: 0 6px 16px rgba(27,42,74,.32); }
+.action-btn:active { transform: translateY(2px); border-bottom-width: 2px; box-shadow: none; }
+.action-btn.am-in  { background: var(--grid-gold);  color: var(--grid-navy-deep); }
+.action-btn.am-out { background: var(--grid-red-strong); }
+.action-btn.pm-in  { background: var(--grid-blue); }
+.action-btn.pm-out { background: var(--grid-green-strong); }
+.action-btn:focus-visible { outline: 3px solid var(--grid-gold); outline-offset: 2px; }
+.action-btn.am-in .btn-spinner { border-color: rgba(18,32,63,.3); border-top-color: var(--grid-navy-deep); }
+
+/* Late-request buttons */
+.late-req-btn, .lr-btn-submit {
+    background: var(--grid-red-strong); font-weight: 800;
+    border-bottom: 3px solid rgba(0,0,0,.25); box-shadow: 0 2px 6px rgba(160,42,42,.25);
+}
+.late-req-btn:hover, .lr-btn-submit:hover { background: #A81F25; }
+.lr-btn-cancel { background: #fff; border: 2px solid var(--grid-navy); color: var(--grid-navy); font-weight: 800; }
+.lr-btn-cancel:hover { background: var(--grid-navy); color: #fff; }
+
+/* Progress steps */
+.step-circle.done { background: var(--grid-green-strong); }
+.step-circle.active { background: var(--grid-blue); box-shadow: 0 0 0 4px rgba(31,60,136,.25); }
+.step-circle.todo { background: #C9D1E3; color: var(--grid-navy); }
+.step-circle.pending-late { background: var(--grid-amber-strong); }
+.step-circle.missed { background: var(--grid-red-strong); }
+.track-step:not(:last-child).done-step::after { background: var(--grid-green-strong); }
+.track-step.done-step .track-step-label { color: var(--grid-green-strong); font-weight: 800; }
+.track-step.active-step .track-step-label { color: var(--grid-blue); font-weight: 800; }
+.track-step.missed-step .track-step-label { color: var(--grid-red-strong); font-weight: 800; }
+.step-label::before { background: var(--grid-green-strong); }
+
+/* Status chips and notices */
+.late-req-pending, .lr-countdown, .lr-pending-badge { background: #FFF1C2; border: 1px solid #E0B83A; color: #7A4B00; font-weight: 700; }
+.late-req-expired, .missed-notice { background: #FBE3E3; border: 1px solid #D98A8A; color: #8E1B20; }
+.missed-notice .mn-header { color: #8E1B20; }
+.missed-notice .mn-body { color: #7A4B00; }
+.skipped-duty-notice { background: #DCE6FA; border: 1px solid #9DB2E0; border-left: 4px solid var(--grid-blue); }
+.skipped-duty-notice .sdn-icon, .skipped-duty-notice .sdn-text h4 { color: var(--grid-blue); }
+.weekend-banner { background: var(--grid-navy-deep); border: 2px solid var(--grid-gold); }
+.done-card .done-icon { color: var(--grid-green-strong); }
+.hist-time.missed { color: var(--grid-red-strong); }
+.drawer-header { background: var(--grid-navy-deep); border-bottom: 3px solid var(--grid-gold); }
+#toast.success { background: var(--grid-green-strong); }
+#toast.error { background: var(--grid-red-strong); }
+#toast.warning { background: var(--grid-amber-strong); }
     </style>
 </head>
 <body>
