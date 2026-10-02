@@ -892,6 +892,20 @@ $start_date = $start_res['start_date'] ?? date("Y-m-d");
 
 $end_date_limit = date("Y-m-d", strtotime("+4 months", strtotime($start_date)));
 
+// Display range of the Monthly Attendance Summary / Attendance Overview chart.
+// The 4-month OJT window above still governs schedules, but attendance that students keep recording
+// AFTER it is real data and must stay visible: when the company has logs past the window, the
+// display range runs through today (days without an entry are Absent once they have passed).
+$display_end_limit = $end_date_limit;
+try {
+    $dl_stmt = $conn->prepare("SELECT MAX(date) AS d FROM attendance_logs WHERE company_id=? AND date<=?");
+    $dl_today = date("Y-m-d");
+    $dl_stmt->bind_param("is", $company_id, $dl_today);
+    $dl_stmt->execute();
+    $dl_last = $dl_stmt->get_result()->fetch_assoc()['d'] ?? null;
+    if ($dl_last && $dl_last > $end_date_limit) $display_end_limit = $dl_today;
+} catch (\Throwable $e) {}
+
 $date = $_GET['date'] ?? date("Y-m-d");
 if ($date < $start_date)     $date = $start_date;
 if ($date > $end_date_limit) $date = $end_date_limit;
@@ -1012,8 +1026,9 @@ $month = $_GET['month'] ?? date("Y-m", strtotime($start_date));
 $ojt_start_month = date("Y-m", strtotime($start_date));
 $month_min = $ojt_start_month;
 $month_max = date("Y-m", strtotime($end_date_limit));
+$sm_month_max = date("Y-m", strtotime($display_end_limit)); // Monthly Attendance Summary navigation limit
 if ($month < $month_min) $month = $month_min;
-if ($month > $month_max) $month = $month_max;
+if ($month > $sm_month_max) $month = $sm_month_max;
 
 $start = max($start_date, $month . "-01");
 if (date("Y-m", strtotime($start_date)) === $month) {
@@ -1022,7 +1037,7 @@ if (date("Y-m", strtotime($start_date)) === $month) {
     $start = $month . "-01";
 }
 $end   = date("Y-m-t", strtotime($month . "-01"));
-if ($end > $end_date_limit) $end = $end_date_limit;
+if ($end > $display_end_limit) $end = $display_end_limit;
 
 $students = [];
 $res = $conn->query("
@@ -1191,7 +1206,7 @@ for ($d = strtotime($start); $d <= strtotime($end); $d = strtotime("+1 day", $d)
 
 $all_chart_months = [];
 $cm = strtotime(date("Y-m-01", strtotime($start_date)));
-$cm_end = strtotime(date("Y-m-01", strtotime($end_date_limit)));
+$cm_end = strtotime(date("Y-m-01", strtotime($display_end_limit)));
 while ($cm <= $cm_end) {
     $all_chart_months[] = date("Y-m", $cm);
     $cm = strtotime("+1 month", $cm);
@@ -1217,7 +1232,7 @@ $monthly_stats = [];
 foreach ($all_chart_months as $ym) {
     $ym_start = (date('Y-m', strtotime($start_date)) === $ym) ? $start_date : $ym . '-01';
     $ym_end   = date('Y-m-t', strtotime($ym . '-01'));
-    if ($ym_end > $end_date_limit) $ym_end = $end_date_limit;
+    if ($ym_end > $display_end_limit) $ym_end = $display_end_limit;
 
     if ($ym_start > $today_str) continue;
     if ($ym_end > $today_str) $ym_end = $today_str;
@@ -2317,7 +2332,7 @@ tr.day-off-row td { background:#ede7f6; color:#512da8; font-style:italic; }
                                 <span class="chart-nav-btn" aria-disabled="true">&#8592;</span>
                             <?php endif; ?>
                             <span class="sm-month-label" id="smMonthLabel"><?= date("F Y", strtotime($month . "-01")) ?></span>
-                            <?php if ($sm_next_month <= $month_max): ?>
+                            <?php if ($sm_next_month <= $sm_month_max): ?>
                                 <a class="chart-nav-btn" href="<?= htmlspecialchars($sm_month_url($sm_next_month)) ?>" title="Next month (<?= date("F Y", strtotime($sm_next_month . "-01")) ?>)">&#8594;</a>
                             <?php else: ?>
                                 <span class="chart-nav-btn" aria-disabled="true">&#8594;</span>
