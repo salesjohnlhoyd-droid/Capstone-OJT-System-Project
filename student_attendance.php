@@ -2737,6 +2737,23 @@ body { background: var(--grid-bg); color: #2d3748; font-family: 'Segoe UI', Taho
 #toast.success { background: var(--grid-green-strong); }
 #toast.error { background: var(--grid-red-strong); }
 #toast.warning { background: var(--grid-amber-strong); }
+
+/* ══ Small-screen layout ══
+   The page never had a mobile layout: the fixed 260px sidebar squeezed the
+   content into a thin strip. On narrow screens the content now gets the
+   full remaining width and the header stacks. (The sidebar itself is
+   collapsed on load by the script at the end of the page.) */
+@media (max-width: 768px) {
+    .page-wrap { padding: 14px 12px 80px; max-width: none; }
+    .att-header { flex-wrap: wrap; gap: 10px; }
+    .att-header-right { width: 100%; }
+    .att-header-right .history-btn, .att-header-right .dashboard-link { flex: 1; justify-content: center; }
+    .step-card, .progress-track, .log-card { padding: 14px; }
+    .action-btn { font-size: 13px; padding: 15px; }
+    .navbar-brand .navbar-subtitle { display: none; }
+    #history-drawer { width: 100%; max-width: 100%; }
+    #lateReqBox { width: calc(100% - 24px); max-width: 440px; }
+}
     </style>
 </head>
 <body>
@@ -3197,6 +3214,11 @@ toggleBtn.addEventListener('click', () => {
     document.getElementById('att-notif-bar')
             .classList.toggle('sidebar-collapsed', sidebar.classList.contains('collapsed'));
 });
+
+/* ── Small screens: start with the sidebar collapsed (reuses the toggle above) ── */
+if (window.matchMedia && window.matchMedia('(max-width: 768px)').matches) {
+    toggleBtn.click();
+}
 
 /* ── Journal empty-section badge ── */
 (function() {
