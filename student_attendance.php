@@ -2701,7 +2701,7 @@ body { background: var(--grid-bg); color: #2d3748; font-family: 'Segoe UI', Taho
         <span id="anb-countdown" class="anb-countdown">Calculating...</span>
     </div>
     <button class="anb-btn" id="anb-action-btn" onclick="scrollToActionBtn()">Sign now</button>
-    <button class="anb-close" id="anb-close-btn" type="button" aria-label="Dismiss notification">&#x2715;</button>
+    <button class="anb-close" id="anb-close-btn" type="button" aria-label="Dismiss notification"><i class="fas fa-xmark"></i></button>
     <div id="anb-progress" class="anb-progress" style="width:100%;"></div>
 </div>
 
@@ -3017,7 +3017,7 @@ function render_log_html($att, $pending_requests = [], $am_skipped = false, $pm_
 
 <script>
 /* ══════════════════════════════════════════════════════════════
-   PHP DATA → JS
+   PHP DATA to JS
 ══════════════════════════════════════════════════════════════ */
 const ACTIVE_STEP_INIT   = <?= json_encode($active_step) ?>;
 const IS_WEEKEND         = <?= $is_weekend ? 'true' : 'false' ?>;
@@ -4093,7 +4093,7 @@ function debugAutoMiss() {
             console.log('Timestamp:',      d.timestamp);
             console.log('Date:',           d.date);
             console.log('Current time:',   d.current_time);
-            console.log('Now (seconds):',  d.now_seconds, '→', d.now_hhmm);
+            console.log('Now (seconds):',  d.now_seconds, 'to', d.now_hhmm);
             console.log('Is weekend:',     d.is_weekend);
             console.log('AM Skipped:',     d.am_skipped);
             console.log('PM Skipped:',     d.pm_skipped);
