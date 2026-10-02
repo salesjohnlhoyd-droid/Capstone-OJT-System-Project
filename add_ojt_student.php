@@ -362,7 +362,36 @@ function aplAdminRecipients($conn) {
     return $out;
 }
 
-/* Schedule changed — e-mail to the STUDENT (formal, friendly, informative; the supervisor's reason is attached). */
+/* A schedule value in plain words for the e-mails: "MWF" -> "Monday, Wednesday and Friday", "None" -> "none". */
+function aplSchedWords($value) {
+    $p = aplParseSched($value);
+    if ($p['none']) return 'none';
+    if (!empty($p['days'])) {
+        $full = ['M' => 'Monday', 'T' => 'Tuesday', 'W' => 'Wednesday', 'Th' => 'Thursday', 'F' => 'Friday'];
+        $names = array_map(fn($a) => $full[$a], $p['days']);
+        if (count($names) === 1) return $names[0];
+        $last = array_pop($names);
+        return implode(', ', $names) . ' and ' . $last;
+    }
+    return $p['legacy'] !== '' ? $p['legacy'] : 'not set';
+}
+/* One flowing sentence describing the change — no captions or "Label:" lines. $who = "your" / "the student's". */
+function aplScheduleChangeSentence($who, $oldDay, $oldEve, $newDay, $newEve) {
+    $h = fn($v) => htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8');
+    $part = function ($kind, $old, $new) use ($who, $h) {
+        if (aplNormalizeSched($old) === aplNormalizeSched($new)) {
+            return $who . " " . $kind . " schedule stays <strong>" . $h(aplSchedWords($new)) . "</strong>";
+        }
+        return $who . " " . $kind . " schedule is now <strong>" . $h(aplSchedWords($new)) . "</strong> (previously " . $h(aplSchedWords($old)) . ")";
+    };
+    return $part('day', $oldDay, $newDay) . ", and " . lcfirst($part('evening', $oldEve, $newEve)) . ".";
+}
+function aplReasonSentence($lead, $reason) {
+    return $lead . " &ldquo;" . nl2br(htmlspecialchars((string)$reason, ENT_QUOTES, 'UTF-8')) . "&rdquo;";
+}
+
+/* Schedule changed — e-mail to the STUDENT (formal, friendly, informative; written as plain sentences, the
+   supervisor's reason included). */
 function buildScheduleChangedStudentEmail($studentName, $companyName, $oldDay, $oldEve, $newDay, $newEve, $reason, $contractRemoved = true) {
     $h = fn($v) => htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8');
     return buildOjtEmail([
@@ -371,20 +400,18 @@ function buildScheduleChangedStudentEmail($studentName, $companyName, $oldDay, $
         'name'         => $studentName,
         'paragraphs'   => [
             "We hope you are doing well. We would like to let you know that your OJT supervisor at <strong>" . $h($companyName) . "</strong> has set up a new training schedule for you.",
-            "<strong style='color:#374151;'>Previous schedule</strong><br>Day: " . $h(aplSchedLabel($oldDay)) . "<br>Evening: " . $h(aplSchedLabel($oldEve)),
-            "<strong style='color:#16a34a;'>New schedule</strong><br>Day: <strong>" . $h(aplSchedLabel($newDay)) . "</strong><br>Evening: <strong>" . $h(aplSchedLabel($newEve)) . "</strong>",
+            "As a result, " . aplScheduleChangeSentence('your', $oldDay, $oldEve, $newDay, $newEve),
+            aplReasonSentence("Your supervisor shared the following reason for the change:", $reason),
             ($contractRemoved
-                ? "Because your Student/University Contract was prepared with your previous schedule in mind, it has been removed from your requirements. Please prepare a new Student/University Contract that reflects your updated schedule and upload it on the <strong>Requirements</strong> page of the OJT portal. The administrator will validate it once it has been submitted, and some portal features may stay limited until then."
-                : "Please prepare a Student/University Contract that reflects your updated schedule and upload it on the <strong>Requirements</strong> page of the OJT portal. The administrator will validate it once it has been submitted, and some portal features may stay limited until then."),
+                ? "Because your Student/University Contract was prepared with your previous schedule in mind, it has been removed from your requirements. Please prepare a new Student/University Contract that reflects your updated schedule and upload it on the Requirements page of the OJT portal. The administrator will validate it once it has been submitted, and some portal features may stay limited until then."
+                : "Please prepare a Student/University Contract that reflects your updated schedule and upload it on the Requirements page of the OJT portal. The administrator will validate it once it has been submitted, and some portal features may stay limited until then."),
         ],
-        'reason_label' => 'Reason for the change',
-        'reason'       => $reason,
         'note'         => "If anything is unclear, please reach out to your OJT supervisor or the administrator. Thank you for your understanding and cooperation.",
         'signoff'      => ojtEmailSignoff('Warm regards', $companyName),
     ]);
 }
 
-/* Schedule changed — e-mail to the ADMINISTRATOR. */
+/* Schedule changed — e-mail to the ADMINISTRATOR (plain sentences, no captions). */
 function buildScheduleChangedAdminEmail($adminName, $studentName, $course, $companyName, $supervisorName, $oldDay, $oldEve, $newDay, $newEve, $reason, $contractRemoved = true) {
     $h = fn($v) => htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8');
     $who = ($supervisorName !== '' ? "<strong>" . $h($supervisorName) . "</strong> of " : '') . "<strong>" . $h($companyName) . "</strong>";
@@ -394,14 +421,12 @@ function buildScheduleChangedAdminEmail($adminName, $studentName, $course, $comp
         'name'         => $adminName,
         'paragraphs'   => [
             "Good day. This is to inform you that " . $who . " has updated the training schedule of <strong>" . $h($studentName) . "</strong>" . ($course !== '' ? " (" . $h($course) . ")" : '') . ".",
-            "<strong style='color:#374151;'>Previous schedule</strong><br>Day: " . $h(aplSchedLabel($oldDay)) . "<br>Evening: " . $h(aplSchedLabel($oldEve)),
-            "<strong style='color:#16a34a;'>New schedule</strong><br>Day: <strong>" . $h(aplSchedLabel($newDay)) . "</strong><br>Evening: <strong>" . $h(aplSchedLabel($newEve)) . "</strong>",
+            "As a result, " . aplScheduleChangeSentence("the student's", $oldDay, $oldEve, $newDay, $newEve),
+            aplReasonSentence("The supervisor gave the following reason for the change:", $reason),
             ($contractRemoved
-                ? "As a result, the student's Student/University Contract (the record and its stored file copies) has been removed and the student has returned to your validation list. The student has been notified by email and asked to upload a new contract that reflects the updated schedule."
+                ? "The student's Student/University Contract (the record and its stored file copies) has been removed and the student has returned to your validation list. The student has been notified by email and asked to upload a new contract that reflects the updated schedule."
                 : "The student had no Student/University Contract on file at the time, and has returned to your validation list. The student has been notified by email and asked to upload a contract that reflects the updated schedule."),
         ],
-        'reason_label' => 'Reason given by the supervisor',
-        'reason'       => $reason,
         'note'         => "Please review and validate the new Student/University Contract once the student submits it. Thank you.",
         'signoff'      => "Best regards,<br><strong>Atate On the Job Training System</strong>",
     ]);
@@ -2351,28 +2376,59 @@ $result = $stmt->get_result();
         .apl-sched-note { font-size: 11.5px; color: #94a3b8; font-style: italic; }
         .apl-sched-edit { margin-top: 6px; display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px; border-radius: 7px; border: 1px solid #c7d2fe; background: #f8f7ff; color: var(--neust-maroon); font-size: 11.5px; font-weight: 700; cursor: pointer; }
         .apl-sched-edit:hover { background: #ece9ff; }
-        #schedModal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 4000; justify-content: center; align-items: center; }
-        #schedModalBox { background: white; padding: 26px 28px; border-radius: 14px; width: 480px; max-width: 94%; max-height: 92vh; overflow-y: auto; box-shadow: 0 20px 60px rgba(0,0,0,0.2); animation: popIn 0.3s cubic-bezier(0.34,1.56,0.64,1); }
-        #schedModalBox h3 { margin: 0 0 6px; color: #1e293b; font-size: 16px; display: flex; align-items: center; gap: 8px; }
-        #schedModalBox h3 i { color: #1d4ed8; }
-        #schedModalBox > p { margin: 0 0 12px; font-size: 13px; color: #64748b; line-height: 1.5; }
-        .sched-student { font-weight: 700; color: #1e293b; background: #f1f5f9; border-radius: 8px; padding: 8px 12px; margin-bottom: 12px; font-size: 13.5px; }
+        /* "Set Up New Schedule" popup + its confirmation — the same design as company_list.php's popups:
+           square bordered box, header with title + close button, sticky action bar (like #placementMismatchModal),
+           and the centred icon dialog (like #cancelConfirmModal). */
+        #schedModal, #schedConfirmModal { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.55); backdrop-filter: blur(4px); justify-content: center; align-items: center; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        #schedModal { z-index: 4000; padding: 20px 0; box-sizing: border-box; }
+        #schedConfirmModal { z-index: 4500; }
+        #schedModal .sm-box { background: #fff; border: 1px solid #C3CADA; border-radius: 0; width: 620px; max-width: 94%; max-height: calc(100vh - 40px); max-height: calc(100dvh - 40px); display: flex; flex-direction: column; padding: 16px 24px 0 24px; box-sizing: border-box; text-align: left; animation: popIn 0.3s ease; }
+        #schedModal .sm-header { display: flex; justify-content: space-between; align-items: center; flex-shrink: 0; margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px solid #C3CADA; }
+        #schedModal .sm-header h3 { margin: 0; color: #1B2A4A; font-size: 15px; font-family: inherit; text-transform: uppercase; letter-spacing: 0.4px; }
+        #schedModal .sm-header h3 i { color: #A0850A; margin-right: 6px; }
+        #schedModal .sm-close { background: none; border: none; font-size: 24px; line-height: 1; padding: 0 4px; cursor: pointer; color: #5A6272; transition: color 0.2s; }
+        #schedModal .sm-close:hover { color: #1B2A4A; }
+        #schedModal .sm-body { overflow-y: auto; flex: 1 1 auto; min-height: 0; }
+        #schedModal .sm-body p { font-size: 13px; color: #475569; line-height: 1.5; margin: 0 0 10px 0; }
+        #schedModal .sm-body p strong { color: #1e293b; }
+        #schedModal .sm-note { font-size: 11px !important; color: #5A6272 !important; margin: 4px 0 8px !important; }
+        .sched-student { font-weight: 700; color: #1B2A4A; background: #F0F2F8; border: 1px solid #C3CADA; border-radius: 0; padding: 7px 10px; margin-bottom: 12px; font-size: 13px; }
         .sched-group { margin-bottom: 12px; }
-        .sched-label { font-size: 12.5px; font-weight: 700; color: #334155; margin-bottom: 6px; }
-        .sched-current { font-weight: 500; color: #94a3b8; margin-left: 6px; }
+        .sched-label { font-size: 11px; font-weight: 700; color: #1B2A4A; text-transform: uppercase; letter-spacing: 0.3px; margin-bottom: 6px; }
+        .sched-current { font-weight: 500; color: #5A6272; text-transform: none; letter-spacing: 0; margin-left: 6px; }
         .sched-chips { display: flex; flex-wrap: wrap; gap: 6px; }
         .sched-chip { position: relative; }
         .sched-chip input { position: absolute; opacity: 0; pointer-events: none; }
-        .sched-chip span { display: inline-block; padding: 6px 12px; border: 1px solid #cbd5e1; border-radius: 8px; font-size: 12.5px; font-weight: 700; color: #475569; background: #fff; cursor: pointer; user-select: none; transition: background .15s, color .15s, border-color .15s; }
-        .sched-chip span:hover { background: #f1f5f9; }
-        .sched-chip input:checked + span { background: #1e3a8a; border-color: #1e3a8a; color: #fff; }
-        .sched-chip input:focus-visible + span { outline: 2px solid #1d4ed8; outline-offset: 2px; }
-        #schedReason { width: 100%; height: 84px; padding: 10px; border: 1px solid #ddd; border-radius: 8px; box-sizing: border-box; resize: vertical; font-family: inherit; font-size: 13px; }
-        #schedReason:focus { outline: none; border-color: #1d4ed8; }
-        #schedMsg { min-height: 16px; font-size: 11.5px; color: #b45309; margin: 4px 0 12px; }
-        #schedContinueBtn { padding: 9px 20px; background: #1e3a8a; color: white; border: none; border-radius: 8px; font-weight: 700; cursor: pointer; font-size: 13px; display: flex; align-items: center; gap: 6px; }
-        #schedContinueBtn:hover { opacity: 0.88; }
-        #schedContinueBtn:disabled { opacity: 0.4; cursor: not-allowed; }
+        .sched-chip span { display: inline-block; padding: 6px 14px; border: 1px solid #C3CADA; border-radius: 0; font-size: 12px; font-weight: 600; color: #2d3748; background: #fff; cursor: pointer; user-select: none; transition: background .15s, color .15s, border-color .15s; }
+        .sched-chip span:hover { background: #f3f4f7; }
+        .sched-chip input:checked + span { background: #1B2A4A; border-color: #1B2A4A; color: #fff; }
+        .sched-chip input:focus-visible + span { outline: 2px solid #1B2A4A; outline-offset: 2px; }
+        #schedReason { width: 100%; height: 76px; padding: 8px 10px; border: 1px solid #C3CADA; border-radius: 0; box-sizing: border-box; resize: vertical; font-family: inherit; font-size: 13px; color: #2d3748; }
+        #schedReason:focus { outline: none; border-color: #1B2A4A; box-shadow: 0 0 0 3px rgba(27,42,74,0.08); }
+        #schedMsg { min-height: 16px; font-size: 11.5px; color: #A02A2A; margin: 4px 0 6px; }
+        #schedModal .sm-actions { display: flex; gap: 12px; justify-content: flex-end; flex-shrink: 0; background: #fff; margin-top: 4px; padding: 10px 0 12px 0; border-top: 1px solid #C3CADA; }
+        #schedModal .sm-actions button { padding: 10px 24px; border-radius: 0; font-weight: 600; cursor: pointer; font-size: 12px; text-transform: uppercase; letter-spacing: 0.3px; font-family: inherit; transition: opacity 0.2s; display: inline-flex; align-items: center; gap: 6px; }
+        #schedModal .sm-btn-no { background: #fff; color: #1B2A4A; border: 1px solid #C3CADA; }
+        #schedModal .sm-btn-no:hover { background: #f3f4f7; }
+        #schedModal .sm-btn-yes { background: #1B2A4A; color: #fff; border: 1px solid #1B2A4A; }
+        #schedModal .sm-btn-yes:hover { opacity: 0.88; }
+        #schedModal .sm-btn-yes:disabled { opacity: 0.4; cursor: not-allowed; }
+        @media (max-width: 600px) {
+            #schedModal .sm-box { padding: 14px 14px 0 14px; }
+            #schedModal .sm-actions { flex-direction: column-reverse; }
+            #schedModal .sm-actions button { width: 100%; justify-content: center; }
+        }
+        #schedConfirmModal .sc-box { background: #fff; border: 1px solid #C3CADA; border-radius: 0; padding: 32px 28px; text-align: center; width: 440px; max-width: 92%; box-shadow: none; animation: popIn 0.3s cubic-bezier(0.34,1.56,0.64,1); }
+        #schedConfirmModal .sc-icon { font-size: 42px; margin-bottom: 12px; display: block; }
+        #schedConfirmModal h3 { margin: 0 0 10px; color: #A02A2A; font-size: 18px; font-family: inherit; }
+        #schedConfirmModal p { font-size: 14px; color: #5A6272; margin: 0 0 14px; line-height: 1.5; }
+        #schedConfirmModal p strong { color: #1e293b; }
+        #schedConfirmModal .sc-actions { display: flex; gap: 10px; justify-content: center; margin-top: 6px; }
+        #schedConfirmModal .sc-actions button { flex: 1; padding: 11px 24px; border: none; border-radius: 0; cursor: pointer; font-size: 14px; font-weight: 600; font-family: inherit; color: #fff; transition: opacity 0.2s; }
+        #schedConfirmModal .sc-actions button:hover { opacity: 0.88; }
+        #schedConfirmModal .sc-btn-keep { background: #DCE1EC !important; color: #2d3748 !important; }
+        #schedConfirmModal .sc-btn-confirm { background: #A02A2A; }
+        .cv-top-toast.is-error i { color: #f87171; } /* an error notice: same popup, red icon (as company_list.php) */
 
         /* ══ ADJUSTMENT: icon buttons + tooltips (Application column) ══ */
         /* ══ ADJUSTMENT: batches — inbox batch card, batch tag, shared cells ══ */
@@ -2528,26 +2584,45 @@ $result = $stmt->get_result();
     </div>
 </div>
 
-<!-- ── NEW (schedule change): SET UP A NEW SCHEDULE FOR THE STUDENT ── -->
-<div id="schedModal">
-    <div id="schedModalBox" role="dialog" aria-modal="true" aria-labelledby="schedModalTitle">
-        <h3 id="schedModalTitle"><i class="fas fa-calendar-days"></i> Set Up New Schedule</h3>
-        <p>Choose the new Day and Evening Schedule (Monday to Friday) for this student and tell them why it is changing. The reason is sent to the student and the administrator by email.</p>
-        <div class="sched-student" id="schedStudentName">—</div>
-        <div class="sched-group">
-            <div class="sched-label">Day Schedule <span class="sched-current" id="schedCurDay"></span></div>
-            <div class="sched-chips" id="schedDayChips"></div>
+<!-- ── NEW (schedule change): SET UP A NEW SCHEDULE FOR THE STUDENT (company_list.php popup design) ── -->
+<div id="schedModal" role="dialog" aria-modal="true" aria-labelledby="schedModalTitle">
+    <div class="sm-box">
+        <div class="sm-header">
+            <h3 id="schedModalTitle"><i class="fas fa-calendar-days"></i> Set Up New Schedule</h3>
+            <button type="button" class="sm-close" aria-label="Close" onclick="closeSchedModal()">&times;</button>
         </div>
-        <div class="sched-group">
-            <div class="sched-label">Evening Schedule <span class="sched-current" id="schedCurEve"></span></div>
-            <div class="sched-chips" id="schedEveChips"></div>
+        <div class="sm-body">
+            <p>Choose the new Day and Evening Schedule (Monday to Friday) for this student and tell them why it is changing. The reason is sent to the student and the administrator by email.</p>
+            <div class="sched-student" id="schedStudentName">—</div>
+            <div class="sched-group">
+                <div class="sched-label">Day Schedule <span class="sched-current" id="schedCurDay"></span></div>
+                <div class="sched-chips" id="schedDayChips"></div>
+            </div>
+            <div class="sched-group">
+                <div class="sched-label">Evening Schedule <span class="sched-current" id="schedCurEve"></span></div>
+                <div class="sched-chips" id="schedEveChips"></div>
+            </div>
+            <div class="sched-label">Reason for the change <span style="color:#A02A2A">*</span></div>
+            <textarea id="schedReason" maxlength="500" placeholder="e.g. Our department needs interns on different days starting next week..." oninput="schedValidate()"></textarea>
+            <div id="schedMsg" role="status"></div>
+            <p class="sm-note">Saving also removes the student's current <strong>Student/University Contract</strong> &mdash; the student will need to upload a new one that reflects the new schedule.</p>
         </div>
-        <div class="sched-label">Reason for the change <span style="color:#dc2626">*</span></div>
-        <textarea id="schedReason" maxlength="500" placeholder="e.g. Our department needs interns on different days starting next week..." oninput="schedValidate()"></textarea>
-        <div id="schedMsg" role="status"></div>
-        <div class="reject-actions">
-            <button type="button" class="reject-cancel" onclick="closeSchedModal()">Cancel</button>
-            <button type="button" id="schedContinueBtn" onclick="schedContinue()" disabled><i class="fas fa-arrow-right"></i> Continue</button>
+        <div class="sm-actions">
+            <button type="button" class="sm-btn-no" onclick="closeSchedModal()">Cancel</button>
+            <button type="button" class="sm-btn-yes" id="schedContinueBtn" onclick="schedContinue()" disabled>Continue</button>
+        </div>
+    </div>
+</div>
+
+<div id="schedConfirmModal" role="alertdialog" aria-modal="true" aria-labelledby="schedConfirmTitle">
+    <div class="sc-box">
+        <span class="sc-icon"><i class="fas fa-triangle-exclamation" style="color:#A0850A;"></i></span>
+        <h3 id="schedConfirmTitle">Set New Schedule?</h3>
+        <p id="schedConfirmMsg"></p>
+        <p>This removes the student's <strong>Student/University Contract</strong> if one is on file (the database record and the uploaded file), so a new one has to be submitted and validated again. The student and the administrator will be notified by email with your reason.</p>
+        <div class="sc-actions">
+            <button type="button" class="sc-btn-keep" onclick="closeSchedConfirm()">No, Go Back</button>
+            <button type="button" class="sc-btn-confirm" id="schedConfirmYes" onclick="schedConfirmYes()">Yes, Set Schedule</button>
         </div>
     </div>
 </div>
@@ -4448,6 +4523,7 @@ function openSchedModal(appId) {
     document.getElementById('schedReason').value = '';
     document.getElementById('schedMsg').textContent = '';
     document.getElementById('schedContinueBtn').disabled = true;
+    document.getElementById('schedContinueBtn').innerHTML = 'Continue';
     document.getElementById('schedModal').style.display = 'flex';
     setTimeout(function () { document.getElementById('schedReason').focus(); }, 60);
 }
@@ -4470,17 +4546,25 @@ function schedValidate() { // returns true when the form can be continued
     document.getElementById('schedContinueBtn').disabled = !ok || _schedBusy;
     return ok;
 }
+var _schedPending = null; // {day, eve} waiting for the confirmation popup
 function schedContinue() {
     if (!_schedApp || !schedValidate()) return;
     var day = schedCollect('schedDayChips'), eve = schedCollect('schedEveChips');
-    showConfirmPopup(
-        'Confirm New Schedule',
-        'Set ' + _schedApp.name + "'s schedule to Day: " + schedLabel(day) + ' / Evening: ' + schedLabel(eve) + '? ' +
-        "This removes the student's Student/University Contract if one is on file (the database record and the uploaded file), so a new one has to be submitted and validated again. " +
-        'The student and the administrator will be notified by email with your reason.',
-        'proceed',
-        function () { schedSubmit(day, eve); }
-    );
+    _schedPending = { day: day, eve: eve };
+    document.getElementById('schedConfirmMsg').innerHTML =
+        'Set <strong>' + escHtml(_schedApp.name) + "</strong>'s schedule to Day: <strong>" + escHtml(schedLabel(day)) + '</strong> / Evening: <strong>' + escHtml(schedLabel(eve)) + '</strong>?';
+    document.getElementById('schedConfirmModal').style.display = 'flex';
+    setTimeout(function () { var y = document.getElementById('schedConfirmYes'); if (y) y.focus(); }, 60);
+}
+function closeSchedConfirm() {
+    document.getElementById('schedConfirmModal').style.display = 'none';
+    _schedPending = null;
+}
+function schedConfirmYes() {
+    var p = _schedPending;
+    document.getElementById('schedConfirmModal').style.display = 'none';
+    _schedPending = null;
+    if (p) schedSubmit(p.day, p.eve);
 }
 function schedSubmit(day, eve) {
     if (!_schedApp || _schedBusy) return;
@@ -4498,25 +4582,31 @@ function schedSubmit(day, eve) {
         .then(function (r) { return r.json(); })
         .then(function (res) {
             _schedBusy = false;
-            btn.innerHTML = '<i class="fas fa-arrow-right"></i> Continue';
+            btn.innerHTML = 'Continue';
             if (res && res.success) {
                 document.getElementById('schedModal').style.display = 'none';
                 _schedApp = null;
-                showToast(res.message || 'Schedule updated.', 'success');
+                aplShowTopToast('', res.message || 'Schedule updated.', 'fa-calendar-check');
                 refreshApplicantTable();
             } else {
                 schedValidate();
-                showToast((res && res.message) || 'The schedule could not be updated.', 'error');
+                aplShowTopToast('', (res && res.message) || 'The schedule could not be updated.', 'fa-circle-exclamation', true);
             }
         })
         .catch(function () {
             _schedBusy = false;
-            btn.innerHTML = '<i class="fas fa-arrow-right"></i> Continue';
+            btn.innerHTML = 'Continue';
             schedValidate();
-            showToast('Network error. Please try again.', 'error');
+            aplShowTopToast('', 'Network error. Please try again.', 'fa-circle-exclamation', true);
         });
 }
 document.getElementById('schedModal').addEventListener('click', function (e) { if (e.target === this) closeSchedModal(); });
+document.getElementById('schedConfirmModal').addEventListener('click', function (e) { if (e.target === this) closeSchedConfirm(); });
+document.addEventListener('keydown', function (e) {
+    if (e.key !== 'Escape') return;
+    if (document.getElementById('schedConfirmModal').style.display === 'flex') closeSchedConfirm();
+    else if (document.getElementById('schedModal').style.display === 'flex') closeSchedModal();
+});
 
 // ══════════════════════════════════════════════════════════════════════
 // ADJUSTMENT: ADMIN BATCHES
@@ -4677,10 +4767,10 @@ function moveBatchToTable(bid, btn) {
 }
 
 // ADJUSTMENT: the application-request popup (same as administrator.php's cvShowTopToast).
-function aplShowTopToast(name, messageText, iconClass) {
+function aplShowTopToast(name, messageText, iconClass, isError) {
     var esc = function (s) { var d = document.createElement('div'); d.textContent = s == null ? '' : String(s); return d.innerHTML; };
     var div = document.createElement('div');
-    div.className = 'cv-top-toast';
+    div.className = 'cv-top-toast' + (isError ? ' is-error' : '');
     div.setAttribute('role', 'status');
     div.innerHTML = '<i class="fas ' + esc(iconClass || 'fa-circle-info') + '"></i><span>' + (name ? '<strong>' + esc(name) + '</strong> ' : '') + esc(messageText) + '</span>';
     document.body.appendChild(div);
