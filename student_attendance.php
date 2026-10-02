@@ -1068,9 +1068,9 @@ function missedNoticeHtml($type, $pending_requests, $lrWindowStatuses) {
     $winStatus = $lrWindowStatuses[$type] ?? 'permanently_missed';
 
     if ($status === 'pending') {
-        $actionHtml = '<div class="late-req-pending">⏳ Request pending — waiting for company approval</div>';
+        $actionHtml = '<div class="late-req-pending"><i class="fas fa-hourglass-half"></i> Request pending — waiting for company approval</div>';
     } elseif ($status === 'approved') {
-        $actionHtml = '<div class="late-req-pending" style="background:#f0fff4;border-color:#9ae6b4;color:#276749;"> Request approved</div>';
+        $actionHtml = '<div class="late-req-pending" style="background:#f0fff4;border-color:#EAF3EA;color:#2C5A2C;"> Request approved</div>';
     } elseif ($winStatus === 'open') {
         $actionHtml = '<button class="late-req-btn" onclick="openLateReqModal(\'' . $type . '\')"> Submit Late Request</button>';
     } else {
@@ -1105,9 +1105,22 @@ function missedNoticeHtml($type, $pending_requests, $lrWindowStatuses) {
 <style>
 /* ── Design tokens (shared with student_profile.php) ── */
 :root {
+            /* Field Ops Grid palette (same values as AccomForm.php) */
+            --grid-bg: #EEF1F6;
+            --grid-navy: #1B2A4A;
+            --grid-border: #C3CADA;
+            --grid-border-soft: #DCE1EC;
+            --grid-green: #2C5A2C;
+            --grid-green-bg: #EAF3EA;
+            --grid-red: #A02A2A;
+            --grid-red-bg: #F7E9E9;
+            --grid-amber: #A0850A;
+            --grid-amber-bg: #FAF3DC;
+            --grid-muted: #5A6272;
+
     --neust-maroon: #07145fe5;
     --neust-gold:   #FFD700;
-    --neust-active: #1a237e;
+    --neust-active: #1B2A4A;
 }
 
 *, *::before, *::after {
@@ -1115,10 +1128,10 @@ function missedNoticeHtml($type, $pending_requests, $lrWindowStatuses) {
 }
 
 body {
-    font-family: 'DM Sans', sans-serif;
-    background: #f0f4f8;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    background: #EEF1F6;
     min-height: 100vh;
-    color: #1a202c;
+    color: #1B2A4A;
     margin: 0;
 }
 
@@ -1126,103 +1139,94 @@ body {
    SIDEBAR — canonical shared definition
 ══════════════════════════════════════════ */
 .sidebar {
-    width: 260px;
-    background: var(--neust-maroon);
-    height: 100vh;
-    position: fixed;
-    top: 0;
-    left: 0;
-    display: flex;
-    flex-direction: column;
-    transition: width 0.3s ease;
-    z-index: 1000;
-    box-shadow: 4px 0 10px rgba(0,0,0,0.1);
-}
+            width: 260px;
+            background: var(--neust-maroon);
+            height: 100vh;
+            position: fixed;
+            display: flex;
+            flex-direction: column;
+            transition: width 0.3s ease;
+            z-index: 1000;
+            box-shadow: 4px 0 10px rgba(0,0,0,0.1);
+            top: 0; left: 0;
+        }
 
-.sidebar.collapsed {
-    width: 80px;
-}
+.sidebar.collapsed { width: 80px; }
 
 .sidebar-header {
-    padding: 16px 20px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    border-bottom: 1px solid rgba(255,255,255,0.1);
-    flex-shrink: 0;
-    min-height: 72px;
-}
+            padding: 20px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+            flex-shrink: 0;
+            min-height: 72px;
+        }
 
 .sidebar-user-info {
-    display: flex;
-    flex-direction: column;
-    gap: 1px;
-    overflow: hidden;
-    transition: opacity 0.2s, width 0.3s;
-    max-width: 180px;
-}
+            display: flex;
+            flex-direction: column;
+            gap: 1px;
+            overflow: hidden;
+            transition: opacity 0.2s, width 0.3s;
+            max-width: 180px;
+            min-width: 0;
+        }
 
 .sidebar-user-name {
-    color: var(--neust-gold);
-    font-size: 14px;
-    font-weight: 700;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    line-height: 1.3;
-    font-family: 'DM Sans', sans-serif;
-}
+            color: var(--neust-gold);
+            font-size: 18px;
+            font-weight: bold;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            line-height: 1.3;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
 
 .sidebar-user-role {
-    color: rgba(255,255,255,0.55);
-    font-size: 10px;
-    font-weight: 500;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    white-space: nowrap;
-}
+            color: rgba(255,255,255,0.55);
+            font-size: 11px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.8px;
+            margin-top: 3px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
 
 .sidebar.collapsed .sidebar-user-info {
-    opacity: 0;
-    width: 0;
-    overflow: hidden;
-}
+            opacity: 0;
+            width: 0;
+            overflow: hidden;
+        }
 
-.sidebar-links {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    padding: 10px 0;
-    overflow: hidden;
-}
+.sidebar-links { flex: 1; display: flex; flex-direction: column; padding: 10px 0; overflow: hidden; }
 
 .sidebar a {
-    padding: 15px 25px;
-    color: #cbd5e0;
-    text-decoration: none;
-    font-size: 14px;
-    display: flex;
-    align-items: center;
-    transition: background 0.2s, color 0.2s;
-    white-space: nowrap;
-    position: relative;
-}
+            padding: 15px 25px;
+            color: #cbd5e0;
+            text-decoration: none;
+            font-size: 14px;
+            display: flex;
+            align-items: center;
+            transition: background 0.2s, color 0.2s;
+            white-space: nowrap;
+            position: relative;
+        }
 
 .sidebar a i {
-    width: 30px;
-    font-size: 18px;
-    margin-right: 15px;
-    text-align: center;
-    flex-shrink: 0;
-}
+            width: 30px;
+            font-size: 18px;
+            margin-right: 15px;
+            text-align: center;
+            flex-shrink: 0;
+        }
 
-.sidebar.collapsed .link-text {
-    display: none;
-}
+.sidebar.collapsed .link-text { display: none; }
 
-.sidebar.collapsed a i {
-    margin-right: 0;
-}
+.sidebar.collapsed a i { margin-right: 0; }
 
 .sidebar a:hover:not(.active) {
     background: rgba(255,255,255,0.07);
@@ -1230,13 +1234,13 @@ body {
 }
 
 .sidebar a.active {
-    background: var(--neust-active);
-    color: white;
-    border-left: 4px solid var(--neust-gold);
-}
+            background: var(--neust-active);
+            color: white;
+            border-left: 4px solid var(--neust-gold);
+        }
 
 .sidebar-badge {
-    background: #dc2626;
+    background: #A02A2A;
     color: white;
     border-radius: 50%;
     width: 18px;
@@ -1253,22 +1257,12 @@ body {
 }
 
 .sidebar-badge-att {
-    background: #d97706;
-    color: white;
-    border-radius: 50%;
-    width: 18px;
-    height: 18px;
-    font-size: 10px;
-    font-weight: 700;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    position: absolute;
-    right: 18px;
-    top: 50%;
-    transform: translateY(-50%);
-    animation: badge-pulse-att 2s ease-in-out infinite;
-}
+            background: #d97706; color: white; border-radius: 50%;
+            width: 18px; height: 18px; font-size: 10px; font-weight: 700;
+            display: inline-flex; align-items: center; justify-content: center;
+            position: absolute; right: 18px; top: 50%; transform: translateY(-50%);
+            animation: badge-pulse-att 2s ease-in-out infinite;
+        }
 
 @keyframes badge-pulse-att {
     0%, 100% { box-shadow: 0 0 0 0 rgba(217,119,6,0.55); }
@@ -1276,61 +1270,33 @@ body {
 }
 
 .sidebar-badge-journal {
-    background: #f59e0b;
-    color: #1c1917;
-    border-radius: 50%;
-    min-width: 18px;
-    height: 18px;
-    font-size: 10px;
-    font-weight: 800;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    position: absolute;
-    right: 18px;
-    top: 50%;
-    transform: translateY(-50%);
-    padding: 0 3px;
-    animation: badge-pulse-journal 2.4s ease-in-out infinite;
-}
+            background: #f59e0b; color: #1c1917; border-radius: 50%;
+            min-width: 18px; height: 18px; font-size: 10px; font-weight: 800;
+            display: inline-flex; align-items: center; justify-content: center;
+            position: absolute; right: 18px; top: 50%; transform: translateY(-50%);
+            padding: 0 3px; animation: badge-pulse-journal 2.4s ease-in-out infinite;
+        }
 
 @keyframes badge-pulse-journal {
     0%, 100% { box-shadow: 0 0 0 0 rgba(245,158,11,0.5); }
     50%       { box-shadow: 0 0 0 5px rgba(245,158,11,0); }
 }
 
-.logout-link {
-    margin-top: auto;
-    padding: 20px;
-    border-top: 1px solid rgba(255,255,255,0.1);
-}
+.logout-link { margin-top: auto; padding: 20px; border-top: 1px solid rgba(255,255,255,0.1); }
 
 .logout-link a {
-    border: 1px solid var(--neust-gold);
-    color: var(--neust-gold);
-    border-radius: 6px;
-    justify-content: center;
-    padding: 10px;
-    display: flex;
-    align-items: center;
-    text-decoration: none;
-    font-size: 14px;
-    transition: background 0.2s;
-}
+            border: 1px solid var(--neust-gold); color: var(--neust-gold);
+            border-radius: 6px; justify-content: center; padding: 10px;
+            display: flex; align-items: center; text-decoration: none;
+            font-size: 14px; transition: background 0.2s;
+        }
 
-.logout-link a:hover {
-    background: rgba(255,215,0,0.08);
-}
+.logout-link a:hover { background: rgba(255,215,0,0.08); }
 
 .toggle-btn {
-    background: transparent;
-    border: none;
-    color: white;
-    cursor: pointer;
-    font-size: 20px;
-    outline: none;
-    flex-shrink: 0;
-}
+            background: transparent; border: none; color: white;
+            cursor: pointer; font-size: 20px; outline: none; flex-shrink: 0;
+        }
 
 /* ══════════════════════════════════════════
    NAVBAR
@@ -1343,7 +1309,7 @@ body {
     color: white;
     height: 60px;
     flex-shrink: 0;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+    box-shadow: none;
     position: relative;
     z-index: 99;
 }
@@ -1365,82 +1331,71 @@ body {
     font-size: 16px;
     line-height: 1.3;
     color: #ffffff;
-    font-family: 'DM Sans', sans-serif;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
 }
 
 .navbar-brand .navbar-subtitle {
     font-size: 11px;
     color: var(--neust-gold);
     line-height: 1.3;
-    font-family: 'DM Sans', sans-serif;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
 }
 
 /* ══════════════════════════════════════════
    ATTENDANCE NOTIFICATION BAR
 ══════════════════════════════════════════ */
 #att-notif-bar {
-    position: fixed;
-    top: 60px;
-    left: 50%;
-    transform: translateX(-50%) translateY(-120%);
-    visibility: hidden;
-    opacity: 0;
-    width: calc(100% - 300px);
-    max-width: 820px;
-    background: #07145f;
-    border-radius: 0 0 12px 12px;
-    border: 1px solid rgba(255,255,255,.12);
-    border-top: none;
-    padding: 10px 16px;
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    transition: transform .4s cubic-bezier(.34,1.2,.64,1),
-                opacity .3s ease,
-                visibility 0s linear .4s;
-    z-index: 2000;
-    pointer-events: none;
-    overflow: hidden;
-}
+            position: fixed;
+            top: 60px;
+            left: 50%;
+            transform: translateX(-50%) translateY(-120%);
+            visibility: hidden;
+            opacity: 0;
+            width: calc(100% - 300px);
+            max-width: 820px;
+            background: var(--grid-navy);
+            border-radius: 0;
+            border: 1px solid #55668C;
+            border-top: none;
+            box-shadow: 0 8px 24px rgba(27,42,74,0.30);
+            padding: 10px 16px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            transition: transform .4s cubic-bezier(.34,1.2,.64,1),
+                        opacity .3s ease,
+                        visibility 0s linear .4s;
+            z-index: 2000;
+            pointer-events: none;
+            overflow: hidden;
+        }
 
 #att-notif-bar.anb-visible {
-    transform: translateX(-50%) translateY(0);
-    visibility: visible;
-    opacity: 1;
-    transition: transform .4s cubic-bezier(.34,1.2,.64,1),
-                opacity .3s ease,
-                visibility 0s linear 0s;
-    pointer-events: auto;
-}
+            transform: translateX(-50%) translateY(0);
+            visibility: visible;
+            opacity: 1;
+            transition: transform .4s cubic-bezier(.34,1.2,.64,1),
+                        opacity .3s ease,
+                        visibility 0s linear 0s;
+            pointer-events: auto;
+        }
 
-#att-notif-bar.sidebar-collapsed {
-    width: calc(100% - 120px);
-}
+#att-notif-bar.sidebar-collapsed { width: calc(100% - 120px); }
 
 .anb-icon {
-    width: 34px;
-    height: 34px;
-    border-radius: 8px;
-    background: #FAEEDA;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex-shrink: 0;
-}
+            width: 34px; height: 34px; border-radius: 0;
+            background: var(--grid-amber-bg);
+            display: flex; align-items: center; justify-content: center;
+            flex-shrink: 0;
+        }
 
-.anb-icon i {
-    font-size: 16px;
-    color: #854F0B;
-}
+.anb-icon i { font-size: 16px; color: var(--grid-amber); }
 
 .anb-pulse {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background: #EF9F27;
-    flex-shrink: 0;
-    animation: anb-blink 1.4s ease-in-out infinite;
-}
+            width: 8px; height: 8px; border-radius: 50%;
+            background: #F7C600; flex-shrink: 0;
+            animation: anb-blink 1.4s ease-in-out infinite;
+        }
 
 @keyframes anb-blink {
     0%, 100% { opacity: 1; }
@@ -1448,110 +1403,85 @@ body {
 }
 
 .anb-content {
-    flex: 1;
-    min-width: 0;
-    display: flex;
-    align-items: center;
-    gap: 14px;
-    flex-wrap: nowrap;
-    overflow: hidden;
-}
+            flex: 1;
+            min-width: 0;
+            display: flex;
+            align-items: center;
+            gap: 14px;
+            flex-wrap: nowrap;
+            overflow: hidden;
+        }
 
 .anb-text-group {
-    display: flex;
-    flex-direction: column;
-    min-width: 0;
-}
+            display: flex;
+            flex-direction: column;
+            min-width: 0;
+        }
 
 .anb-label {
-    font-size: 12px;
-    font-weight: 700;
-    color: #FAEEDA;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
+            font-size: 12px;
+            font-weight: 700;
+            color: #ffffff;
+            text-transform: uppercase;
+            letter-spacing: 0.4px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
 
 .anb-window {
-    font-size: 11px;
-    color: rgba(250,238,218,.65);
-    margin-top: 1px;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
+            font-size: 11px;
+            color: #E3E8F1;
+            opacity: .75;
+            margin-top: 1px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
 
-.anb-divider {
-    width: 1px;
-    height: 26px;
-    background: rgba(255,255,255,.18);
-    flex-shrink: 0;
-}
+.anb-divider { width: 1px; height: 26px; background: rgba(255,255,255,.18); flex-shrink: 0; }
 
 .anb-countdown {
-    font-size: 11px;
-    color: #FAC775;
-    white-space: nowrap;
-    background: rgba(250,199,117,.14);
-    border-radius: 99px;
-    padding: 3px 11px;
-    border: 1px solid rgba(250,199,117,.28);
-    font-family: 'DM Mono', monospace;
-    font-variant-numeric: tabular-nums;
-    flex-shrink: 0;
-    min-width: 100px;
-    text-align: center;
-}
+            font-size: 11px;
+            font-weight: 700;
+            color: #F7C600;
+            white-space: nowrap;
+            background: rgba(247,198,0,.10);
+            border-radius: 0;
+            padding: 3px 11px;
+            border: 1px solid rgba(247,198,0,.35);
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            font-variant-numeric: tabular-nums;
+            flex-shrink: 0;
+            min-width: 100px;
+            text-align: center;
+        }
 
 .anb-btn {
-    background: #EF9F27;
-    color: #412402;
-    border: none;
-    border-radius: 7px;
-    padding: 7px 15px;
-    font-size: 11px;
-    font-weight: 700;
-    font-family: inherit;
-    white-space: nowrap;
-    flex-shrink: 0;
-    transition: background .15s;
-    cursor: pointer;
-}
+            background: #F7C600; color: var(--grid-navy); border: 1px solid #F7C600;
+            border-radius: 0; padding: 7px 15px; font-size: 11px; font-weight: 700;
+            text-transform: uppercase; letter-spacing: 0.4px;
+            font-family: inherit; white-space: nowrap; flex-shrink: 0;
+            transition: opacity .15s; cursor: pointer;
+        }
 
-.anb-btn:hover {
-    background: #FAC775;
-}
+.anb-btn:hover { opacity: .88; }
 
 .anb-close {
-    background: rgba(255,255,255,.12);
-    border: none;
-    color: rgba(250,238,218,.75);
-    width: 26px;
-    height: 26px;
-    border-radius: 50%;
-    font-size: 13px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex-shrink: 0;
-    transition: background .15s;
-    cursor: pointer;
-}
+            background: rgba(255,255,255,.10); border: 1px solid rgba(255,255,255,.18);
+            color: #E3E8F1; width: 26px; height: 26px;
+            border-radius: 0; font-size: 13px;
+            display: flex; align-items: center; justify-content: center;
+            flex-shrink: 0; transition: background .15s; cursor: pointer;
+        }
 
-.anb-close:hover {
-    background: rgba(255,255,255,.24);
-    color: #FAEEDA;
-}
+.anb-close:hover { background: rgba(255,255,255,.22); color: #ffffff; }
 
 .anb-progress {
-    position: absolute;
-    bottom: 0;
-    left: 0;
-    height: 2px;
-    background: #EF9F27;
-    border-radius: 0 0 0 12px;
-    pointer-events: none;
-}
+            position: absolute; bottom: 0; left: 0;
+            height: 2px; background: #F7C600; border-radius: 0;
+            pointer-events: none;
+        }
 
 /* ══════════════════════════════════════════
    MAIN LAYOUT
@@ -1589,15 +1519,15 @@ body {
 .att-header-left h1 {
     font-size: 20px;
     font-weight: 700;
-    color: #1a202c;
+    color: #1B2A4A;
     line-height: 1.2;
 }
 
 .att-header-left p {
     font-size: 12px;
-    color: #718096;
+    color: #5A6272;
     margin-top: 2px;
-    font-family: 'DM Mono', monospace;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
 }
 
 .att-header-right {
@@ -1607,10 +1537,10 @@ body {
 }
 
 .dashboard-link {
-    background: #1a202c;
+    background: #1B2A4A;
     color: #fff;
     text-decoration: none;
-    border-radius: 10px;
+    border-radius: 0;
     padding: 8px 14px;
     font-size: 12px;
     font-weight: 600;
@@ -1628,11 +1558,11 @@ body {
     background: #2d3748;
     color: #fff;
     border: none;
-    border-radius: 10px;
+    border-radius: 0;
     padding: 8px 14px;
     font-size: 12px;
     font-weight: 600;
-    font-family: 'DM Sans', sans-serif;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
     display: flex;
     align-items: center;
     gap: 5px;
@@ -1643,20 +1573,20 @@ body {
 }
 
 .history-btn:hover {
-    background: #4a5568;
+    background: #5A6272;
 }
 
 /* ══════════════════════════════════════════
    CAMERA & ATTENDANCE UI
 ══════════════════════════════════════════ */
 .camera-card {
-    background: #1a202c;
-    border-radius: 20px;
+    background: #1B2A4A;
+    border-radius: 0;
     overflow: hidden;
     margin-bottom: 18px;
     position: relative;
     aspect-ratio: 4/3;
-    box-shadow: 0 8px 32px rgba(0,0,0,.18);
+    box-shadow: none;
 }
 
 .camera-card video {
@@ -1686,14 +1616,14 @@ body {
     top: 16px;
     left: 16px;
     border-width: 2px 0 0 2px;
-    border-radius: 4px 0 0 0;
+    border-radius: 0;
 }
 
 .camera-overlay::after {
     bottom: 16px;
     right: 16px;
     border-width: 0 2px 2px 0;
-    border-radius: 0 0 4px 0;
+    border-radius: 0;
 }
 
 .camera-date-badge {
@@ -1702,17 +1632,17 @@ body {
     left: 16px;
     background: rgba(0,0,0,.5);
     color: #fff;
-    font-family: 'DM Mono', monospace;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
     font-size: 11px;
     padding: 4px 10px;
-    border-radius: 20px;
+    border-radius: 0;
     backdrop-filter: blur(8px);
 }
 
 .weekend-banner {
-    background: linear-gradient(135deg,#553c9a,#6b46c1);
+    background: var(--grid-navy);
     color: #fff;
-    border-radius: 16px;
+    border-radius: 0;
     padding: 24px 20px;
     text-align: center;
     margin-bottom: 18px;
@@ -1737,9 +1667,9 @@ body {
 
 /* ── Skipped duty notice banner ── */
 .skipped-duty-notice {
-    background: linear-gradient(135deg, #e0f2fe, #bae6fd);
-    border: 1.5px solid #7dd3fc;
-    border-radius: 14px;
+    background: #E7ECF7;
+    border: 1px solid var(--grid-border);
+    border-radius: 0;
     padding: 16px 18px;
     margin-bottom: 14px;
     display: flex;
@@ -1757,23 +1687,23 @@ body {
 .skipped-duty-notice .sdn-text h4 {
     font-size: 13px;
     font-weight: 700;
-    color: #0c4a6e;
+    color: #1B2A4A;
     margin: 0 0 3px;
 }
 
 .skipped-duty-notice .sdn-text p {
     font-size: 12px;
-    color: #075985;
+    color: #1B2A4A;
     margin: 0;
     line-height: 1.5;
 }
 
 .step-card {
     background: #fff;
-    border-radius: 20px;
+    border-radius: 0;
     padding: 20px;
     margin-bottom: 18px;
-    box-shadow: 0 2px 12px rgba(0,0,0,.07);
+    box-shadow: none;
 }
 
 .step-label {
@@ -1781,7 +1711,7 @@ body {
     font-weight: 700;
     letter-spacing: .08em;
     text-transform: uppercase;
-    color: #a0aec0;
+    color: #8A93A6;
     margin-bottom: 14px;
     display: flex;
     align-items: center;
@@ -1793,7 +1723,7 @@ body {
     width: 6px;
     height: 6px;
     border-radius: 50%;
-    background: #48bb78;
+    background: #2C5A2C;
     flex-shrink: 0;
     animation: pulse-dot 1.6s ease-in-out infinite;
 }
@@ -1807,8 +1737,8 @@ body {
     width: 100%;
     padding: 16px;
     border: none;
-    border-radius: 14px;
-    font-family: 'DM Sans', sans-serif;
+    border-radius: 0;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
     font-size: 16px;
     font-weight: 700;
     cursor: pointer;
@@ -1826,27 +1756,27 @@ body {
 }
 
 .action-btn.am-in {
-    background: linear-gradient(135deg,#f6ad55,#ed8936);
+    background: var(--grid-amber);
     color: #fff;
-    box-shadow: 0 4px 20px rgba(237,137,54,.35);
+    box-shadow: none;
 }
 
 .action-btn.am-out {
-    background: linear-gradient(135deg,#fc8181,#f56565);
+    background: #A02A2A;
     color: #fff;
-    box-shadow: 0 4px 20px rgba(245,101,101,.35);
+    box-shadow: none;
 }
 
 .action-btn.pm-in {
-    background: linear-gradient(135deg,#63b3ed,#4299e1);
+    background: var(--grid-navy);
     color: #fff;
-    box-shadow: 0 4px 20px rgba(66,153,225,.35);
+    box-shadow: none;
 }
 
 .action-btn.pm-out {
-    background: linear-gradient(135deg,#68d391,#48bb78);
+    background: var(--grid-green);
     color: #fff;
-    box-shadow: 0 4px 20px rgba(72,187,120,.35);
+    box-shadow: none;
 }
 
 .action-btn.loading {
@@ -1877,9 +1807,9 @@ body {
 }
 
 .missed-notice {
-    background: #fff5f5;
-    border: 1.5px solid #feb2b2;
-    border-radius: 12px;
+    background: #F7E9E9;
+    border: 1.5px solid #E3BCBC;
+    border-radius: 0;
     padding: 14px 16px;
     margin-bottom: 12px;
 }
@@ -1887,7 +1817,7 @@ body {
 .missed-notice .mn-header {
     font-size: 13px;
     font-weight: 700;
-    color: #c53030;
+    color: #A02A2A;
     margin-bottom: 6px;
     display: flex;
     align-items: center;
@@ -1896,7 +1826,7 @@ body {
 
 .missed-notice .mn-body {
     font-size: 12px;
-    color: #744210;
+    color: #A0850A;
     line-height: 1.5;
     margin-bottom: 10px;
 }
@@ -1905,10 +1835,10 @@ body {
     width: 100%;
     padding: 10px;
     border: none;
-    border-radius: 10px;
-    background: #c53030;
+    border-radius: 0;
+    background: #A02A2A;
     color: #fff;
-    font-family: 'DM Sans', sans-serif;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
     font-size: 13px;
     font-weight: 700;
     cursor: pointer;
@@ -1920,7 +1850,7 @@ body {
 }
 
 .late-req-btn:hover {
-    background: #9b2c2c;
+    background: #A02A2A;
 }
 
 .late-req-btn:disabled {
@@ -1932,12 +1862,12 @@ body {
     display: inline-flex;
     align-items: center;
     gap: 5px;
-    background: #fffbeb;
-    border: 1px solid #f6e05e;
-    border-radius: 8px;
+    background: #FAF3DC;
+    border: 1px solid #E6D9A8;
+    border-radius: 0;
     padding: 6px 12px;
     font-size: 12px;
-    color: #92400e;
+    color: #A0850A;
     font-weight: 600;
     margin-top: 4px;
 }
@@ -1946,12 +1876,12 @@ body {
     display: flex;
     align-items: center;
     gap: 6px;
-    background: #fff5f5;
-    border: 1px solid #feb2b2;
-    border-radius: 8px;
+    background: #F7E9E9;
+    border: 1px solid #E3BCBC;
+    border-radius: 0;
     padding: 8px 12px;
     font-size: 12px;
-    color: #742a2a;
+    color: #6E1C1C;
     font-weight: 600;
     margin-top: 4px;
 }
@@ -1960,25 +1890,26 @@ body {
     display: flex;
     align-items: center;
     gap: 6px;
-    background: #fffbeb;
-    border: 1px solid #f6e05e;
-    border-radius: 8px;
+    background: #FAF3DC;
+    border: 1px solid #E6D9A8;
+    border-radius: 0;
     padding: 7px 12px;
     font-size: 12px;
-    color: #744210;
+    color: #A0850A;
     font-weight: 600;
     margin-bottom: 10px;
 }
 
 .lr-countdown .lr-countdown-time {
-    font-family: 'DM Mono', monospace;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
     font-size: 13px;
-    color: #c05621;
+    color: #A0850A;
 }
 
 .done-card {
-    background: linear-gradient(135deg,#c6f6d5,#9ae6b4);
-    border-radius: 20px;
+    background: var(--grid-green-bg);
+    border: 1px solid #BFE0BF;
+    border-radius: 0;
     padding: 22px 20px;
     text-align: center;
     margin-bottom: 18px;
@@ -1993,21 +1924,21 @@ body {
 .done-card h3 {
     font-size: 16px;
     font-weight: 700;
-    color: #22543d;
+    color: #2C5A2C;
 }
 
 .done-card p {
     font-size: 13px;
-    color: #276749;
+    color: #2C5A2C;
     margin-top: 4px;
 }
 
 .progress-track {
     background: #fff;
-    border-radius: 16px;
+    border-radius: 0;
     padding: 16px 18px;
     margin-bottom: 18px;
-    box-shadow: 0 2px 12px rgba(0,0,0,.07);
+    box-shadow: none;
 }
 
 .progress-track-title {
@@ -2015,7 +1946,7 @@ body {
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: .07em;
-    color: #a0aec0;
+    color: #8A93A6;
     margin-bottom: 14px;
 }
 
@@ -2039,12 +1970,12 @@ body {
     left: calc(50% + 14px);
     right: calc(-50% + 14px);
     height: 2px;
-    background: #e2e8f0;
+    background: #DCE1EC;
     z-index: 0;
 }
 
 .track-step:not(:last-child).done-step::after {
-    background: #48bb78;
+    background: #2C5A2C;
 }
 
 .step-circle {
@@ -2061,36 +1992,36 @@ body {
     transition: all .3s;
 }
 
-.step-circle.done         { background: #48bb78; color: #fff; }
-.step-circle.active       { background: #1a202c; color: #fff; box-shadow: 0 0 0 3px rgba(26,32,44,.15); }
-.step-circle.todo         { background: #edf2f7; color: #a0aec0; }
-.step-circle.missed       { background: #fc8181; color: #fff; }
-.step-circle.perm-missed  { background: #742a2a; color: #fff; }
-.step-circle.pending-late { background: #f6ad55; color: #fff; }
-.step-circle.skipped      { background: #e2e8f0; color: #a0aec0; }
+.step-circle.done         { background: #2C5A2C; color: #fff; }
+.step-circle.active       { background: #1B2A4A; color: #fff; box-shadow: 0 0 0 3px rgba(26,32,44,.15); }
+.step-circle.todo         { background: #DCE1EC; color: #8A93A6; }
+.step-circle.missed       { background: #A02A2A; color: #fff; }
+.step-circle.perm-missed  { background: #6E1C1C; color: #fff; }
+.step-circle.pending-late { background: #A0850A; color: #fff; }
+.step-circle.skipped      { background: #DCE1EC; color: #8A93A6; }
 
 .track-step-label {
     font-size: 9.5px;
     font-weight: 600;
-    color: #a0aec0;
+    color: #8A93A6;
     margin-top: 5px;
     text-align: center;
     line-height: 1.2;
 }
 
-.track-step.done-step        .track-step-label { color: #48bb78; }
-.track-step.active-step      .track-step-label { color: #1a202c; }
-.track-step.missed-step      .track-step-label { color: #fc8181; }
-.track-step.perm-missed-step .track-step-label { color: #742a2a; }
-.track-step.pending-late-step .track-step-label { color: #d69e2e; }
+.track-step.done-step        .track-step-label { color: #2C5A2C; }
+.track-step.active-step      .track-step-label { color: #1B2A4A; }
+.track-step.missed-step      .track-step-label { color: #A02A2A; }
+.track-step.perm-missed-step .track-step-label { color: #6E1C1C; }
+.track-step.pending-late-step .track-step-label { color: #A0850A; }
 .track-step.skipped-step     .track-step-label { color: #cbd5e0; }
 
 .log-card {
     background: #fff;
-    border-radius: 16px;
+    border-radius: 0;
     padding: 16px 18px;
     margin-bottom: 18px;
-    box-shadow: 0 2px 12px rgba(0,0,0,.07);
+    box-shadow: none;
 }
 
 .log-card-title {
@@ -2098,14 +2029,14 @@ body {
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: .07em;
-    color: #a0aec0;
+    color: #8A93A6;
     margin-bottom: 12px;
 }
 
 .log-duty {
     margin-bottom: 12px;
     padding-bottom: 12px;
-    border-bottom: 1px solid #f0f0f0;
+    border-bottom: 1px solid #DCE1EC;
 }
 
 .log-duty:last-child {
@@ -2117,7 +2048,7 @@ body {
 .log-duty-label {
     font-size: 12px;
     font-weight: 700;
-    color: #4a5568;
+    color: #5A6272;
     margin-bottom: 8px;
     display: flex;
     align-items: center;
@@ -2131,8 +2062,8 @@ body {
 }
 
 .log-item {
-    background: #f7fafc;
-    border-radius: 10px;
+    background: #F3F5F9;
+    border-radius: 0;
     padding: 8px 10px;
     display: flex;
     gap: 8px;
@@ -2142,7 +2073,7 @@ body {
 .log-item img {
     width: 44px;
     height: 44px;
-    border-radius: 7px;
+    border-radius: 0;
     object-fit: cover;
     flex-shrink: 0;
 }
@@ -2156,11 +2087,11 @@ body {
     font-weight: 700;
     text-transform: uppercase;
     letter-spacing: .05em;
-    color: #a0aec0;
+    color: #8A93A6;
 }
 
 .log-item-info .li-time {
-    font-family: 'DM Mono', monospace;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
     font-size: 12px;
     font-weight: 500;
     color: #2d3748;
@@ -2168,20 +2099,20 @@ body {
 }
 
 .log-item-info .li-time.empty   { color: #cbd5e0; font-style: italic; }
-.log-item-info .li-time.missed  { color: #e53e3e; font-weight: 700; }
-.log-item-info .li-time.pending { color: #d69e2e; font-weight: 700; }
-.log-item-info .li-time.skipped { color: #a0aec0; font-style: italic; }
+.log-item-info .li-time.missed  { color: #A02A2A; font-weight: 700; }
+.log-item-info .li-time.pending { color: #A0850A; font-weight: 700; }
+.log-item-info .li-time.skipped { color: #8A93A6; font-style: italic; }
 
 /* Skipped duty log block */
 .log-duty-skipped {
-    background: #f8fafc;
+    background: #F3F5F9;
     border: 1.5px dashed #cbd5e0;
-    border-radius: 10px;
+    border-radius: 0;
     padding: 12px 14px;
     display: flex;
     align-items: center;
     gap: 10px;
-    color: #a0aec0;
+    color: #8A93A6;
     font-size: 12px;
     font-weight: 600;
 }
@@ -2196,10 +2127,10 @@ body {
     bottom: 24px;
     left: 50%;
     transform: translateX(-50%) translateY(80px);
-    background: #1a202c;
+    background: #1B2A4A;
     color: #fff;
     padding: 12px 22px;
-    border-radius: 12px;
+    border-radius: 0;
     font-size: 14px;
     font-weight: 500;
     box-shadow: 0 6px 24px rgba(0,0,0,.2);
@@ -2212,9 +2143,9 @@ body {
 }
 
 #toast.show    { opacity: 1; transform: translateX(-50%) translateY(0); }
-#toast.success { background: #276749; }
-#toast.error   { background: #9b2c2c; }
-#toast.warning { background: #c05621; }
+#toast.success { background: #2C5A2C; }
+#toast.error   { background: #A02A2A; }
+#toast.warning { background: #A0850A; }
 
 /* History Drawer */
 #history-overlay {
@@ -2244,7 +2175,7 @@ body {
     flex-direction: column;
     box-shadow: -4px 0 28px rgba(0,0,0,.15);
     transition: right .3s cubic-bezier(.4,0,.2,1);
-    font-family: 'DM Sans', sans-serif;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
 }
 
 #history-drawer.open {
@@ -2252,7 +2183,7 @@ body {
 }
 
 .drawer-header {
-    background: #1a202c;
+    background: #1B2A4A;
     color: #fff;
     padding: 18px 20px;
     display: flex;
@@ -2298,7 +2229,7 @@ body {
     align-items: center;
     justify-content: center;
     padding: 60px 20px;
-    color: #a0aec0;
+    color: #8A93A6;
     gap: 12px;
     font-size: 14px;
 }
@@ -2306,8 +2237,8 @@ body {
 .drawer-spinner {
     width: 28px;
     height: 28px;
-    border: 3px solid #e2e8f0;
-    border-top-color: #1a202c;
+    border: 3px solid #DCE1EC;
+    border-top-color: #1B2A4A;
     border-radius: 50%;
     animation: spin .7s linear infinite;
 }
@@ -2315,24 +2246,24 @@ body {
 .hist-month-header {
     position: sticky;
     top: 0;
-    background: #f7fafc;
-    color: #4a5568;
+    background: #F3F5F9;
+    color: #5A6272;
     font-size: 11px;
     font-weight: 700;
     letter-spacing: .08em;
     text-transform: uppercase;
     padding: 8px 18px;
     z-index: 2;
-    border-bottom: 1px solid #e2e8f0;
+    border-bottom: 1px solid #DCE1EC;
 }
 
 .hist-day {
     padding: 12px 18px;
-    border-bottom: 1px solid #f7fafc;
+    border-bottom: 1px solid #F3F5F9;
 }
 
 .hist-day.is-dayoff {
-    background: #faf5ff;
+    background: #EFEBF7;
 }
 
 .hist-day-label {
@@ -2343,9 +2274,9 @@ body {
 }
 
 .dayoff-chip {
-    background: #e9d8fd;
-    color: #6b46c1;
-    border-radius: 20px;
+    background: #EFEBF7;
+    color: #5B4A8A;
+    border-radius: 0;
     padding: 4px 12px;
     font-size: 12px;
     font-weight: 600;
@@ -2359,28 +2290,28 @@ body {
 }
 
 .hist-duty-block {
-    background: #f7fafc;
-    border-radius: 8px;
+    background: #F3F5F9;
+    border-radius: 0;
     padding: 8px 10px;
     font-size: 12px;
-    border-left: 3px solid #bee3f8;
+    border: 1px solid var(--grid-border-soft);
 }
 
 .hist-duty-block.pm {
-    border-left-color: #c6f6d5;
+    border-color: #BFE0BF;
 }
 
 .hist-duty-block strong {
     display: block;
     font-size: 10px;
-    color: #a0aec0;
+    color: #8A93A6;
     margin-bottom: 3px;
     text-transform: uppercase;
 }
 
-.hist-time         { color: #2b6cb0; font-weight: 600; font-family: 'DM Mono', monospace; }
+.hist-time         { color: #1B2A4A; font-weight: 600; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
 .hist-time.missing { color: #cbd5e0; font-style: italic; }
-.hist-time.missed  { color: #e53e3e; font-weight: 700; }
+.hist-time.missed  { color: #A02A2A; font-weight: 700; }
 
 /* Late Request Modal */
 #lateReqOverlay {
@@ -2400,10 +2331,10 @@ body {
 
 #lateReqBox {
     background: #fff;
-    border-radius: 18px;
+    border-radius: 0;
     width: 460px;
     max-width: 96vw;
-    box-shadow: 0 24px 60px rgba(0,0,0,.25);
+    box-shadow: none;
     overflow: hidden;
     animation: lr-in .3s cubic-bezier(.34,1.56,.64,1);
 }
@@ -2414,7 +2345,7 @@ body {
 }
 
 .lr-header {
-    background: linear-gradient(135deg,#c53030,#e53e3e);
+    background: var(--grid-red);
     color: #fff;
     padding: 20px 22px 14px;
 }
@@ -2444,7 +2375,7 @@ body {
 .lr-type-label {
     font-size: 12px;
     font-weight: 700;
-    color: #555;
+    color: #5A6272;
     margin-bottom: 4px;
     text-transform: uppercase;
     letter-spacing: .05em;
@@ -2453,24 +2384,24 @@ body {
 .lr-type-val {
     font-size: 14px;
     font-weight: 700;
-    color: #c53030;
+    color: #A02A2A;
     margin-bottom: 14px;
 }
 
 .lr-label {
     font-size: 12px;
     font-weight: 700;
-    color: #555;
+    color: #5A6272;
     margin-bottom: 5px;
     display: block;
 }
 
 .lr-textarea {
     width: 100%;
-    border: 1.5px solid #e2e8f0;
-    border-radius: 10px;
+    border: 1.5px solid #DCE1EC;
+    border-radius: 0;
     padding: 10px 12px;
-    font-family: 'DM Sans', sans-serif;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
     font-size: 13px;
     color: #2d3748;
     resize: vertical;
@@ -2480,35 +2411,35 @@ body {
 
 .lr-textarea:focus {
     outline: none;
-    border-color: #e53e3e;
+    border-color: #A02A2A;
 }
 
 .lr-window-warn {
     display: flex;
     align-items: center;
     gap: 8px;
-    background: #fffbeb;
-    border: 1px solid #f6e05e;
-    border-radius: 10px;
+    background: #FAF3DC;
+    border: 1px solid #E6D9A8;
+    border-radius: 0;
     padding: 10px 14px;
     margin-bottom: 14px;
     font-size: 12px;
-    color: #744210;
+    color: #A0850A;
     font-weight: 500;
     line-height: 1.5;
 }
 
 .lr-window-warn strong {
-    color: #c05621;
-    font-family: 'DM Mono', monospace;
+    color: #A0850A;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
 }
 
 .lr-camera-wrap {
     position: relative;
     width: 100%;
     aspect-ratio: 16/9;
-    background: #1a202c;
-    border-radius: 12px;
+    background: #1B2A4A;
+    border-radius: 0;
     overflow: hidden;
     margin-bottom: 14px;
 }
@@ -2528,9 +2459,9 @@ body {
     background: rgba(0,0,0,.55);
     color: #fff;
     font-size: 10px;
-    font-family: 'DM Mono', monospace;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
     padding: 3px 10px;
-    border-radius: 20px;
+    border-radius: 0;
     white-space: nowrap;
     backdrop-filter: blur(6px);
 }
@@ -2548,14 +2479,14 @@ body {
     top: 8px;
     left: 8px;
     border-width: 2px 0 0 2px;
-    border-radius: 3px 0 0 0;
+    border-radius: 0;
 }
 
 .lr-camera-corner.br {
     bottom: 8px;
     right: 8px;
     border-width: 0 2px 2px 0;
-    border-radius: 0 0 3px 0;
+    border-radius: 0;
 }
 
 .lr-photo-preview {
@@ -2565,7 +2496,7 @@ body {
 .lr-photo-preview img {
     width: 80px;
     height: 80px;
-    border-radius: 8px;
+    border-radius: 0;
     object-fit: cover;
     display: none;
 }
@@ -2579,27 +2510,27 @@ body {
 
 .lr-btn-cancel {
     padding: 10px 20px;
-    background: #f7fafc;
-    border: 1.5px solid #e2e8f0;
-    border-radius: 9px;
-    font-family: 'DM Sans', sans-serif;
+    background: #F3F5F9;
+    border: 1.5px solid #DCE1EC;
+    border-radius: 0;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
     font-size: 13px;
     font-weight: 600;
-    color: #4a5568;
+    color: #5A6272;
     cursor: pointer;
     transition: all .18s;
 }
 
 .lr-btn-cancel:hover {
-    background: #edf2f7;
+    background: #DCE1EC;
 }
 
 .lr-btn-submit {
     padding: 10px 22px;
-    background: #c53030;
+    background: #A02A2A;
     border: none;
-    border-radius: 9px;
-    font-family: 'DM Sans', sans-serif;
+    border-radius: 0;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
     font-size: 14px;
     font-weight: 700;
     color: #fff;
@@ -2608,7 +2539,7 @@ body {
 }
 
 .lr-btn-submit:hover {
-    background: #9b2c2c;
+    background: #A02A2A;
 }
 
 .lr-btn-submit.loading {
@@ -2620,16 +2551,97 @@ body {
     display: inline-flex;
     align-items: center;
     gap: 4px;
-    background: #fffbeb;
-    border: 1px solid #f6e05e;
-    border-radius: 20px;
+    background: #FAF3DC;
+    border: 1px solid #E6D9A8;
+    border-radius: 0;
     padding: 3px 10px;
     font-size: 10px;
     font-weight: 700;
-    color: #92400e;
+    color: #A0850A;
     margin-top: 3px;
 }
-</style>
+        /* ══ Field Ops Grid (AccomForm.php) — shared additions ══
+           Responsive attendance bar + visible keyboard focus + reduced
+           motion, exactly as AccomForm.php defines them. */
+        @media (max-width: 768px) {
+            #att-notif-bar,
+            #att-notif-bar.sidebar-collapsed {
+                left: 50% !important;
+                width: calc(100% - 20px) !important;
+                max-width: none !important;
+            }
+        }
+        .sidebar.collapsed .logout-link a { border-color: transparent; }
+        .anb-btn:focus-visible, .anb-close:focus-visible, .ndm-close-btn:focus-visible,
+        .toggle-btn:focus-visible { outline: 2px solid #F7C600; outline-offset: 2px; }
+        @media (prefers-reduced-motion: reduce) {
+            .ndm-box, .anb-pulse, .sidebar-badge-att, .sidebar-badge-journal { animation: none; }
+        }
+/* ══ Field Ops Grid (AccomForm.php) — page typography ══
+   Square corners, thin slate borders instead of soft shadows, navy
+   actions, small uppercase labels, flat status colours, no emoji.
+   Only the look changes; every class/id the scripts use is kept. */
+body { background: var(--grid-bg); color: #2d3748; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+.att-header { border-bottom: 1px solid var(--grid-border); padding-bottom: 12px; }
+.att-header-left h1 { color: var(--grid-navy); text-transform: uppercase; letter-spacing: 0.6px; font-size: 18px; }
+.att-header-left p { color: var(--grid-muted); font-variant-numeric: tabular-nums; }
+.dashboard-link, .history-btn {
+    background: #fff; color: var(--grid-navy); border: 1px solid var(--grid-border);
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.4px;
+}
+.dashboard-link:hover, .history-btn:hover { background: #f3f4f7; }
+.camera-card { border: 1px solid var(--grid-navy); }
+.camera-date-badge { border-radius: 0; font-variant-numeric: tabular-nums; }
+.step-card, .progress-track, .log-card { border: 1px solid var(--grid-border); }
+.step-label, .progress-track-title, .log-card-title { color: var(--grid-navy); letter-spacing: 0.5px; }
+.step-label::before { background: var(--grid-green); }
+.action-btn { font-size: 13px; text-transform: uppercase; letter-spacing: 0.6px; }
+.action-btn:focus-visible, .late-req-btn:focus-visible, .lr-btn-submit:focus-visible,
+.lr-btn-cancel:focus-visible, .dashboard-link:focus-visible, .history-btn:focus-visible,
+.drawer-close:focus-visible { outline: 2px solid var(--grid-navy); outline-offset: 2px; }
+.late-req-btn, .lr-btn-submit, .lr-btn-cancel { font-size: 12px; text-transform: uppercase; letter-spacing: 0.4px; }
+.missed-notice { border: 1px solid #E3BCBC; }
+.missed-notice .mn-header { text-transform: uppercase; letter-spacing: 0.3px; font-size: 12px; }
+.late-req-pending, .late-req-expired, .lr-countdown, .lr-window-warn, .lr-pending-badge { border-width: 1px; }
+.weekend-banner { border: 1px solid var(--grid-navy); }
+.weekend-banner .wb-icon { color: #F7C600; font-size: 34px; }
+.weekend-banner h3, .done-card h3 { text-transform: uppercase; letter-spacing: 0.4px; font-size: 15px; }
+.done-card .done-icon { color: var(--grid-green); font-size: 34px; }
+.skipped-duty-notice .sdn-icon { color: var(--grid-navy); font-size: 18px; }
+.skipped-duty-notice .sdn-text h4 { color: var(--grid-navy); text-transform: uppercase; letter-spacing: 0.3px; font-size: 12px; }
+.step-circle.done { background: var(--grid-green); }
+.step-circle.active { background: var(--grid-navy); box-shadow: 0 0 0 3px rgba(27,42,74,.15); }
+.step-circle.todo { background: #DCE1EC; color: var(--grid-muted); }
+.step-circle.pending-late { background: var(--grid-amber); }
+.step-circle.missed { background: var(--grid-red); }
+.step-circle i { font-size: 11px; }
+.track-step:not(:last-child).done-step::after { background: var(--grid-green); }
+.track-step.done-step .track-step-label { color: var(--grid-green); }
+.track-step.active-step .track-step-label { color: var(--grid-navy); }
+.track-step.missed-step .track-step-label { color: var(--grid-red); }
+.log-duty { border-bottom: 1px solid var(--grid-border-soft); }
+.log-duty-label { color: var(--grid-navy); text-transform: uppercase; letter-spacing: 0.3px; font-size: 11px; }
+.log-item { border: 1px solid var(--grid-border-soft); }
+.log-item-info .li-time, .hist-time, .lr-countdown .lr-countdown-time, .lr-window-warn strong { font-variant-numeric: tabular-nums; }
+.log-duty-skipped { border: 1px dashed var(--grid-border); }
+#toast { border: 1px solid #55668C; }
+.drawer-header { background: var(--grid-navy); }
+.drawer-header h3 { text-transform: uppercase; letter-spacing: 0.4px; font-size: 13px; }
+.drawer-close { border-radius: 0; border: 1px solid rgba(255,255,255,0.25); background: transparent; }
+.drawer-state span:first-child i { font-size: 26px; color: var(--grid-border); }
+.hist-month-header { color: var(--grid-navy); border-bottom: 1px solid var(--grid-border); }
+.hist-day-label { color: var(--grid-navy); }
+.dayoff-chip { border: 1px solid #D5CCE8; text-transform: uppercase; letter-spacing: 0.3px; font-size: 11px; }
+#lateReqBox { border: 1px solid var(--grid-border); }
+.lr-header h3 { text-transform: uppercase; letter-spacing: 0.4px; font-size: 15px; }
+.lr-header .lr-icon { font-size: 24px; }
+.lr-type-val { color: var(--grid-red); }
+.lr-textarea { border: 1px solid var(--grid-border); }
+.lr-textarea:focus { border-color: var(--grid-navy); box-shadow: 0 0 0 3px rgba(27,42,74,0.08); }
+@media (prefers-reduced-motion: reduce) {
+    .step-label::before, #lateReqBox { animation: none; }
+}
+    </style>
 </head>
 <body>
 
@@ -2638,7 +2650,7 @@ body {
 <div id="history-drawer">
     <div class="drawer-header">
         <h3> Attendance History</h3>
-        <button class="drawer-close" onclick="closeHistoryDrawer()">✕</button>
+        <button class="drawer-close" onclick="closeHistoryDrawer()" aria-label="Close history"><i class="fas fa-xmark"></i></button>
     </div>
     <div class="drawer-body" id="history-body">
         <div class="drawer-state"><div class="drawer-spinner"></div><span>Loading…</span></div>
@@ -2649,7 +2661,7 @@ body {
 <div id="lateReqOverlay">
     <div id="lateReqBox">
         <div class="lr-header">
-            <span class="lr-icon"></span>
+            <span class="lr-icon"><i class="fas fa-clock-rotate-left"></i></span>
             <h3>Submit Late Request</h3>
             <p>Explain why you missed this entry. Your company will review it.</p>
         </div>
@@ -2663,9 +2675,9 @@ body {
                 <video id="lr-video-preview" autoplay playsinline muted></video>
                 <div class="lr-camera-corner tl"></div>
                 <div class="lr-camera-corner br"></div>
-                <div class="lr-camera-label">📷 Photo will be captured on submit</div>
+                <div class="lr-camera-label"><i class="fas fa-camera"></i> Photo will be captured on submit</div>
             </div>
-            <label class="lr-label">Reason <span style="color:#e53e3e">*</span></label>
+            <label class="lr-label">Reason <span style="color:#A02A2A">*</span></label>
             <textarea class="lr-textarea" id="lr-reason" placeholder="Describe what happened and why you were unable to sign in/out on time…"></textarea>
             <div class="lr-photo-preview" id="lr-photo-wrap"></div>
         </div>
@@ -2780,7 +2792,7 @@ body {
 
         <?php if ($is_weekend): ?>
         <div class="weekend-banner">
-            <span class="wb-icon">🏖️</span>
+            <span class="wb-icon"><i class="fas fa-umbrella-beach"></i></span>
             <h3>Today is <?= $weekend_name ?> — Day Off!</h3>
             <p>No attendance entry required on weekends.</p>
         </div>
@@ -2809,7 +2821,7 @@ body {
         </div>
         <?php else: ?>
         <div class="done-card" id="main-step-card">
-            <span class="done-icon">✅</span>
+            <span class="done-icon"><i class="fas fa-circle-check"></i></span>
             <h3>All attendance recorded!</h3>
             <p>You've completed all sign-in and sign-out for today.</p>
         </div>
@@ -2858,7 +2870,7 @@ body {
         <?php if (!$is_weekend && $todaySettings): ?>
             <?php if ($am_skipped): ?>
             <div class="skipped-duty-notice">
-                <span class="sdn-icon">ℹ️</span>
+                <span class="sdn-icon"><i class="fas fa-circle-info"></i></span>
                 <div class="sdn-text">
                     <h4>AM Duty Not Required</h4>
                     <p>Your company has not scheduled AM duty attendance for today. Only PM duty is required.</p>
@@ -2867,7 +2879,7 @@ body {
             <?php endif; ?>
             <?php if ($pm_skipped): ?>
             <div class="skipped-duty-notice">
-                <span class="sdn-icon">ℹ️</span>
+                <span class="sdn-icon"><i class="fas fa-circle-info"></i></span>
                 <div class="sdn-text">
                     <h4>PM Duty Not Required</h4>
                     <p>Your company has not scheduled PM duty attendance for today. Only AM duty is required.</p>
@@ -2901,11 +2913,11 @@ body {
                     if ($is_step_skip) {
                         $step_cls='skipped-step'; $circ_cls='skipped'; $circ_txt='—';
                     } elseif ($is_done) {
-                        $step_cls='done-step'; $circ_cls='done'; $circ_txt='✓';
+                        $step_cls='done-step'; $circ_cls='done'; $circ_txt='<i class="fas fa-check"></i>';
                     } elseif ($is_missed && $is_pending_late) {
-                        $step_cls='pending-late-step'; $circ_cls='pending-late'; $circ_txt='⏳';
+                        $step_cls='pending-late-step'; $circ_cls='pending-late'; $circ_txt='<i class="fas fa-hourglass-half"></i>';
                     } elseif ($is_perm_missed) {
-                        $step_cls='perm-missed-step'; $circ_cls='perm-missed'; $circ_txt='✕';
+                        $step_cls='perm-missed-step'; $circ_cls='perm-missed'; $circ_txt='<i class="fas fa-xmark"></i>';
                     } elseif ($is_missed) {
                         $step_cls='missed-step'; $circ_cls='missed'; $circ_txt='!';
                     } elseif ($is_active) {
@@ -2913,7 +2925,7 @@ body {
                     } else {
                         $step_cls=''; $circ_cls='todo'; $circ_txt=($i+1);
                     }
-                    $pendingBadge = ($is_pending_late) ? '<div class="lr-pending-badge">⏳ Pending</div>' : '';
+                    $pendingBadge = ($is_pending_late) ? '<div class="lr-pending-badge"><i class="fas fa-hourglass-half"></i> Pending</div>' : '';
                     $skipLabel    = $is_step_skip ? '<div style="font-size:9px;color:#cbd5e0;margin-top:2px;">Skipped</div>' : '';
                 ?>
                 <div class="track-step <?= $step_cls ?>" id="track-<?= $key ?>">
@@ -3247,7 +3259,7 @@ function markStepDone(type) {
     if (trackEl) {
         trackEl.className = 'track-step done-step';
         const circ = trackEl.querySelector('.step-circle');
-        if (circ) { circ.className = 'step-circle done'; circ.textContent = '✓'; }
+        if (circ) { circ.className = 'step-circle done'; circ.innerHTML = '<i class="fas fa-check"></i>'; }
         const badge = trackEl.querySelector('.lr-pending-badge');
         if (badge) badge.remove();
     }
@@ -3262,17 +3274,17 @@ function markStepMissed(type, isPermanent, isPending) {
         if (isPending) {
             trackEl.className = 'track-step pending-late-step';
             const c = trackEl.querySelector('.step-circle');
-            if (c) { c.className = 'step-circle pending-late'; c.textContent = '⏳'; }
+            if (c) { c.className = 'step-circle pending-late'; c.innerHTML = '<i class="fas fa-hourglass-half"></i>'; }
             if (!trackEl.querySelector('.lr-pending-badge')) {
                 const badge = document.createElement('div');
                 badge.className = 'lr-pending-badge';
-                badge.textContent = '⏳ Pending';
+                badge.innerHTML = '<i class="fas fa-hourglass-half"></i> Pending';
                 trackEl.appendChild(badge);
             }
         } else if (isPermanent) {
             trackEl.className = 'track-step perm-missed-step';
             const c = trackEl.querySelector('.step-circle');
-            if (c) { c.className = 'step-circle perm-missed'; c.textContent = '✕'; }
+            if (c) { c.className = 'step-circle perm-missed'; c.innerHTML = '<i class="fas fa-xmark"></i>'; }
             const badge = trackEl.querySelector('.lr-pending-badge');
             if (badge) badge.remove();
         } else {
@@ -3323,7 +3335,7 @@ function advanceActiveStep() {
             if (!alreadyDone) {
                 stepCard.className = 'done-card';
                 stepCard.innerHTML = `
-                    <span class="done-icon">✅</span>
+                    <span class="done-icon"><i class="fas fa-circle-check"></i></span>
                     <h3>All attendance recorded!</h3>
                     <p>You've completed all sign-in and sign-out for today.</p>`;
             }
@@ -3351,7 +3363,7 @@ function buildMissedNoticeHtml(type, winStatusOverride) {
     if (status === 'pending') {
         actionHtml = `<div class="late-req-pending"> Request pending — waiting for company approval</div>`;
     } else if (status === 'approved') {
-        actionHtml = `<div class="late-req-pending" style="background:#f0fff4;border-color:#9ae6b4;color:#276749;"> Request approved</div>`;
+        actionHtml = `<div class="late-req-pending" style="background:#f0fff4;border-color:#EAF3EA;color:#2C5A2C;"> Request approved</div>`;
     } else if (winStatus === 'open') {
         actionHtml = `<button class="late-req-btn" onclick="openLateReqModal('${type}')"> Submit Late Request</button>`;
     } else {
@@ -3421,7 +3433,7 @@ function refreshLog() {
                     return `<div class="log-item"><div class="log-item-info"><div class="li-label">${label}</div><div class="li-time skipped">Not required</div></div></div>`;
                 }
                 const hasPhoto = (photob64 && !isMissedVal(time12))
-                    ? `<img src="data:image/png;base64,${photob64}" style="width:44px;height:44px;border-radius:7px;object-fit:cover;flex-shrink:0;">`
+                    ? `<img src="data:image/png;base64,${photob64}" style="width:44px;height:44px;border-radius:0;object-fit:cover;flex-shrink:0;">`
                     : '';
                 let timeCls = '';
                 let displayTime = time12 || '—';
@@ -3663,7 +3675,7 @@ function openLateReqModal(type) {
         const currentStatus = getLateRequestWindowStatus(lateReqType);
         if (currentStatus === 'permanently_missed') {
             closeLateReqModal();
-            showToast('⛔ The late request window has just closed. This entry is permanently missed.', 'error');
+            showToast('The late request window has just closed. This entry is permanently missed.', 'error');
             const trackEl = document.getElementById('track-' + lateReqType);
             if (trackEl && !trackEl.classList.contains('pending-late-step')) {
                 markStepMissed(lateReqType, true, false);
@@ -3766,7 +3778,7 @@ function fetchHistory() {
     .then(r => r.json())
     .then(data => {
         if (!data.success || !Object.keys(data.history).length) {
-            body.innerHTML = `<div class="drawer-state"><span>📭</span><span>No entries yet.</span></div>`;
+            body.innerHTML = `<div class="drawer-state"><span><i class="fas fa-inbox"></i></span><span>No entries yet.</span></div>`;
             return;
         }
         let html = '';
@@ -3777,7 +3789,7 @@ function fetchHistory() {
                 html += `<div class="hist-day${dc}">
                     <div class="hist-day-label">${e.day_label}</div>`;
                 if (e.is_weekend) {
-                    html += `<span class="dayoff-chip">🌴 Day Off</span>`;
+                    html += `<span class="dayoff-chip"><i class="fas fa-mug-hot"></i> Day Off</span>`;
                 } else {
                     const fmt = (t) => {
                         if (!t) return `<span class="hist-time missing">—</span>`;
@@ -3917,7 +3929,7 @@ function _anbShow(info) {
         if (rem <= 0) { _anbHide(_anb.currentType); return; }
         const m = Math.floor(rem / 60), s = rem % 60;
         document.getElementById('anb-countdown').textContent =
-            '\u23F3 ' + m + 'm ' + String(s).padStart(2,'0') + 's left';
+            m + 'm ' + String(s).padStart(2,'0') + 's left';
     }
     tick();
     _anb.tickInterval = setInterval(tick, 1000);
@@ -4053,11 +4065,11 @@ document.addEventListener('DOMContentLoaded', () => {
                     if (isPending) {
                         trackEl.className = 'track-step pending-late-step';
                         const c = trackEl.querySelector('.step-circle');
-                        if (c) { c.className = 'step-circle pending-late'; c.textContent = '⏳'; }
+                        if (c) { c.className = 'step-circle pending-late'; c.innerHTML = '<i class="fas fa-hourglass-half"></i>'; }
                     } else if (isPermanent) {
                         trackEl.className = 'track-step perm-missed-step';
                         const c = trackEl.querySelector('.step-circle');
-                        if (c) { c.className = 'step-circle perm-missed'; c.textContent = '✕'; }
+                        if (c) { c.className = 'step-circle perm-missed'; c.innerHTML = '<i class="fas fa-xmark"></i>'; }
                     } else {
                         trackEl.className = 'track-step missed-step';
                         const c = trackEl.querySelector('.step-circle');
@@ -4094,7 +4106,7 @@ function debugAutoMiss() {
             if (d.windows) {
                 console.group('Window Analysis');
                 Object.entries(d.windows).forEach(([type, w]) => {
-                    const status = w.now_past_end ? '⛔ PAST END' : '✅ still open';
+                    const status = w.now_past_end ? 'PAST END' : 'still open';
                     console.log(type + ':', status, '| end:', w.end_time, '| lr_status:', w.lr_window_status);
                     if (w.late_window_end_hhmm) console.log('  └ pm_time_out late window ends:', w.late_window_end_hhmm, '| past:', w.now_past_late_window);
                 });
