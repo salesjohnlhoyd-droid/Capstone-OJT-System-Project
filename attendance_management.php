@@ -457,6 +457,26 @@ function timeToMins($time) {
     return (int)$parts[0] * 60 + (int)$parts[1];
 }
 
+// late_requests.request_type: 'late' (original behaviour) or 'overtime'. The column is added
+// automatically the first time it is needed so existing databases keep working.
+if (!function_exists('ensureLateRequestTypeColumn')) {
+    function ensureLateRequestTypeColumn($conn) {
+        static $ok = null;
+        if ($ok !== null) return $ok;
+        $exists = function() use ($conn) {
+            $r = $conn->query("SHOW COLUMNS FROM late_requests LIKE 'request_type'");
+            return $r && $r->num_rows > 0;
+        };
+        try {
+            if ($exists()) return $ok = true;
+            $conn->query("ALTER TABLE late_requests ADD COLUMN request_type ENUM('late','overtime') NOT NULL DEFAULT 'late' AFTER type");
+        } catch (\Throwable $e) {
+            // another request may have added it first - fall through to the re-check
+        }
+        try { return $ok = $exists(); } catch (\Throwable $e) { return $ok = false; }
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // AJAX HANDLERS
 // ─────────────────────────────────────────────────────────────────────────────
@@ -491,6 +511,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_SERVER['HTTP_X_REQUESTED_WI
         [$time_col, $photo_col] = $col_map[$type];
 
         $approved_time = $lr_date . ' ' . date('H:i:s', strtotime($lr['created_at']));
+        $requestType   = (($lr['request_type'] ?? 'late') === 'overtime') ? 'overtime' : 'late';
 
         $setting = $conn->prepare("SELECT * FROM attendance_settings WHERE company_id=? AND date=? LIMIT 1");
         $setting->bind_param("is", $company_id, $lr_date);
@@ -504,10 +525,44 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_SERVER['HTTP_X_REQUESTED_WI
             $settingRow = $fallback->get_result()->fetch_assoc();
         }
 
-        $chk = $conn->prepare("SELECT id FROM attendance_logs WHERE user_id=? AND date=? AND company_id=?");
+        $chk = $conn->prepare("SELECT * FROM attendance_logs WHERE user_id=? AND date=? AND company_id=?");
         $chk->bind_param("isi", $student_id, $lr_date, $company_id);
         $chk->execute();
         $existing_log = $chk->get_result()->fetch_assoc();
+
+        /* ── Late request vs Overtime (sign-out entries only) ──
+           Duty time everywhere in the system is (sign out − sign in), so the time recorded for the
+           sign out is what decides the hours credited:
+             • Overtime     → counted from the duty Sign In up to the moment the request was submitted.
+             • Late request → counts only that duty (AM Sign In → AM Sign Out): the Sign Out is credited
+                              at the scheduled sign-out time instead of the (later) submission time. */
+        if (in_array($type, ['am_time_out','pm_time_out'], true)) {
+            $period = ($type === 'am_time_out') ? 'am' : 'pm';
+            $toTs = function($v) use ($lr_date) {
+                if (!$v || $v === 'missed') return null;
+                $v = (strpos($v, ' ') === false) ? ($lr_date . ' ' . $v) : $v;
+                $ts = strtotime($v);
+                return $ts === false ? null : $ts;
+            };
+            $inTs      = $toTs($existing_log[$period . '_time_in'] ?? null);
+            $createdTs = strtotime($approved_time);
+
+            if ($requestType === 'overtime') {
+                if ($inTs === null) {
+                    echo json_encode(['success'=>false,'message'=>'Cannot approve overtime: the student has no recorded ' . strtoupper($period) . ' Sign In to count it from. Reject it or ask the student to resubmit as a late request.']);
+                    exit;
+                }
+                if ($createdTs !== false && $createdTs < $inTs) $approved_time = date('Y-m-d H:i:s', $inTs);
+            } else {
+                $schedOut = $settingRow[$period . '_time_out_start'] ?? null;
+                $schedTs  = $schedOut ? $toTs($schedOut) : null;
+                if ($schedTs !== null) {
+                    if ($createdTs !== false && $schedTs > $createdTs) $schedTs = $createdTs;   // never later than the submission
+                    if ($inTs !== null && $schedTs < $inTs)            $schedTs = $inTs;         // never before the sign in (0 min)
+                    $approved_time = date('Y-m-d H:i:s', $schedTs);
+                }
+            }
+        }
 
         $photoStmt = $conn->prepare("SELECT photo FROM late_requests WHERE id=?");
         $photoStmt->bind_param("i", $req_id);
@@ -553,9 +608,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_SERVER['HTTP_X_REQUESTED_WI
         $npc->execute();
         $newPendingCount = $npc->get_result()->fetch_assoc()['cnt'] ?? 0;
 
+        $approvedLabel = ($requestType === 'overtime') ? 'overtime' : 'time';
         echo json_encode([
             'success'       => true,
-            'message'       => "Approved. {$sName} time and photo updated recorded.",
+            'message'       => "Approved. {$sName} {$approvedLabel} and photo updated recorded.",
+            'request_type'  => $requestType,
+            'recorded_time' => $approved_time,
             'duty_info'     => $dutyInfo,
             'req_id'        => $req_id,
             'pending_count' => $newPendingCount,
@@ -742,12 +800,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET'
 
     header('Content-Type: application/json');
 
+    $lrTypeSel = ensureLateRequestTypeColumn($conn) ? 'lr.request_type' : "'late' AS request_type";
     $stmt = $conn->prepare("
         SELECT
             lr.id,
             lr.student_id,
             lr.date,
             lr.type,
+            {$lrTypeSel},
             lr.reason,
             lr.status,
             lr.created_at,
@@ -783,6 +843,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET'
     $rows = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
 
     foreach ($rows as &$row) {
+        $row['request_type'] = (($row['request_type'] ?? 'late') === 'overtime') ? 'overtime' : 'late';
         $row['has_photo'] = (bool)$row['has_photo'];
         $row['photo_url'] = "late_request_photo.php?id={$row['id']}&t=" . time();
     }
@@ -1827,6 +1888,11 @@ tr.day-off-row td { background:#ede7f6; color:#512da8; font-style:italic; }
 .req-type-badge.am_time_out { background:#c62828; }
 .req-type-badge.pm_time_in  { background:#1565c0; }
 .req-type-badge.pm_time_out { background:#2e7d32; }
+.req-kind-badge { display:inline-block; padding:3px 10px; border-radius:20px; font-size:11px; font-weight:700; color:#fff; }
+.req-kind-badge.late { background:#5A6272; }
+.req-kind-badge.overtime { background:#6a1b9a; }
+.req-kind-note { margin-top:8px; font-size:12px; color:#5A6272; line-height:1.5; }
+.req-kind-note strong { color:#1B2A4A; }
 .req-reason-box { background:#f8f9ff; border:1px solid #e8eaf6; border-radius:8px; padding:10px 13px; font-size:13px; color:#444; line-height:1.55; margin-bottom:10px; }
 .req-reason-label { font-size:10px; font-weight:700; color:#9fa8da; text-transform:uppercase; margin-bottom:4px; }
 .req-photo-section { margin-bottom:12px; }
@@ -3491,6 +3557,15 @@ let _lastKnownPendingIds=new Set(<?php
     $id_arr=[];while($idr=$init_ids->fetch_assoc())$id_arr[]=$idr['id'];echo json_encode($id_arr);
 ?>);
 const TYPE_LABELS_CO={am_time_in:'AM Sign In',am_time_out:'AM Sign Out',pm_time_in:'PM Sign In',pm_time_out:'PM Sign Out'};
+const KIND_LABELS_CO={late:'Late Request',overtime:'Overtime'};
+function reqKindNote(req){
+    const isOut=(req.type==='am_time_out'||req.type==='pm_time_out');
+    if(!isOut) return '';
+    const P=req.type==='am_time_out'?'AM':'PM';
+    return req.request_type==='overtime'
+        ? `<div class="req-kind-note"><strong>Overtime:</strong> ${P} duty is counted from the student's ${P} Sign In up to the time this request was submitted.</div>`
+        : `<div class="req-kind-note"><strong>Late Request:</strong> only the ${P} duty is counted &mdash; ${P} Sign In to the scheduled ${P} Sign Out.</div>`;
+}
 
 function openLateInbox(){document.getElementById('lateInboxOverlay').classList.add('open');if(!liLoaded)fetchLateRequests();}
 function closeLateInbox(){document.getElementById('lateInboxOverlay').classList.remove('open');}
@@ -3516,8 +3591,9 @@ function fetchLateRequests(isPolling){
                 const req=newRequests.find(r=>r.id===brandNew[0]);
                 const studentName=req?(req.first_name+(req.middle_name?' '+req.middle_name:'')+' '+req.last_name):'A student';
                 const typeLabel=req?(TYPE_LABELS_CO[req.type]||req.type):'';
-                sendSystemNotification('New Late Request',`${studentName} submitted a late request for ${typeLabel}.`,()=>{window.focus();openLateInbox();switchTab('pending');});
-                showToast(`New late request from ${studentName}`,'info');
+                const kindWord=(req&&req.request_type==='overtime')?'an overtime request':'a late request';
+                sendSystemNotification(req&&req.request_type==='overtime'?'New Overtime Request':'New Late Request',`${studentName} submitted ${kindWord} for ${typeLabel}.`,()=>{window.focus();openLateInbox();switchTab('pending');});
+                showToast(req&&req.request_type==='overtime'?`New overtime request from ${studentName}`:`New late request from ${studentName}`,'info');
             }
             newPendingIds.forEach(id=>_lastKnownPendingIds.add(id));
             const currentPendingSet=new Set(newPendingIds);
@@ -3537,7 +3613,8 @@ function renderLiBody(){
     if(!filtered.length){body.innerHTML=`<div class="li-empty">No ${liTab} requests.</div>`;return;}
     let html='';
     filtered.forEach(req=>{
-        const typeBadge=`<span class="req-type-badge ${req.type}">${TYPE_LABELS_CO[req.type]||req.type}</span>`;
+        const kind=(req.request_type==='overtime')?'overtime':'late';
+        const typeBadge=`<span class="req-type-badge ${req.type}">${TYPE_LABELS_CO[req.type]||req.type}</span><span class="req-kind-badge ${kind}">${KIND_LABELS_CO[kind]}</span>`;
         const dateLabel=new Date(req.date+'T00:00:00').toLocaleDateString('en-US',{weekday:'long',year:'numeric',month:'long',day:'numeric'});
         const submitted=new Date(req.created_at).toLocaleString('en-US',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});
         let statusSection='';
@@ -3552,7 +3629,7 @@ function renderLiBody(){
             const fmt=v=>{if(!v||v==='missed')return'—';const t=v.includes(' ')?v.split(' ')[1]:v;const [h,m]=t.split(':').map(Number);const ampm=h>=12?'PM':'AM';const h12=h%12||12;return`${h12}:${String(m).padStart(2,'0')} ${ampm}`;};
             dutyHtml=`<div class="req-duty-info has-late"><div class="req-duty-stat"><strong>AM In</strong>${fmt(req.am_time_in)}</div><div class="req-duty-stat"><strong>AM Out</strong>${fmt(req.am_time_out)}</div><div class="req-duty-stat"><strong>PM In</strong>${fmt(req.pm_time_in)}</div><div class="req-duty-stat"><strong>PM Out</strong>${fmt(req.pm_time_out)}</div></div>`;
         }
-        html+=`<div class="req-card" id="req-card-${req.id}"><div class="req-card-top"><div class="req-student-info"><div class="req-student-name">${escH(req.first_name)}${req.middle_name?' '+escH(req.middle_name):''} ${escH(req.last_name)}</div><div class="req-meta">${typeBadge}<span>${escH(dateLabel)}</span><span>Submitted ${escH(submitted)}</span></div></div></div>${photoHtml}<div class="req-reason-box"><div class="req-reason-label">Reason</div>${escH(req.reason)}</div>${dutyHtml}${statusSection}</div>`;
+        html+=`<div class="req-card" id="req-card-${req.id}"><div class="req-card-top"><div class="req-student-info"><div class="req-student-name">${escH(req.first_name)}${req.middle_name?' '+escH(req.middle_name):''} ${escH(req.last_name)}</div><div class="req-meta">${typeBadge}<span>${escH(dateLabel)}</span><span>Submitted ${escH(submitted)}</span></div>${reqKindNote(req)}</div></div>${photoHtml}<div class="req-reason-box"><div class="req-reason-label">Reason</div>${escH(req.reason)}</div>${dutyHtml}${statusSection}</div>`;
     });
     body.innerHTML=html;
     filtered.forEach(req=>{if(req.has_photo)loadPhotoIntoFrame(req.id);});
@@ -3583,7 +3660,8 @@ function openPhotoLightbox(reqId,studentName){
 function approveRequest(reqId,btn){
     const req=liRequests.find(r=>r.id===reqId);
     const studentName=req?(req.first_name+(req.middle_name?' '+req.middle_name:'')+' '+req.last_name):null;
-    showCustomConfirm({title:'Allow Late Request?',message:"The student's time and photo will be recorded.",studentName,type:'approve',onConfirm:()=>{
+    const isOT=!!(req&&req.request_type==='overtime');
+    showCustomConfirm({title:isOT?'Allow Overtime Request?':'Allow Late Request?',message:isOT?"Overtime will be counted from the student's Sign In up to the time this request was submitted.":"The student's time and photo will be recorded.",studentName,type:'approve',onConfirm:()=>{
         btn.classList.add('loading'); btn.textContent='Processing…';
         const fd=new FormData(); fd.append('action','approve_late_request'); fd.append('req_id',reqId);
         fetch(window.location.pathname,{method:'POST',headers:{'X-Requested-With':'XMLHttpRequest'},body:fd})
@@ -3606,7 +3684,7 @@ function approveRequest(reqId,btn){
 function rejectRequest(reqId,btn){
     const req=liRequests.find(r=>r.id===reqId);
     const studentName=req?(req.first_name+' '+req.last_name):null;
-    showCustomConfirm({title:'Reject This Request?',message:"The student's late request will be rejected. This cannot be undone.",studentName,type:'reject',onConfirm:()=>{
+    showCustomConfirm({title:'Reject This Request?',message:"The student's "+(req&&req.request_type==='overtime'?'overtime':'late')+" request will be rejected. This cannot be undone.",studentName,type:'reject',onConfirm:()=>{
         const fd=new FormData(); fd.append('action','reject_late_request'); fd.append('req_id',reqId);
         fetch(window.location.pathname,{method:'POST',headers:{'X-Requested-With':'XMLHttpRequest'},body:fd})
         .then(r=>r.json())
@@ -3831,4 +3909,4 @@ document.getElementById('searchInput').addEventListener('keyup',function(){
 setInterval(()=>{ fetchLateRequests(true); },60000);
 </script>
 </body>
-</html>
+</html>
