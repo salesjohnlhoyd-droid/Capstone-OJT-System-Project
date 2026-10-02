@@ -6404,7 +6404,7 @@ setInterval(_anbWatch, 30000);
         setTimeout(function() { card.classList.remove('rce-status-updated'); }, 1500);
     }
 
-    function notifyStatusChange(key, newStatus, remark) {
+    function notifyStatusChange(key, newStatus, remark, hasFile) {
         var label = REQ_LABELS[key] || key;
         /* ADJUSTMENT: encouraging, informative wording; no icon on top and no redundant
            "<Requirement> — <Status>" title (the requirement name is already in the message). */
@@ -6419,6 +6419,13 @@ setInterval(_anbWatch, 30000);
                   + (remark ? 'Administrator\'s note: "' + remark + '". ' : 'Please check the remark on the card. ')
                   + 'Re-upload the corrected file and you\'ll be back on track!';
             btn   = 'Got It, I\'ll Re-upload';
+        } else if (hasFile === false) {
+            /* ADJUSTMENT: back to Pending with no file (e.g. the company supervisor changed the schedule, so the old file was removed) = the student must upload again */
+            title = 'Time to Upload Again';
+            msg   = (key === 'application_sit')
+                  ? 'Your OJT schedule was updated by your company supervisor, so your "' + label + '" needs to be refreshed. Please upload the updated copy that matches your new schedule so the administrator can verify it. You\'re almost there!'
+                  : 'Your "' + label + '" needs to be uploaded again. Please upload the updated file so the administrator can verify it. You\'re almost there!';
+            btn   = 'Got It, I\'ll Upload';
         } else {
             title = 'Under Review';
             msg   = 'Your "' + label + '" is now back in the review queue. The administrator will check it soon — no action is needed from you right now.';
@@ -6452,7 +6459,7 @@ setInterval(_anbWatch, 30000);
 
                     if (newStatus !== oldStatus) {
                         applyCardStatus(key, info);
-                        notifyStatusChange(key, newStatus, info.remark || '');
+                        notifyStatusChange(key, newStatus, info.remark || '', info.has_file);
                         _lastStatus[key] = newStatus;
                     }
 
