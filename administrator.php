@@ -6710,7 +6710,7 @@ if (!$courseOfferingsLoaded) {
         var div = document.createElement('div');
         div.className = 'cv-top-toast';
         div.setAttribute('role', 'status');
-        div.innerHTML = '<i class="fas fa-trophy"></i><span><strong>' + escHtml(studentName) + '</strong> has completed all requirements and has been verified.</span>';
+        div.innerHTML = '<i class="fas fa-user-plus"></i><span><strong>' + escHtml(studentName) + '</strong> has completed all requirements and has been verified.</span>';
         document.body.appendChild(div);
         cvLayoutTopToasts();
         requestAnimationFrame(function () { div.classList.add('show'); });
