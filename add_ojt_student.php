@@ -123,13 +123,6 @@ function buildOjtEmail(array $o) {
                   </td>
                 </tr>
 
-                <!-- Status Banner -->
-                <tr>
-                  <td style='background:{$statusBg}; border-bottom:2px solid {$statusBorder}; padding:22px 36px; text-align:center;'>
-                    <div style='font-size:17px; font-weight:700; color:{$statusColor};'>" . $h($o['heading'] ?? '') . "</div>
-                  </td>
-                </tr>
-
                 <!-- Message (one whole section) -->
                 <tr>
                   <td style='padding:30px 36px 24px;'>
@@ -362,36 +355,7 @@ function aplAdminRecipients($conn) {
     return $out;
 }
 
-/* A schedule value in plain words for the e-mails: "MWF" -> "Monday, Wednesday and Friday", "None" -> "none". */
-function aplSchedWords($value) {
-    $p = aplParseSched($value);
-    if ($p['none']) return 'none';
-    if (!empty($p['days'])) {
-        $full = ['M' => 'Monday', 'T' => 'Tuesday', 'W' => 'Wednesday', 'Th' => 'Thursday', 'F' => 'Friday'];
-        $names = array_map(fn($a) => $full[$a], $p['days']);
-        if (count($names) === 1) return $names[0];
-        $last = array_pop($names);
-        return implode(', ', $names) . ' and ' . $last;
-    }
-    return $p['legacy'] !== '' ? $p['legacy'] : 'not set';
-}
-/* One flowing sentence describing the change — no captions or "Label:" lines. $who = "your" / "the student's". */
-function aplScheduleChangeSentence($who, $oldDay, $oldEve, $newDay, $newEve) {
-    $h = fn($v) => htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8');
-    $part = function ($kind, $old, $new) use ($who, $h) {
-        if (aplNormalizeSched($old) === aplNormalizeSched($new)) {
-            return $who . " " . $kind . " schedule stays <strong>" . $h(aplSchedWords($new)) . "</strong>";
-        }
-        return $who . " " . $kind . " schedule is now <strong>" . $h(aplSchedWords($new)) . "</strong> (previously " . $h(aplSchedWords($old)) . ")";
-    };
-    return $part('day', $oldDay, $newDay) . ", and " . lcfirst($part('evening', $oldEve, $newEve)) . ".";
-}
-function aplReasonSentence($lead, $reason) {
-    return $lead . " &ldquo;" . nl2br(htmlspecialchars((string)$reason, ENT_QUOTES, 'UTF-8')) . "&rdquo;";
-}
-
-/* Schedule changed — e-mail to the STUDENT (formal, friendly, informative; written as plain sentences, the
-   supervisor's reason included). */
+/* Schedule changed — e-mail to the STUDENT (formal, friendly, informative; the supervisor's reason is attached). */
 function buildScheduleChangedStudentEmail($studentName, $companyName, $oldDay, $oldEve, $newDay, $newEve, $reason, $contractRemoved = true) {
     $h = fn($v) => htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8');
     return buildOjtEmail([
@@ -400,18 +364,20 @@ function buildScheduleChangedStudentEmail($studentName, $companyName, $oldDay, $
         'name'         => $studentName,
         'paragraphs'   => [
             "We hope you are doing well. We would like to let you know that your OJT supervisor at <strong>" . $h($companyName) . "</strong> has set up a new training schedule for you.",
-            "As a result, " . aplScheduleChangeSentence('your', $oldDay, $oldEve, $newDay, $newEve),
-            aplReasonSentence("Your supervisor shared the following reason for the change:", $reason),
+            "<strong style='color:#374151;'>Previous schedule</strong><br>Day: " . $h(aplSchedLabel($oldDay)) . "<br>Evening: " . $h(aplSchedLabel($oldEve)),
+            "<strong style='color:#16a34a;'>New schedule</strong><br>Day: <strong>" . $h(aplSchedLabel($newDay)) . "</strong><br>Evening: <strong>" . $h(aplSchedLabel($newEve)) . "</strong>",
             ($contractRemoved
-                ? "Because your Student/University Contract was prepared with your previous schedule in mind, it has been removed from your requirements. Please prepare a new Student/University Contract that reflects your updated schedule and upload it on the Requirements page of the OJT portal. The administrator will validate it once it has been submitted, and some portal features may stay limited until then."
-                : "Please prepare a Student/University Contract that reflects your updated schedule and upload it on the Requirements page of the OJT portal. The administrator will validate it once it has been submitted, and some portal features may stay limited until then."),
+                ? "Because your Student/University Contract was prepared with your previous schedule in mind, it has been removed from your requirements. Please prepare a new Student/University Contract that reflects your updated schedule and upload it on the <strong>Requirements</strong> page of the OJT portal. The administrator will validate it once it has been submitted, and some portal features may stay limited until then."
+                : "Please prepare a Student/University Contract that reflects your updated schedule and upload it on the <strong>Requirements</strong> page of the OJT portal. The administrator will validate it once it has been submitted, and some portal features may stay limited until then."),
         ],
+        'reason_label' => 'Reason for the change',
+        'reason'       => $reason,
         'note'         => "If anything is unclear, please reach out to your OJT supervisor or the administrator. Thank you for your understanding and cooperation.",
         'signoff'      => ojtEmailSignoff('Warm regards', $companyName),
     ]);
 }
 
-/* Schedule changed — e-mail to the ADMINISTRATOR (plain sentences, no captions). */
+/* Schedule changed — e-mail to the ADMINISTRATOR. */
 function buildScheduleChangedAdminEmail($adminName, $studentName, $course, $companyName, $supervisorName, $oldDay, $oldEve, $newDay, $newEve, $reason, $contractRemoved = true) {
     $h = fn($v) => htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8');
     $who = ($supervisorName !== '' ? "<strong>" . $h($supervisorName) . "</strong> of " : '') . "<strong>" . $h($companyName) . "</strong>";
@@ -421,12 +387,14 @@ function buildScheduleChangedAdminEmail($adminName, $studentName, $course, $comp
         'name'         => $adminName,
         'paragraphs'   => [
             "Good day. This is to inform you that " . $who . " has updated the training schedule of <strong>" . $h($studentName) . "</strong>" . ($course !== '' ? " (" . $h($course) . ")" : '') . ".",
-            "As a result, " . aplScheduleChangeSentence("the student's", $oldDay, $oldEve, $newDay, $newEve),
-            aplReasonSentence("The supervisor gave the following reason for the change:", $reason),
+            "<strong style='color:#374151;'>Previous schedule</strong><br>Day: " . $h(aplSchedLabel($oldDay)) . "<br>Evening: " . $h(aplSchedLabel($oldEve)),
+            "<strong style='color:#16a34a;'>New schedule</strong><br>Day: <strong>" . $h(aplSchedLabel($newDay)) . "</strong><br>Evening: <strong>" . $h(aplSchedLabel($newEve)) . "</strong>",
             ($contractRemoved
-                ? "The student's Student/University Contract (the record and its stored file copies) has been removed and the student has returned to your validation list. The student has been notified by email and asked to upload a new contract that reflects the updated schedule."
+                ? "As a result, the student's Student/University Contract (the record and its stored file copies) has been removed and the student has returned to your validation list. The student has been notified by email and asked to upload a new contract that reflects the updated schedule."
                 : "The student had no Student/University Contract on file at the time, and has returned to your validation list. The student has been notified by email and asked to upload a contract that reflects the updated schedule."),
         ],
+        'reason_label' => 'Reason given by the supervisor',
+        'reason'       => $reason,
         'note'         => "Please review and validate the new Student/University Contract once the student submits it. Thank you.",
         'signoff'      => "Best regards,<br><strong>Atate On the Job Training System</strong>",
     ]);
