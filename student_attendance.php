@@ -2298,7 +2298,7 @@ body {
 }
 
 .hist-duty-block.pm {
-    border-color: #BFE0BF;
+    border-color: var(--grid-border-soft);   /* same frame as the AM block */
 }
 
 .hist-duty-block strong {
@@ -3182,10 +3182,10 @@ body { background: var(--grid-bg); color: #2d3748; font-family: 'Segoe UI', Taho
             <div class="track-steps" id="track-steps">
                 <?php
                 $steps = [
-                    ['am_time_in',  'AM\nIn'],
-                    ['am_time_out', 'AM\nOut'],
-                    ['pm_time_in',  'PM\nIn'],
-                    ['pm_time_out', 'PM\nOut'],
+                    ['am_time_in',  "AM\nIn"],
+                    ['am_time_out', "AM\nOut"],
+                    ['pm_time_in',  "PM\nIn"],
+                    ['pm_time_out', "PM\nOut"],
                 ];
                 $done_flags   = ['am_time_in'=>$am_in_done,'am_time_out'=>$am_out_done,'pm_time_in'=>$pm_in_done,'pm_time_out'=>$pm_out_done];
                 $missed_flags = ['am_time_in'=>$am_in_missed,'am_time_out'=>$am_out_missed,'pm_time_in'=>$pm_in_missed,'pm_time_out'=>$pm_out_missed];
