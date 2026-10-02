@@ -396,7 +396,11 @@ if (isset($_GET['export']) && $_GET['export'] == '1') {
           AND date BETWEEN '$exp_start' AND '$exp_end'
     ");
     $exp_logs = [];
+    $exp_has_entry = []; // real times only (a "missed"-only row is not an entry)
     while ($lr = $log_res->fetch_assoc()) {
+        foreach (['am_time_in','am_time_out','pm_time_in','pm_time_out'] as $c_) {
+            if ($lr[$c_] !== null && $lr[$c_] !== '' && $lr[$c_] !== 'missed') { $exp_has_entry[$lr['user_id']][$lr['date']] = true; break; }
+        }
         $dow = (int)date('w', strtotime($lr['date']));
         $wknd = ($dow === 0 || $dow === 6);
         if ($wknd) {
@@ -440,6 +444,8 @@ if (isset($_GET['export']) && $_GET['export'] == '1') {
                 $row[] = '';
             } elseif (attm_before_start($exp_first, $sid, $d)) {
                 $row[] = ''; // UPDATED: before first attendance — not absent / missed
+            } elseif ($d === date('Y-m-d') && empty($exp_has_entry[$sid][$d])) {
+                $row[] = ''; // today with no attendance entry yet: blank until the day has passed
             } else {
                 $raw = $exp_logs[$sid][$d] ?? 'ABSENT';
                 $row[] = $raw;
@@ -1156,12 +1162,16 @@ try {
 // ── Monthly Summary table logs ───────────────────────────────────────────────
 // Now uses getActiveDutyPeriods() + computeStatusForLog() per day
 $logs = [];
+$logs_has_entry = []; // [student_id][date] => true when the day holds at least one REAL time (a "missed"-only row is not an entry)
 $res = $conn->query("
     SELECT user_id, date, am_time_in, am_time_out, pm_time_in, pm_time_out
     FROM attendance_logs
     WHERE company_id = $company_id AND date BETWEEN '$start' AND '$end'
 ");
 while ($row = $res->fetch_assoc()) {
+    foreach (['am_time_in','am_time_out','pm_time_in','pm_time_out'] as $c_) {
+        if ($row[$c_] !== null && $row[$c_] !== '' && $row[$c_] !== 'missed') { $logs_has_entry[$row['user_id']][$row['date']] = true; break; }
+    }
     $dow  = (int)date('w', strtotime($row['date']));
     $wknd = ($dow === 0 || $dow === 6);
     if ($wknd) {
@@ -2377,6 +2387,8 @@ tr.day-off-row td { background:#ede7f6; color:#512da8; font-style:italic; }
                                     $val = ''; $cls = '';
                                 } elseif (attm_before_start($student_first_attendance, $id, $d)) {
                                     $val = ''; $cls = 'sm-before-start'; // UPDATED: before first attendance — not absent / missed
+                                } elseif ($d === date("Y-m-d") && empty($logs_has_entry[$id][$d])) {
+                                    $val = ''; $cls = ''; // today and no attendance entry yet: stay blank, it becomes Absent once the day has passed
                                 } else {
                                     $raw = $logs[$id][$d] ?? 'ABSENT';
                                     $first = substr($raw, 0, 1);

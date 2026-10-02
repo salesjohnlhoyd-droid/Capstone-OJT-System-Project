@@ -80,7 +80,11 @@ $log_res = $conn->query("
       AND date BETWEEN '$exp_start' AND '$exp_end'
 ");
 $exp_logs = [];
+$exp_has_entry = []; // real times only (a "missed"-only row is not an entry)
 while ($lr = $log_res->fetch_assoc()) {
+    foreach (['am_time_in','am_time_out','pm_time_in','pm_time_out'] as $c_) {
+        if ($lr[$c_] !== null && $lr[$c_] !== '' && $lr[$c_] !== 'missed') { $exp_has_entry[$lr['user_id']][$lr['date']] = true; break; }
+    }
     $dow   = (int)date('w', strtotime($lr['date']));
     $wknd  = ($dow === 0 || $dow === 6);
     $isMissed = fn($v) => ($v === 'missed');
@@ -128,6 +132,8 @@ foreach ($exp_students as $sid => $stu) {
             $row[] = 'OFF';
         } elseif ($d > $today_str) {
             $row[] = '';
+        } elseif ($d === $today_str && empty($exp_has_entry[$sid][$d])) {
+            $row[] = ''; // today with no attendance entry yet: blank until the day has passed
         } else {
             $row[] = $exp_logs[$sid][$d] ?? 'ABSENT';
         }
