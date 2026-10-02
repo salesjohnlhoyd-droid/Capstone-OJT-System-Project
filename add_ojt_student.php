@@ -574,6 +574,35 @@ function endorsementAcceptBlockMessage($conn, $student_id, $company_id) {
     return "Please verify the endorsement letter first (set it to Verified and click Save), then accept the application.";
 }
 
+/* NEW (contract gate): once the student has uploaded the endorsement letter, the application can only be accepted
+   or rejected after the student's Student/University Contract requirement has been VERIFIED by the administrator
+   (the requirements row must hold a file with status 'Verified'). Returns a message while it is still blocked,
+   or null. Applications without an uploaded letter (and legacy ones) are not affected. */
+function studentContractVerified($conn, $student_id) {
+    $q = $conn->prepare("SELECT 1 FROM requirements WHERE user_id = ? AND requirement_type = 'student_contract'
+                         AND status = 'Verified' AND file_name IS NOT NULL AND LENGTH(file_name) > 0 LIMIT 1");
+    $q->bind_param("i", $student_id);
+    $q->execute();
+    $ok = (bool)$q->get_result()->fetch_row();
+    $q->close();
+    return $ok;
+}
+function contractBlockMessage($conn, $student_id, $company_id) {
+    try {
+        $e = getEndorsementRow($conn, $student_id, $company_id);
+        if (!$e || empty($e['has_file'])) return null;          // the rule starts once the letter is uploaded
+        if (studentContractVerified($conn, (int)$student_id)) return null;
+        return "The student's Student/University Contract has not been verified yet. The application can be accepted or rejected once the administrator verifies it.";
+    } catch (\Throwable $e) {
+        error_log('add_ojt_student.php: contract gate check failed: ' . $e->getMessage());
+        return null; // never block on an error of our own
+    }
+}
+// table rows: letter uploaded + contract not verified (needs the contract_verified column from fetchApplicantRows)
+function aplContractBlocked($app) {
+    return !empty($app['endo_has_file']) && (int)($app['contract_verified'] ?? 0) === 0;
+}
+
 function endoStatusMeta($status) {
     switch ($status) {
         case 'Awaiting Upload': return ['awaiting', 'fa-hourglass-half',  'Awaiting Upload'];
@@ -592,7 +621,9 @@ function fetchApplicantRows($conn, $company_id) {
                el.id AS endo_id, el.validation_status AS endo_status, el.validation_remark AS endo_remark,
                el.uploaded_at AS endo_uploaded_at, el.sent_at AS endo_sent_at, el.uploaded_mime AS endo_mime,
                el.uploaded_name AS endo_uploaded_name, el.batch_id AS endo_batch_id,
-               (el.uploaded_file IS NOT NULL) AS endo_has_file
+               (el.uploaded_file IS NOT NULL) AS endo_has_file,
+               (SELECT COUNT(*) FROM requirements rq WHERE rq.user_id = a.student_id AND rq.requirement_type = 'student_contract'
+                   AND rq.status = 'Verified' AND rq.file_name IS NOT NULL AND LENGTH(rq.file_name) > 0) AS contract_verified
         FROM ojt_applications a
         INNER JOIN users u ON u.id = a.student_id
         LEFT JOIN student_information si ON si.user_id = u.id
@@ -623,7 +654,8 @@ function aplGroupBatches(array $rows) {
     $out = [];
     foreach ($groups as $g) {
         usort($g['rows'], fn($a, $b) => (int)$a['id'] <=> (int)$b['id']);
-        foreach ($g['rows'] as $r) { $r['batch_size'] = count($g['rows']); $out[] = $r; }
+        $batchBlocked = (bool)array_filter($g['rows'], 'aplContractBlocked'); // a batch is accepted / rejected as a whole
+        foreach ($g['rows'] as $r) { $r['batch_size'] = count($g['rows']); $r['batch_contract_blocked'] = $batchBlocked; $out[] = $r; }
     }
     return $out;
 }
@@ -633,7 +665,7 @@ function applicantTableSignature($rows) {
     $parts = [];
     foreach ($rows as $r) {
         $parts[] = [(int)$r['id'], $r['endo_id'] ?? null, $r['endo_status'] ?? null, $r['endo_uploaded_at'] ?? null, $r['endo_remark'] ?? null,
-                    $r['day_sched'] ?? null, $r['evening_sched'] ?? null]; // schedule: the table re-renders when it changes
+                    $r['day_sched'] ?? null, $r['evening_sched'] ?? null, (int)($r['contract_verified'] ?? 0)]; // schedule / contract: the table re-renders when they change
     }
     return md5(json_encode($parts));
 }
@@ -722,22 +754,26 @@ function renderApplicantRow($conn, $company_id, $company_name, $app, $currentCou
        (existing reject-with-reason modal). Accept is available once the letter is Verified
        (or for applications from before endorsement letters). */
     // ADJUSTMENT: no Verify step — accept once the student's letter is uploaded (or for older applications).
-    $canAccept = ($status === null || $status === 'Verified' || ($status === 'Pending' && !empty($app['endo_has_file'])));
+    $contractBlocked = aplContractBlocked($app) || !empty($app['batch_contract_blocked']); // NEW (contract gate)
+    $canAccept = ($status === null || $status === 'Verified' || ($status === 'Pending' && !empty($app['endo_has_file']))) && !$contractBlocked;
     // ADJUSTMENT (batches): one Accept / Reject for the whole admin batch — it acts on every member.
     $batchId   = (string)($app['endo_batch_id'] ?? '');
     $isBatch   = ($batchId !== '' && (int)($app['batch_size'] ?? 1) > 1);
     $bidJs     = $h(json_encode($batchId));
     // ADJUSTMENT: icon buttons with tooltips (the tooltip sits on a wrapper so it also shows on the disabled Accept).
-    $acceptTip = $canAccept ? ($isBatch ? 'Accept the whole batch' : 'Accept application') : "Waiting for the student's uploaded endorsement letter"; // ADJUSTMENT
+    $contractTip = "Waiting for the student's Student/University Contract to be verified";
+    $acceptTip = $contractBlocked ? $contractTip : ($canAccept ? ($isBatch ? 'Accept the whole batch' : 'Accept application') : "Waiting for the student's uploaded endorsement letter"); // ADJUSTMENT
+    $rejectTip = $contractBlocked ? $contractTip : ($isBatch ? 'Reject the whole batch' : 'Reject application');
     $applicationCell = '<div class="apl-app-actions">'
         . '<span class="apl-tip" data-tip="' . $h($acceptTip) . '">'
         .   '<button type="button" class="endo-btn verify apl-icon-btn" aria-label="' . $h($acceptTip) . '"' . ($canAccept ? ' onclick="' . ($isBatch ? 'acceptBatch(' . $bidJs . ', this)' : 'acceptApp(' . $id . ', this)') . '"' : ' disabled') . '><i class="fas fa-check"></i></button>'
         . '</span>'
-        . '<span class="apl-tip" data-tip="' . ($isBatch ? 'Reject the whole batch' : 'Reject application') . '">'
-        .   '<button type="button" class="endo-btn reject apl-icon-btn" aria-label="' . ($isBatch ? 'Reject the whole batch' : 'Reject application') . '" onclick="' . ($isBatch ? 'rejectBatch(' . $bidJs . ')' : 'openRejectModal(' . $id . ')') . '"><i class="fas fa-times"></i></button>'
+        . '<span class="apl-tip" data-tip="' . $h($rejectTip) . '">'
+        .   '<button type="button" class="endo-btn reject apl-icon-btn" aria-label="' . $h($rejectTip) . '"' . ($contractBlocked ? ' disabled' : ' onclick="' . ($isBatch ? 'rejectBatch(' . $bidJs . ')' : 'openRejectModal(' . $id . ')') . '"') . '><i class="fas fa-times"></i></button>'
         . '</span>'
         . '</div>'
-        . ($canAccept ? '' : '<div class="endo-note">Waiting for the uploaded letter.</div>'); // ADJUSTMENT
+        . ($contractBlocked ? '<div class="endo-note">Waiting for the Student/University Contract to be verified.</div>'
+            : ($canAccept ? '' : '<div class="endo-note">Waiting for the uploaded letter.</div>')); // ADJUSTMENT
 
     /* NEW (schedule change): the student's Day / Evening Schedule from AccomForm.php + an Edit button */
     $dayRaw   = trim((string)($app['day_sched'] ?? ''));
@@ -1411,6 +1447,14 @@ if (isset($_POST['accept_app'])) {
             echo json_encode($ajax_response);
             exit;
         }
+        $contractBlockMsg = contractBlockMessage($conn, $student_id, $company_id); // NEW (contract gate)
+        if ($contractBlockMsg !== null) {
+            $ajax_response['message'] = $contractBlockMsg;
+            $ajax_response['blocked'] = true;
+            header('Content-Type: application/json');
+            echo json_encode($ajax_response);
+            exit;
+        }
         $endoRowForAccept = getEndorsementRow($conn, $student_id, $company_id);
 
         $chk = $conn->prepare("SELECT id FROM ojt_assignments WHERE student_id=?");
@@ -1514,7 +1558,10 @@ if (isset($_POST['reject_app'])) {
     $srow = $stmt->get_result()->fetch_assoc();
     $stmt->close();
 
-    if ($srow) {
+    if ($srow && ($contractBlockMsg = contractBlockMessage($conn, (int)$srow['student_id'], $company_id)) !== null) { // NEW (contract gate)
+        $ajax_response['message'] = $contractBlockMsg;
+        $ajax_response['blocked'] = true;
+    } elseif ($srow) {
         // UPDATED (this adjustment): administrator.php email design, no emoji
         $body = buildOjtEmail([
             'theme'        => 'danger',
@@ -3350,7 +3397,15 @@ document.getElementById('rejectForm').addEventListener('submit', function(e) {
     const _rejLoad = endoShowLoading('Rejecting application'); // loading page
     fetch('add_ojt_student.php', { method: 'POST', body: fd })
         .then(r => r.text())
-        .then(() => {
+        .then((rawText) => {
+            var rj = null; try { rj = JSON.parse(rawText); } catch (e) {}
+            if (rj && rj.blocked) { // NEW (contract gate): the server refused — nothing was rejected
+                btn.disabled = false;
+                btn.innerHTML = '<i class="fas fa-paper-plane"></i> Send &amp; Reject';
+                showToast(rj.message || 'This application cannot be rejected yet.', 'error');
+                refreshApplicantTable();
+                return;
+            }
             closeRejectModal();
             const card = document.getElementById('appCard' + appId);
             if (card) {
@@ -4916,7 +4971,15 @@ document.addEventListener('submit', function (e) {
     endoShowLoading('Rejecting the batch');
     aplForEachApp(apps, function (app) {
         var fd = new FormData(); fd.append('reject_app', '1'); fd.append('reject_app_id', String(app.id)); fd.append('reject_reason', reason); return fd;
-    }).then(function () { aplReloadWithToast('All ' + apps.length + ' students in the batch were rejected and notified.', 'error'); });
+    }).then(function (results) {
+        var blocked = results.filter(function (r) { return r.res && r.res.blocked; });
+        if (blocked.length) { // NEW (contract gate): the server refused some members
+            aplReloadWithToast((apps.length - blocked.length) + ' of ' + apps.length + ' students in the batch were rejected and notified. Not rejected: ' +
+                blocked.map(function (r) { return r.app.name; }).join(', ') + " (the Student/University Contract is not verified yet).", 'error');
+        } else {
+            aplReloadWithToast('All ' + apps.length + ' students in the batch were rejected and notified.', 'error');
+        }
+    });
 }, true);
 (function () {                                   // leaving batch mode when the modal closes
     var origClose = closeRejectModal;
