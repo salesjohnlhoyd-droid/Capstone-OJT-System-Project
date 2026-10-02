@@ -2860,7 +2860,12 @@ body { background: var(--grid-bg); color: #2d3748; font-family: 'Segoe UI', Taho
     margin: 0; padding: 7px 10px; font-size: 13px; font-weight: 700; color: var(--grid-red);
     background: #F3F5F9; border: 1px solid var(--grid-border); border-radius: 0; min-height: 34px; box-sizing: border-box;
 }
-#lateReqBox .lr-window-warn { margin: 0; padding: 7px 10px; min-height: 34px; box-sizing: border-box; font-size: 12px; align-items: center; flex-wrap: wrap; column-gap: 4px; }
+/* The notice is one icon + one flowing paragraph (it used to be loose text nodes in a flex row,
+   which broke the sentence into cramped lines). JS still toggles display flex/none on this box. */
+#lateReqBox .lr-window-warn { margin: 0; padding: 10px 12px; min-height: 34px; box-sizing: border-box; font-size: 12px; line-height: 1.55; align-items: flex-start; gap: 8px; }
+#lateReqBox .lr-window-warn .lr-warn-icon { flex-shrink: 0; margin-top: 2px; font-size: 13px; color: var(--grid-amber); }
+#lateReqBox .lr-window-warn .lr-warn-text { min-width: 0; flex: 1 1 auto; }
+#lateReqBox .lr-window-warn strong { white-space: nowrap; }
 /* Enlarged camera: two of the three columns (the reason box takes the third and matches its height).
    Height is capped by the window so the popup stays on screen; the video simply crops to fit. */
 #lateReqBox .lr-camera-wrap { aspect-ratio: 4 / 3; max-height: max(220px, calc(100vh - 340px)); width: 100%; margin-bottom: 0; border: 1px solid var(--grid-border); }
@@ -2946,7 +2951,8 @@ body { background: var(--grid-bg); color: #2d3748; font-family: 'Segoe UI', Taho
                 <div class="lr-group lr-deadline-group">
                     <div class="lr-type-label">Deadline</div>
                     <div class="lr-window-warn" id="lr-window-warn" style="display:none;">
-                         Submit before <strong id="lr-deadline-time">—</strong> — after that this entry is permanently missed.
+                        <i class="fas fa-clock lr-warn-icon" aria-hidden="true"></i>
+                        <span class="lr-warn-text">Submit before <strong id="lr-deadline-time">—</strong> — after that this entry is permanently missed.</span>
                     </div>
                 </div>
                 <div class="lr-group lr-span-2 lr-photo-group">
