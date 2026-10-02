@@ -328,9 +328,12 @@ if (!function_exists('attm_before_start')) {
    schedule (Day / Evening Schedule set on AccomForm.php and changed by the
    company supervisor on add_ojt_student.php; stored in student_information
    as Mon–Fri acronyms such as "MWF", "TTh" or "None").
-   A weekday the student is NOT scheduled on, with no real attendance entry,
-   is never counted as Absent / Missed / Incomplete — it is shown as
-   "Not scheduled" instead. A day with a real entry is always judged normally.
+   Day Schedule = AM duty days, Evening Schedule = PM duty days. A student with
+   only a Day schedule reports (and is judged) on the AM duty only; with only an
+   Evening schedule, on the PM duty only; with both, on both.
+   A weekday with neither duty scheduled and no real attendance entry is never
+   counted as Absent / Missed / Incomplete — it is shown as "Not scheduled".
+   A duty period that holds a real entry is always judged, scheduled or not.
    Schedule changes are dated (student_schedule_changes), so past days keep the
    schedule that was in force back then. A student whose schedule is empty or
    unreadable is treated as scheduled every weekday (nothing changes for them).
@@ -355,16 +358,16 @@ if (!function_exists('attsch_parse_days')) {
     }
 }
 if (!function_exists('attsch_days')) {
-    // Day + Evening schedule combined; null = no usable schedule (scheduled every weekday)
+    // Day (AM duty) / Evening (PM duty) schedule -> ['d' => AM days, 'e' => PM days]; null = no usable schedule (both duties every weekday)
     function attsch_days($day, $evening): ?array {
-        $all = array_values(array_unique(array_merge(attsch_parse_days($day), attsch_parse_days($evening))));
-        if (empty($all)) return null;
-        sort($all);
-        return $all;
+        $d = attsch_parse_days($day);
+        $e = attsch_parse_days($evening);
+        if (empty($d) && empty($e)) return null;
+        return ['d' => $d, 'e' => $e];
     }
 }
 if (!function_exists('attsch_load')) {
-    // [student_id => ['cur' => days|null, 'changes' => [['d' => 'Y-m-d', 'old' => days|null], ...oldest first]]]
+    // [student_id => ['cur' => ['d'=>…,'e'=>…]|null, 'changes' => [['d' => 'Y-m-d', 'old' => same|null], ...oldest first]]]
     function attsch_load($conn, array $ids): array {
         static $cache = [];
         $ids = array_values(array_unique(array_filter(array_map('intval', $ids))));
@@ -393,17 +396,25 @@ if (!function_exists('attsch_load')) {
         return $cache[$key] = $map;
     }
 }
-if (!function_exists('attsch_is_scheduled')) {
-    // true when the student is scheduled to report on $day (weekdays only; unknown student = scheduled)
-    function attsch_is_scheduled(array $map, $studentId, string $day): bool {
+if (!function_exists('attsch_periods')) {
+    // which duty periods the student is scheduled for on $day: ['am' => bool, 'pm' => bool] (unknown student = both)
+    function attsch_periods(array $map, $studentId, string $day): array {
         $s = $map[(int)$studentId] ?? null;
-        if ($s === null) return true;
-        $days = $s['cur'];
+        if ($s === null) return ['am' => true, 'pm' => true];
+        $sc = $s['cur'];
         foreach ($s['changes'] as $c) {            // a change applies from its own date onward
-            if ($c['d'] > $day) { $days = $c['old']; break; }
+            if ($c['d'] > $day) { $sc = $c['old']; break; }
         }
-        if ($days === null) return true;
-        return in_array((int)date('w', strtotime($day)), $days, true);
+        if ($sc === null) return ['am' => true, 'pm' => true];
+        $dow = (int)date('w', strtotime($day));
+        return ['am' => in_array($dow, $sc['d'], true), 'pm' => in_array($dow, $sc['e'], true)];
+    }
+}
+if (!function_exists('attsch_is_scheduled')) {
+    // true when the student is scheduled for at least one duty period on $day
+    function attsch_is_scheduled(array $map, $studentId, string $day): bool {
+        $p = attsch_periods($map, $studentId, $day);
+        return $p['am'] || $p['pm'];
     }
 }
 if (!function_exists('attsch_has_real_entry')) {
@@ -417,8 +428,20 @@ if (!function_exists('attsch_has_real_entry')) {
         return false;
     }
 }
+if (!function_exists('attsch_limit_duty')) {
+    // narrows the day's active duty periods (['am' => bool, 'pm' => bool]) to the ones the student is scheduled for;
+    // a period that holds a real entry stays active so recorded attendance is never ignored
+    function attsch_limit_duty(array $duty, array $periods, $row): array {
+        $hv = fn($v) => ($v !== null && $v !== '' && $v !== 'missed');
+        $realAm = is_array($row) && ($hv($row['am_time_in'] ?? null) || $hv($row['am_time_out'] ?? null));
+        $realPm = is_array($row) && ($hv($row['pm_time_in'] ?? null) || $hv($row['pm_time_out'] ?? null));
+        $duty['am'] = !empty($duty['am']) && ($periods['am'] || $realAm);
+        $duty['pm'] = !empty($duty['pm']) && ($periods['pm'] || $realPm);
+        return $duty;
+    }
+}
 if (!function_exists('attsch_js_map')) {
-    // compact form for the page script: {id: {c: days|null, h: [[date, days|null], ...]}}
+    // compact form for the page script: {id: {c: {d: AM days, e: PM days}|null, h: [[date, {d,e}|null], ...]}}
     function attsch_js_map(array $map): object {
         $o = [];
         foreach ($map as $id => $s) {
@@ -517,6 +540,7 @@ if (isset($_GET['export']) && $_GET['export'] == '1') {
             $st = 'DAY OFF';
         } else {
             $duty = getActiveDutyPeriods($lr['date'], $all_settings_map);
+            $duty = attsch_limit_duty($duty, attsch_periods($exp_sched, $lr['user_id'], $lr['date']), $lr); // NEW (student schedule): Day = AM duty, Evening = PM duty
             $st   = computeStatusForLog($lr, $duty['am'], $duty['pm']);
         }
         $exp_logs[$lr['user_id']][$lr['date']] = $st;
@@ -1070,9 +1094,10 @@ if ($today_dow === 0 || $today_dow === 6) {
     // NEW (student schedule): a student who is not scheduled today and has no real entry is neither Absent nor Incomplete
     $ts_sched = attsch_load($conn, $ts_all_ids);
     $ts_real_today = [];
+    $ts_rows_today = [];
     try {
         $ts_nr = $conn->query("SELECT user_id, am_time_in, am_time_out, pm_time_in, pm_time_out FROM attendance_logs WHERE company_id=$company_id AND date='$today_str'");
-        if ($ts_nr) { while ($tn = $ts_nr->fetch_assoc()) { if (attsch_has_real_entry($tn)) $ts_real_today[(int)$tn['user_id']] = true; } }
+        if ($ts_nr) { while ($tn = $ts_nr->fetch_assoc()) { $ts_rows_today[(int)$tn['user_id']] = $tn; if (attsch_has_real_entry($tn)) $ts_real_today[(int)$tn['user_id']] = true; } }
     } catch (\Throwable $e) {}
     $ts_not_sched_count = 0;
     $ts_started = array_values(array_filter($ts_started, function($sid) use ($ts_sched, $ts_real_today, $today_str, &$ts_not_sched_count) {
@@ -1080,7 +1105,18 @@ if ($today_dow === 0 || $today_dow === 6) {
         $ts_not_sched_count++;
         return false;
     }));
-    $ts_started_sql = !empty($ts_started) ? implode(',', $ts_started) : '0';
+    // NEW (student schedule): a student scheduled for only ONE duty (Day = AM only, Evening = PM only) is judged on that duty
+    // alone — counted here in PHP with the same rules as the Monthly Attendance Summary; everyone else uses the query below.
+    $ts_part = ['present' => 0, 'incomplete' => 0, 'absent' => 0];
+    $ts_full = [];
+    foreach ($ts_started as $ts_sid) {
+        $ts_per = attsch_periods($ts_sched, $ts_sid, $today_str);
+        if ($ts_per['am'] && $ts_per['pm']) { $ts_full[] = $ts_sid; continue; }
+        $ts_duty = attsch_limit_duty(getActiveDutyPeriods($today_str, $all_settings_map), $ts_per, $ts_rows_today[$ts_sid] ?? null);
+        $ts_st   = computeStatusForLog($ts_rows_today[$ts_sid] ?? [], $ts_duty['am'], $ts_duty['pm']);
+        if ($ts_st === 'PRESENT') $ts_part['present']++; elseif ($ts_st === 'INCOMPLETE') $ts_part['incomplete']++; else $ts_part['absent']++;
+    }
+    $ts_started_sql = !empty($ts_full) ? implode(',', $ts_full) : '0';
     $ts_res = $conn->query("
         SELECT
             SUM(CASE WHEN
@@ -1107,6 +1143,7 @@ if ($today_dow === 0 || $today_dow === 6) {
         $incomplete = max(0, $partial - $present);
         $total      = (int)($ts_row['total_count'] ?? 0);
         $absent     = max(0, $total - $present - $incomplete);
+        $present += $ts_part['present']; $incomplete += $ts_part['incomplete']; $absent += $ts_part['absent']; // NEW (student schedule)
         $total      = count($ts_all_ids); // UPDATED: header still shows every assigned student
         $today_stats = [
             'present'    => $present,
@@ -1320,6 +1357,7 @@ while ($row = $res->fetch_assoc()) {
         $status = "DAY OFF";
     } else {
         $duty   = getActiveDutyPeriods($row['date'], $all_settings_map);
+        $duty   = attsch_limit_duty($duty, attsch_periods($student_sched, $row['user_id'], $row['date']), $row); // NEW (student schedule): Day = AM duty, Evening = PM duty
         $status = computeStatusForLog($row, $duty['am'], $duty['pm']);
     }
     $logs[$row['user_id']][$row['date']] = $status;
@@ -1379,7 +1417,8 @@ foreach ($all_chart_months as $ym) {
             if (!attsch_has_real_entry($all_logs[$sid][$day_str] ?? null) && !attsch_is_scheduled($student_sched, $sid, $day_str)) continue;
             if (isset($all_logs[$sid][$day_str])) {
                 $lr2    = $all_logs[$sid][$day_str];
-                $status = computeStatusForLog($lr2, $duty['am'], $duty['pm']);
+                $duty_s = attsch_limit_duty($duty, attsch_periods($student_sched, $sid, $day_str), $lr2); // NEW (student schedule)
+                $status = computeStatusForLog($lr2, $duty_s['am'], $duty_s['pm']);
                 if      ($status === 'PRESENT')    $p++;
                 elseif  ($status === 'INCOMPLETE')  $inc++;
                 else                                $a++;
@@ -2560,8 +2599,14 @@ tr.day-off-row td { background:#ede7f6; color:#512da8; font-style:italic; }
                                     $mark_html .= '<i class="fas fa-stop-circle sm-mark sm-mark-end' . ($is_est ? ' sm-mark-est' : '') . '" title="OJT End' . ($is_est ? ' (estimated)' : '') . ': ' . date('M j, Y', strtotime($d)) . '"></i>';
                                 }
                                 $td_cls = trim($cls . ($mark_html !== '' ? ' sm-has-mark' : ''));
+                                // NEW (student schedule): hint when the student is scheduled for only one duty that day
+                                $td_title = '';
+                                if (!$is_wkd && $val !== 'N') {
+                                    $per_t = attsch_periods($student_sched, $id, $d);
+                                    if ($per_t['am'] xor $per_t['pm']) $td_title = $per_t['am'] ? 'Scheduled: Day (AM duty) only' : 'Scheduled: Evening (PM duty) only';
+                                }
                             ?>
-                            <td class="<?= $td_cls ?>"><?= $mark_html ?><?= $val ?></td>
+                            <td class="<?= $td_cls ?>"<?= $td_title !== '' ? ' title="' . htmlspecialchars($td_title) . '"' : '' ?>><?= $mark_html ?><?= $val ?></td>
                             <?php endforeach; ?>
                         </tr>
                         <?php endforeach; ?>
@@ -3897,19 +3942,37 @@ const _firstAttendanceByName = <?php
     }
     echo json_encode((object)$fa_by_name);
 ?>;
-/* NEW (student schedule): each student's training days (0=Sun…6=Sat numbers, null = every weekday) and dated schedule
-   changes, so the Attendance Log never shows ABSENT / INCOMPLETE on a day the student is not scheduled and has no entry. */
+/* NEW (student schedule): each student's Day (AM duty) / Evening (PM duty) training days (0=Sun…6=Sat numbers, null = both
+   duties every weekday) and dated schedule changes, so the Attendance Log judges a student only on the duties they are scheduled for. */
 const _schedById = <?= json_encode(attsch_js_map($student_sched)) ?>;
-function isNotScheduled(row, dateStr){
+function schedPeriods(row, dateStr){
+    const both = {am:true, pm:true};
     const id = row.student_id ?? row.user_id ?? row.id;
-    if (id === undefined || id === null || !Object.prototype.hasOwnProperty.call(_schedById, String(id))) return false; // unknown student: keep server status
+    if (id === undefined || id === null || !Object.prototype.hasOwnProperty.call(_schedById, String(id))) return both; // unknown student: keep server status
     const s = _schedById[String(id)];
-    let days = s.c;
-    for (const h of (s.h || [])) { if (h[0] > dateStr) { days = h[1]; break; } }
-    if (days === null || days === undefined) return false;
+    let sc = s.c;
+    for (const h of (s.h || [])) { if (h[0] > dateStr) { sc = h[1]; break; } }
+    if (sc === null || sc === undefined) return both;
     const dow = new Date(dateStr + 'T00:00:00').getDay();
-    if (days.indexOf(dow) !== -1) return false;
-    return !['am_time_in','am_time_out','pm_time_in','pm_time_out'].some(k => attHasReal(row[k]));
+    return {am: (sc.d||[]).indexOf(dow) !== -1, pm: (sc.e||[]).indexOf(dow) !== -1};
+}
+/* Day schedule = AM duty, Evening schedule = PM duty. Returns the corrected status (or null = keep the server's):
+   NOT SCHEDULED when neither duty is scheduled and nothing was recorded; otherwise the status is re-judged on the
+   duty periods the student is scheduled for (a period holding a real entry always counts). */
+function schedStatus(row, dateStr){
+    const sp = schedPeriods(row, dateStr);
+    if (sp.am && sp.pm) return null;
+    const realAm = attHasReal(row.am_time_in) || attHasReal(row.am_time_out);
+    const realPm = attHasReal(row.pm_time_in) || attHasReal(row.pm_time_out);
+    if (!sp.am && !sp.pm && !realAm && !realPm) return 'NOT SCHEDULED';
+    const cols = [];
+    if (sp.am || realAm) cols.push(row.am_time_in, row.am_time_out);
+    if (sp.pm || realPm) cols.push(row.pm_time_in, row.pm_time_out);
+    const isMissed = v => String(v||'').trim().toLowerCase() === 'missed';
+    const anyReal = cols.some(attHasReal), allReal = cols.every(attHasReal), anyMissed = cols.some(isMissed);
+    if (!anyReal && !anyMissed) return 'ABSENT';
+    if (allReal && !anyMissed) return 'PRESENT';
+    return 'INCOMPLETE';
 }
 function attHasReal(v){ if (v === null || v === undefined) return false; const t = String(v).trim().toLowerCase(); return t !== '' && t !== '-' && t !== 'missed'; } // the log popup shows '-' for empty and 'MISSED' for missed
 function isBeforeFirstAttendance(row, dateStr){
@@ -4042,8 +4105,10 @@ function renderAttPage(){
             r = Object.assign({}, r, {status:'NOT STARTED', am_time_in:null, am_time_out:null, pm_time_in:null, pm_time_out:null});
         }
         // NEW (student schedule): not a duty day for this student and nothing recorded → NOT SCHEDULED, never ABSENT
-        if(!_attIsWeekend && _attData && _attData.date && (r.status==='ABSENT'||r.status==='INCOMPLETE') && isNotScheduled(r,_attData.date)){
-            r = Object.assign({}, r, {status:'NOT SCHEDULED', am_time_in:null, am_time_out:null, pm_time_in:null, pm_time_out:null});
+        if(!_attIsWeekend && _attData && _attData.date && (r.status==='ABSENT'||r.status==='INCOMPLETE'||r.status==='PRESENT')){
+            const ss = schedStatus(r,_attData.date);
+            if (ss === 'NOT SCHEDULED') r = Object.assign({}, r, {status:'NOT SCHEDULED', am_time_in:null, am_time_out:null, pm_time_in:null, pm_time_out:null});
+            else if (ss) r = Object.assign({}, r, {status:ss});
         }
         const rowNum=start+i+1,cls=(r.status==='NOT STARTED'?'pending':(r.status==='NOT SCHEDULED'?'nosched':(statusClass[r.status]||'')));
         if(_attIsWeekend){return`<tr class="day-off-row"><td style="padding:8px 6px;text-align:center;color:#aaa;font-size:11px;">${rowNum}</td><td style="padding:8px 10px;">${escH(r.name)}</td><td class="day-off" style="text-align:center;">DAY OFF</td></tr>`;}

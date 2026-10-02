@@ -75,6 +75,17 @@ function getSettings($conn, $company_id, $date) {
         $stmt->execute();
         $s = $stmt->get_result()->fetch_assoc();
     }
+    // NEW (student schedule): Day schedule = AM duty, Evening schedule = PM duty. A duty the signed-in student is not
+    // scheduled for on that date is treated exactly like a duty the company skips (all four of its time fields empty),
+    // so the sign-in steps, missed marking and late requests all follow the student's own schedule.
+    global $user_id;
+    if ($s && !empty($user_id)) {
+        try {
+            $per = attsch_periods(attsch_load($conn, [(int)$user_id]), $user_id, $date);
+            if (!$per['am']) foreach (['am_time_in_start','am_time_in_end','am_time_out_start','am_time_out_end'] as $k) $s[$k] = null;
+            if (!$per['pm']) foreach (['pm_time_in_start','pm_time_in_end','pm_time_out_start','pm_time_out_end'] as $k) $s[$k] = null;
+        } catch (\Throwable $e) {}
+    }
     return $s;
 }
 
@@ -169,9 +180,12 @@ function ensureLateRequestTypeColumn($conn) {
    schedule (Day / Evening Schedule set on AccomForm.php and changed by the
    company supervisor on add_ojt_student.php; stored in student_information
    as Mon–Fri acronyms such as "MWF", "TTh" or "None").
-   A weekday the student is NOT scheduled on, with no real attendance entry,
-   is never counted as Absent / Missed / Incomplete — it is shown as
-   "Not scheduled" instead. A day with a real entry is always judged normally.
+   Day Schedule = AM duty days, Evening Schedule = PM duty days. A student with
+   only a Day schedule reports (and is judged) on the AM duty only; with only an
+   Evening schedule, on the PM duty only; with both, on both.
+   A weekday with neither duty scheduled and no real attendance entry is never
+   counted as Absent / Missed / Incomplete — it is shown as "Not scheduled".
+   A duty period that holds a real entry is always judged, scheduled or not.
    Schedule changes are dated (student_schedule_changes), so past days keep the
    schedule that was in force back then. A student whose schedule is empty or
    unreadable is treated as scheduled every weekday (nothing changes for them).
@@ -196,16 +210,16 @@ if (!function_exists('attsch_parse_days')) {
     }
 }
 if (!function_exists('attsch_days')) {
-    // Day + Evening schedule combined; null = no usable schedule (scheduled every weekday)
+    // Day (AM duty) / Evening (PM duty) schedule -> ['d' => AM days, 'e' => PM days]; null = no usable schedule (both duties every weekday)
     function attsch_days($day, $evening): ?array {
-        $all = array_values(array_unique(array_merge(attsch_parse_days($day), attsch_parse_days($evening))));
-        if (empty($all)) return null;
-        sort($all);
-        return $all;
+        $d = attsch_parse_days($day);
+        $e = attsch_parse_days($evening);
+        if (empty($d) && empty($e)) return null;
+        return ['d' => $d, 'e' => $e];
     }
 }
 if (!function_exists('attsch_load')) {
-    // [student_id => ['cur' => days|null, 'changes' => [['d' => 'Y-m-d', 'old' => days|null], ...oldest first]]]
+    // [student_id => ['cur' => ['d'=>…,'e'=>…]|null, 'changes' => [['d' => 'Y-m-d', 'old' => same|null], ...oldest first]]]
     function attsch_load($conn, array $ids): array {
         static $cache = [];
         $ids = array_values(array_unique(array_filter(array_map('intval', $ids))));
@@ -234,17 +248,25 @@ if (!function_exists('attsch_load')) {
         return $cache[$key] = $map;
     }
 }
-if (!function_exists('attsch_is_scheduled')) {
-    // true when the student is scheduled to report on $day (weekdays only; unknown student = scheduled)
-    function attsch_is_scheduled(array $map, $studentId, string $day): bool {
+if (!function_exists('attsch_periods')) {
+    // which duty periods the student is scheduled for on $day: ['am' => bool, 'pm' => bool] (unknown student = both)
+    function attsch_periods(array $map, $studentId, string $day): array {
         $s = $map[(int)$studentId] ?? null;
-        if ($s === null) return true;
-        $days = $s['cur'];
+        if ($s === null) return ['am' => true, 'pm' => true];
+        $sc = $s['cur'];
         foreach ($s['changes'] as $c) {            // a change applies from its own date onward
-            if ($c['d'] > $day) { $days = $c['old']; break; }
+            if ($c['d'] > $day) { $sc = $c['old']; break; }
         }
-        if ($days === null) return true;
-        return in_array((int)date('w', strtotime($day)), $days, true);
+        if ($sc === null) return ['am' => true, 'pm' => true];
+        $dow = (int)date('w', strtotime($day));
+        return ['am' => in_array($dow, $sc['d'], true), 'pm' => in_array($dow, $sc['e'], true)];
+    }
+}
+if (!function_exists('attsch_is_scheduled')) {
+    // true when the student is scheduled for at least one duty period on $day
+    function attsch_is_scheduled(array $map, $studentId, string $day): bool {
+        $p = attsch_periods($map, $studentId, $day);
+        return $p['am'] || $p['pm'];
     }
 }
 if (!function_exists('attsch_has_real_entry')) {
@@ -258,8 +280,20 @@ if (!function_exists('attsch_has_real_entry')) {
         return false;
     }
 }
+if (!function_exists('attsch_limit_duty')) {
+    // narrows the day's active duty periods (['am' => bool, 'pm' => bool]) to the ones the student is scheduled for;
+    // a period that holds a real entry stays active so recorded attendance is never ignored
+    function attsch_limit_duty(array $duty, array $periods, $row): array {
+        $hv = fn($v) => ($v !== null && $v !== '' && $v !== 'missed');
+        $realAm = is_array($row) && ($hv($row['am_time_in'] ?? null) || $hv($row['am_time_out'] ?? null));
+        $realPm = is_array($row) && ($hv($row['pm_time_in'] ?? null) || $hv($row['pm_time_out'] ?? null));
+        $duty['am'] = !empty($duty['am']) && ($periods['am'] || $realAm);
+        $duty['pm'] = !empty($duty['pm']) && ($periods['pm'] || $realPm);
+        return $duty;
+    }
+}
 if (!function_exists('attsch_js_map')) {
-    // compact form for the page script: {id: {c: days|null, h: [[date, days|null], ...]}}
+    // compact form for the page script: {id: {c: {d: AM days, e: PM days}|null, h: [[date, {d,e}|null], ...]}}
     function attsch_js_map(array $map): object {
         $o = [];
         foreach ($map as $id => $s) {
@@ -442,6 +476,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET' && isset($_GET['action']) && $_GET['act
     $res->execute();
     $rows = $res->get_result()->fetch_all(MYSQLI_ASSOC);
     $log_map = [];
+    $sched_map = attsch_load($conn, [(int)$user_id]); // NEW (student schedule)
     foreach ($rows as $row) {
         $amIn  = $row['am_time_in'];
         $amOut = $row['am_time_out'];
@@ -455,7 +490,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET' && isset($_GET['action']) && $_GET['act
         $anyIn  = $hasVal($amIn) || $hasVal($pmIn);
         $anyMissed = $isMissed($amIn) || $isMissed($amOut) || $isMissed($pmIn) || $isMissed($pmOut);
 
-        if ($amDone && $pmDone)   $status = 'P';
+        // NEW (student schedule): judged on the duty periods scheduled that day (Day = AM, Evening = PM)
+        $per    = attsch_periods($sched_map, $user_id, $row['date']);
+        $needAm = $per['am'] || $hasVal($amIn) || $hasVal($amOut);
+        $needPm = $per['pm'] || $hasVal($pmIn) || $hasVal($pmOut);
+        if (!$needAm && !$needPm) { $needAm = $needPm = true; }
+        if ((!$needAm || $amDone) && (!$needPm || $pmDone) && ($needAm || $needPm)) $status = 'P';
         elseif ($anyIn)           $status = 'I';
         elseif ($anyMissed)       $status = 'A';
         else                      $status = 'A';
@@ -471,7 +511,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET' && isset($_GET['action']) && $_GET['act
         ];
     }
     $days = [];
-    $sched_map = attsch_load($conn, [(int)$user_id]); // NEW (student schedule)
     $d = strtotime($start);
     while ($d <= strtotime($end)) {
         $day_str = date("Y-m-d", $d);
@@ -810,11 +849,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['action']) && $_POST['
 
     // Block late requests for skipped duty periods
     if (in_array($type, ['am_time_in','am_time_out']) && isAmSkipped($setting)) {
-        echo json_encode(['success' => false, 'message' => 'AM duty is not required for your company.']);
+        echo json_encode(['success' => false, 'message' => 'AM duty is not required for your company or schedule.']);
         exit;
     }
     if (in_array($type, ['pm_time_in','pm_time_out']) && isPmSkipped($setting)) {
-        echo json_encode(['success' => false, 'message' => 'PM duty is not required for your company.']);
+        echo json_encode(['success' => false, 'message' => 'PM duty is not required for your company or schedule.']);
         exit;
     }
 
@@ -1159,6 +1198,14 @@ $active_step = get_active_step(
     $pm_skipped
 );
 if ($is_weekend) $active_step = 'weekend';
+
+// NEW (student schedule): today is not a duty day for this student (neither Day nor Evening schedule) and nothing was recorded
+$sched_today      = attsch_periods(attsch_load($conn, [(int)$user_id]), $user_id, $date);
+$not_sched_today  = !$is_weekend && !$sched_today['am'] && !$sched_today['pm'] && !attsch_has_real_entry($attendance ?? null);
+$sched_note_today = '';
+if (!$is_weekend && !$not_sched_today && ($sched_today['am'] xor $sched_today['pm'])) {
+    $sched_note_today = $sched_today['am'] ? 'Today you are scheduled for the Day (AM) duty only.' : 'Today you are scheduled for the Evening (PM) duty only.';
+}
 
 // ================= SIDEBAR ATTENDANCE BADGE =================
 function getAttendanceBadgeInfo($todaySettings, $attendance, $current_time, $is_weekend, $am_skipped = false, $pm_skipped = false) {
@@ -3304,11 +3351,22 @@ body { background: var(--grid-bg); color: #2d3748; font-family: 'Segoe UI', Taho
             <div class="camera-date-badge" id="cam-badge"><?= date("Y-m-d") ?></div>
         </div>
 
+        <?php if ($sched_note_today !== ''): ?>
+        <div style="margin:0 0 10px;padding:9px 12px;border:1px solid #D5CCE8;background:#F4F1FA;color:#1B2A4A;font-size:12px;font-weight:600;"><i class="fas fa-calendar-check" style="margin-right:6px;"></i><?= htmlspecialchars($sched_note_today) ?></div>
+        <?php endif; ?>
+
         <?php if ($is_weekend): ?>
         <div class="weekend-banner">
             <span class="wb-icon"><i class="fas fa-umbrella-beach"></i></span>
             <h3>Today is <?= $weekend_name ?> — Day Off!</h3>
             <p>No attendance entry required on weekends.</p>
+        </div>
+
+        <?php elseif ($not_sched_today): ?>
+        <div class="weekend-banner">
+            <span class="wb-icon"><i class="fas fa-calendar-xmark"></i></span>
+            <h3>You're not scheduled today</h3>
+            <p>No attendance entry is required today based on your training schedule.</p>
         </div>
 
         <?php elseif ($active_step === 'done'): ?>
@@ -3381,13 +3439,13 @@ body { background: var(--grid-bg); color: #2d3748; font-family: 'Segoe UI', Taho
         <?php endif; ?>
 
         <!-- Skipped duty notices (informational) -->
-        <?php if (!$is_weekend && $todaySettings): ?>
+        <?php if (!$is_weekend && $todaySettings && !$not_sched_today): ?>
             <?php if ($am_skipped): ?>
             <div class="skipped-duty-notice">
                 <span class="sdn-icon"><i class="fas fa-circle-info"></i></span>
                 <div class="sdn-text">
                     <h4>AM Duty Not Required</h4>
-                    <p>Your company has not scheduled AM duty attendance for today. Only PM duty is required.</p>
+                    <p>AM duty attendance is not required for you today (company or training schedule). Only PM duty is required.</p>
                 </div>
             </div>
             <?php endif; ?>
@@ -3396,7 +3454,7 @@ body { background: var(--grid-bg); color: #2d3748; font-family: 'Segoe UI', Taho
                 <span class="sdn-icon"><i class="fas fa-circle-info"></i></span>
                 <div class="sdn-text">
                     <h4>PM Duty Not Required</h4>
-                    <p>Your company has not scheduled PM duty attendance for today. Only AM duty is required.</p>
+                    <p>PM duty attendance is not required for you today (company or training schedule). Only AM duty is required.</p>
                 </div>
             </div>
             <?php endif; ?>
@@ -3489,7 +3547,7 @@ function render_log_html($att, $pending_requests = [], $am_skipped = false, $pm_
         echo "<div class=\"log-duty\">";
         echo "<div class=\"log-duty-label\">{$icon} {$period} Duty</div>";
         if ($isSkipped) {
-            echo "<div class=\"log-duty-skipped\"><i class=\"fas fa-minus-circle\"></i> {$period} duty not required by your company today</div>";
+            echo "<div class=\"log-duty-skipped\"><i class=\"fas fa-minus-circle\"></i> {$period} duty not required for you today</div>";
         } else {
             echo "<div class=\"log-rows\">";
             foreach (['in','out'] as $slot) {
@@ -4024,7 +4082,7 @@ function refreshLog() {
                 if (isSkipped) {
                     return `<div class="log-duty">
                         <div class="log-duty-label">${icon} ${period} Duty</div>
-                        <div class="log-duty-skipped"><i class="fas fa-minus-circle"></i> ${period} duty not required by your company today</div>
+                        <div class="log-duty-skipped"><i class="fas fa-minus-circle"></i> ${period} duty not required for you today</div>
                     </div>`;
                 }
                 return `<div class="log-duty">
