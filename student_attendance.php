@@ -2821,6 +2821,79 @@ body { background: var(--grid-bg); color: #2d3748; font-family: 'Segoe UI', Taho
    pushed its own dot up and bent the connector line. Steps that have no
    badge are the same height, so they are unaffected. */
 .track-steps { align-items: flex-start; }
+
+/* ══ Submit Late Request popup: layout of the "Add New Student" form (admin_student_list.php) ══
+   Same pieces: overlay, square white box with a slate border, compact header
+   (icon + uppercase title + close x), 3-column field grid, small uppercase
+   labels, hint line with an info icon, and a footer pinned to the bottom with
+   a top rule. Box scrolls inside itself on short screens and keeps a margin
+   above and below. Only the look/layout changed: every id the scripts use
+   (lr-type-display, lr-window-warn, lr-deadline-time, lr-video-preview,
+   lr-reason, lr-photo-wrap, lr-submit-btn) is kept. */
+#lateReqOverlay { background: rgba(0,0,0,0.5); backdrop-filter: none; padding: 20px 0; box-sizing: border-box; }
+#lateReqBox {
+    width: 860px; max-width: 94%; max-height: calc(100vh - 40px); max-height: calc(100dvh - 40px);
+    overflow-y: auto; box-sizing: border-box; padding: 16px 24px 0;
+    border: 1px solid var(--grid-border); border-radius: 0; box-shadow: none;
+    animation: lrPop .3s ease;
+}
+@keyframes lrPop { from { transform: scale(0.9); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+#lateReqBox .lr-header {
+    background: transparent; color: var(--grid-navy); padding: 0 0 8px; margin-bottom: 12px;
+    display: flex; align-items: center; justify-content: space-between;
+    border-bottom: 1px solid var(--grid-border);
+}
+#lateReqBox .lr-header h3 { margin: 0; font-size: 15px; text-transform: uppercase; letter-spacing: 0.4px; color: var(--grid-navy); font-weight: 700; }
+#lateReqBox .lr-header .lr-icon { display: inline; font-size: 15px; margin: 0 4px 0 0; color: var(--grid-red); }
+#lateReqBox .lr-close { background: none; border: none; font-size: 24px; line-height: 1; cursor: pointer; color: var(--grid-muted); padding: 0 4px; transition: color .2s; }
+#lateReqBox .lr-close:hover { color: var(--grid-navy); }
+#lateReqBox .lr-close:focus-visible { outline: 2px solid var(--grid-navy); outline-offset: 2px; }
+#lateReqBox .lr-body { padding: 0; }
+#lateReqBox .lr-grid { display: grid; grid-template-columns: repeat(3, 1fr); column-gap: 14px; row-gap: 0; align-items: start; }
+#lateReqBox .lr-group { margin-bottom: 9px; min-width: 0; }
+#lateReqBox .lr-span-2 { grid-column: span 2; }
+#lateReqBox .lr-type-label, #lateReqBox .lr-label {
+    display: block; font-size: 12px; font-weight: 600; color: #1e293b; margin-bottom: 4px;
+    text-transform: none; letter-spacing: 0;
+}
+#lateReqBox .lr-type-val {
+    margin: 0; padding: 7px 10px; font-size: 13px; font-weight: 700; color: var(--grid-red);
+    background: #F3F5F9; border: 1px solid var(--grid-border); border-radius: 0; min-height: 34px; box-sizing: border-box;
+}
+#lateReqBox .lr-window-warn { margin: 0; padding: 7px 10px; min-height: 34px; box-sizing: border-box; font-size: 12px; align-items: center; flex-wrap: wrap; column-gap: 4px; }
+#lateReqBox .lr-camera-wrap { aspect-ratio: 4 / 3; margin-bottom: 0; border: 1px solid var(--grid-border); }
+#lateReqBox .lr-photo-preview { margin-top: 6px; }
+#lateReqBox .lr-reason-group { display: flex; flex-direction: column; }
+#lateReqBox .lr-textarea {
+    width: 100%; box-sizing: border-box; min-height: 150px; flex: 1 1 auto; padding: 7px 10px; font-size: 13px;
+    border: 1px solid var(--grid-border); border-radius: 0; resize: vertical; transition: all .2s;
+}
+#lateReqBox .lr-textarea:focus { outline: none; border-color: var(--grid-navy); box-shadow: 0 0 0 3px rgba(27,42,74,0.08); }
+#lateReqBox .lr-help { font-size: 10.5px; color: var(--grid-muted); margin-top: 3px; line-height: 1.35; }
+#lateReqBox .lr-footer {
+    padding: 10px 0 12px; margin-top: 4px; gap: 12px; justify-content: flex-end;
+    position: sticky; bottom: 0; background: #fff; border-top: 1px solid var(--grid-border); z-index: 2;
+}
+#lateReqBox .lr-btn-cancel, #lateReqBox .lr-btn-submit {
+    padding: 10px 24px; border-radius: 0; font-size: 12px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: 0.3px; transition: opacity .2s, background .2s;
+}
+#lateReqBox .lr-btn-cancel { background: #fff; color: var(--grid-navy); border: 1px solid var(--grid-border); box-shadow: none; }
+#lateReqBox .lr-btn-cancel:hover { background: #f3f4f7; color: var(--grid-navy); }
+#lateReqBox .lr-btn-submit { background: var(--grid-red-strong); color: #fff; border: none; border-bottom: 3px solid rgba(0,0,0,.25); }
+#lateReqBox .lr-btn-submit:hover { background: #A81F25; }
+@media (max-width: 900px) {
+    #lateReqBox .lr-grid { grid-template-columns: 1fr 1fr; }
+    #lateReqBox .lr-span-2 { grid-column: 1 / -1; }
+}
+@media (max-width: 640px) {
+    #lateReqBox { padding: 14px 14px 0; }
+    #lateReqBox .lr-grid { grid-template-columns: 1fr; }
+    #lateReqBox .lr-span-2 { grid-column: auto; }
+    #lateReqBox .lr-textarea { min-height: 110px; }
+    #lateReqBox .lr-footer button { flex: 1; }
+}
+@media (prefers-reduced-motion: reduce) { #lateReqBox { animation: none; } }
     </style>
 </head>
 <body>
@@ -2839,27 +2912,39 @@ body { background: var(--grid-bg); color: #2d3748; font-family: 'Segoe UI', Taho
 
 <!-- Late Request Modal -->
 <div id="lateReqOverlay">
-    <div id="lateReqBox">
+    <div id="lateReqBox" role="dialog" aria-modal="true" aria-labelledby="lr-title">
         <div class="lr-header">
-            <span class="lr-icon"><i class="fas fa-clock-rotate-left"></i></span>
-            <h3>Submit Late Request</h3>
-            <p>Explain why you missed this entry. Your company will review it.</p>
+            <h3 id="lr-title"><span class="lr-icon"><i class="fas fa-clock-rotate-left"></i></span> Submit Late Request</h3>
+            <button type="button" class="lr-close" onclick="closeLateReqModal()" aria-label="Close">&times;</button>
         </div>
         <div class="lr-body">
-            <div class="lr-type-label">Entry Type</div>
-            <div class="lr-type-val" id="lr-type-display">—</div>
-            <div class="lr-window-warn" id="lr-window-warn" style="display:none;">
-                 Submit before <strong id="lr-deadline-time">—</strong> — after that this entry is permanently missed.
+            <div class="lr-grid">
+                <div class="lr-group">
+                    <div class="lr-type-label">Entry Type</div>
+                    <div class="lr-type-val" id="lr-type-display">—</div>
+                </div>
+                <div class="lr-group lr-span-2">
+                    <div class="lr-type-label">Deadline</div>
+                    <div class="lr-window-warn" id="lr-window-warn" style="display:none;">
+                         Submit before <strong id="lr-deadline-time">—</strong> — after that this entry is permanently missed.
+                    </div>
+                </div>
+                <div class="lr-group">
+                    <div class="lr-type-label">Photo</div>
+                    <div class="lr-camera-wrap">
+                        <video id="lr-video-preview" autoplay playsinline muted></video>
+                        <div class="lr-camera-corner tl"></div>
+                        <div class="lr-camera-corner br"></div>
+                        <div class="lr-camera-label"><i class="fas fa-camera"></i> Photo will be captured on submit</div>
+                    </div>
+                    <div class="lr-photo-preview" id="lr-photo-wrap"></div>
+                </div>
+                <div class="lr-group lr-span-2 lr-reason-group">
+                    <label class="lr-label" for="lr-reason">Reason <span style="color:#A02A2A">*</span></label>
+                    <textarea class="lr-textarea" id="lr-reason" placeholder="Describe what happened and why you were unable to sign in/out on time…"></textarea>
+                    <div class="lr-help"><i class="fas fa-circle-info"></i> Explain why you missed this entry. Your company will review it.</div>
+                </div>
             </div>
-            <div class="lr-camera-wrap">
-                <video id="lr-video-preview" autoplay playsinline muted></video>
-                <div class="lr-camera-corner tl"></div>
-                <div class="lr-camera-corner br"></div>
-                <div class="lr-camera-label"><i class="fas fa-camera"></i> Photo will be captured on submit</div>
-            </div>
-            <label class="lr-label">Reason <span style="color:#A02A2A">*</span></label>
-            <textarea class="lr-textarea" id="lr-reason" placeholder="Describe what happened and why you were unable to sign in/out on time…"></textarea>
-            <div class="lr-photo-preview" id="lr-photo-wrap"></div>
         </div>
         <div class="lr-footer">
             <button class="lr-btn-cancel" onclick="closeLateReqModal()">Cancel</button>
