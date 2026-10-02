@@ -2786,6 +2786,7 @@ body { background: var(--grid-bg); color: #2d3748; font-family: 'Segoe UI', Taho
 @media (min-width: 1024px) {
     .page-wrap {
         max-width: 1180px; padding: 14px 24px 16px;
+        flex: 0 0 auto;   /* as tall as its content: no stretching to fill the window */
         display: grid; column-gap: 18px; row-gap: 0;
         grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr);
         /* row 1 header, rows 2-8 right-hand cards (empty rows take no space), row 9 = log */
@@ -2804,17 +2805,13 @@ body { background: var(--grid-bg); color: #2d3748; font-family: 'Segoe UI', Taho
     .page-wrap > .weekend-banner { grid-column: 2; margin: 0 0 12px; padding: 14px 16px; }
     .skipped-duty-notice { grid-column: 2; margin: 0 0 12px; padding: 10px 14px; }
     .progress-track { grid-column: 2; margin: 0 0 12px; padding: 12px 16px; }
-    .log-card { grid-column: 2; grid-row: 9; align-self: stretch; max-height: 100%; overflow-y: auto; margin: 0; padding: 12px 16px; }
+    .log-card { grid-column: 2; grid-row: 9; align-self: stretch; margin: 0; padding: 12px 16px; }
     .step-label { margin-bottom: 8px; }
     .action-btn { padding: 14px; }
 }
-/* Tall-enough windows: lock the page to the screen. The page-wrap scrolls
-   by itself as a safety net if a busy state (missed notice, skipped-duty
-   notices) is ever taller than the window, so nothing is unreachable. */
-@media (min-width: 1024px) and (min-height: 620px) {
-    .main-content { height: 100vh; overflow: hidden; }
-    .page-wrap { flex: 0 1 auto; min-height: 0; overflow-y: auto; }   /* as tall as its content, never taller than the window */
-}
+/* No height lock: when the cards fit the window nothing scrolls; when the window is
+   shorter than the content (browser toolbars, a missed-entry notice, ...) the page
+   scrolls normally, so the activity log is never cut off or hidden. */
 
 /* Keep the four progress dots on one line even when a step carries the
    "Pending" badge (late request submitted): without this the taller step
