@@ -2281,11 +2281,26 @@ $result = $stmt->get_result();
         .endo-no-file { color: #94a3b8; font-size: 15px; } /* ADJUSTMENT: placeholder until a file is uploaded */
 
         /* ══ ADJUSTMENT: loading page — same look as administrator.php's #globalLoadingOverlay.
-           Hidden by default on this page; shown while an Undo is being applied. ══ */
+           Same look as company_list.php: visible by default (covers the first paint), then hidden once the page has loaded;
+           shown again with an action label while something is being saved. ══ */
         #globalLoadingOverlay { position: fixed; inset: 0; z-index: 20000; display: flex; align-items: center; justify-content: center; background: rgba(238, 241, 246, 0.92); opacity: 1; visibility: visible; transition: opacity 0.35s ease, visibility 0.35s ease; }
         #globalLoadingOverlay.hidden { opacity: 0; visibility: hidden; pointer-events: none; }
+        #globalLoadingOverlay.gl-instant { transition: none; }
         .global-loading-box { display: flex; flex-direction: column; align-items: center; gap: 16px; animation: globalLoadingPop 0.35s ease; }
-        .global-loading-spinner { width: 54px; height: 54px; border-radius: 50%; border: 5px solid #A3AFC7; border-top-color: #1B2A4A; animation: globalLoadingSpin 0.85s linear infinite; }
+        /* the 12-segment ticking ring used by company_list.php / AccomForm.php (same size, colour, mask and timing) */
+        .global-loading-spinner {
+            width: 64px; height: 64px; border: 0; border-radius: 50%; box-sizing: border-box;
+            background: conic-gradient(from 0deg, rgba(27,42,74,0.12) 0deg, rgba(27,42,74,0.35) 120deg, rgba(27,42,74,0.7) 240deg, #1B2A4A 330deg, #1B2A4A 360deg);
+            -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 9px), #000 calc(100% - 8px)),
+                          repeating-conic-gradient(from 5deg, #000 0deg 20deg, transparent 20deg 30deg);
+            -webkit-mask-composite: source-in;
+                    mask: radial-gradient(farthest-side, transparent calc(100% - 9px), #000 calc(100% - 8px)),
+                          repeating-conic-gradient(from 5deg, #000 0deg 20deg, transparent 20deg 30deg);
+                    mask-composite: intersect;
+            will-change: transform;
+            animation: cvRingSpin 1s steps(12, end) infinite;
+        }
+        @keyframes cvRingSpin { to { transform: rotate(360deg); } }
         .global-loading-text { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; font-size: 13px; font-weight: 700; color: #1B2A4A; text-transform: uppercase; letter-spacing: 0.6px; display: flex; align-items: center; gap: 8px; }
         .global-loading-dots span { animation: globalLoadingDots 1.2s infinite; opacity: 0; }
         .global-loading-dots span:nth-child(2) { animation-delay: 0.2s; }
@@ -2514,6 +2529,145 @@ $result = $stmt->get_result();
     </style>
 </head>
 <body>
+<!-- ══════════════════════════════════════════════════════════
+     ADJUSTMENT: page-load / processing loading page — same markup and behaviour as company_list.php's
+     #globalLoadingOverlay. Visible by default so it covers the page while it is still loading, then it
+     fades out; it is shown again (with a label) while an action is being processed.
+     ══════════════════════════════════════════════════════════ -->
+<div id="globalLoadingOverlay">
+    <div class="global-loading-box">
+        <div class="global-loading-spinner"></div>
+        <div class="global-loading-text">
+            <span id="globalLoadingLabel">Loading</span>
+            <span class="global-loading-dots"><span>.</span><span>.</span><span>.</span></span>
+        </div>
+    </div>
+</div>
+<!-- Without JavaScript nothing could ever close the overlay — never leave the page covered. -->
+<noscript><style>#globalLoadingOverlay { display: none !important; }</style></noscript>
+<script>
+    /* Ported from company_list.php (same counter pattern, same timings):
+       showGlobalLoading()/hideGlobalLoading() for in-page work, the first page load as its own token,
+       and an instant overlay on reload / leave. */
+    var globalLoadingActiveCount = 1;          // 1 = the initial page-load token
+    var globalLoadingOverlay = document.getElementById('globalLoadingOverlay');
+    var globalLoadingLabel   = document.getElementById('globalLoadingLabel');
+    var GLOBAL_LOADING_MIN_MS       = 350;
+    var GLOBAL_LOADING_SAFETY_MS    = 4000;
+    var GLOBAL_LOADING_NAV_STUCK_MS = 15000;
+    var globalLoadingStartedAt   = (window.performance && performance.now) ? performance.now() : 0;
+    var globalLoadingInitialDone = false;
+    var globalLoadingNavigating  = false;
+    var globalLoadingNavTimer    = null;
+
+    /* No second loading page. An action that reloads / re-opens THIS page (registering a student, accepting or
+       rejecting a whole batch) already shows its own loading page; the page that is leaving leaves a short-lived
+       flag (sessionStorage) and the page that opens reads it once and starts with the overlay already hidden.
+       Every storage access is wrapped because storage can be blocked (private mode) - the page then simply
+       behaves as before. */
+    var GLOBAL_LOADING_SKIP_KEY = 'aos_skip_initial_loading';
+    var GLOBAL_LOADING_SKIP_TTL = 15000;
+    function globalLoadingMarkReturn() {
+        try { sessionStorage.setItem(GLOBAL_LOADING_SKIP_KEY, String(Date.now())); } catch (e) {}
+    }
+    function globalLoadingClearReturn() {
+        try { sessionStorage.removeItem(GLOBAL_LOADING_SKIP_KEY); } catch (e) {}
+    }
+    (function () {
+        var fresh = false;
+        try {
+            var t = parseInt(sessionStorage.getItem(GLOBAL_LOADING_SKIP_KEY) || '', 10);
+            fresh = !isNaN(t) && (Date.now() - t) >= 0 && (Date.now() - t) < GLOBAL_LOADING_SKIP_TTL;
+            sessionStorage.removeItem(GLOBAL_LOADING_SKIP_KEY);
+        } catch (e) { fresh = false; }
+        if (fresh && globalLoadingOverlay) {
+            globalLoadingActiveCount = 0;
+            globalLoadingInitialDone = true;
+            globalLoadingOverlay.classList.add('gl-instant', 'hidden');
+        }
+    })();
+
+    function globalLoadingPaint() {
+        if (!globalLoadingOverlay) return;
+        if (globalLoadingActiveCount > 0 || globalLoadingNavigating) {
+            globalLoadingOverlay.classList.remove('hidden');
+        } else {
+            globalLoadingOverlay.classList.remove('gl-instant');
+            globalLoadingOverlay.classList.add('hidden');
+        }
+    }
+    function showGlobalLoading(label) {
+        globalLoadingActiveCount++;
+        if (globalLoadingLabel) globalLoadingLabel.textContent = label || 'Loading';
+        globalLoadingPaint();
+    }
+    function hideGlobalLoading() {
+        globalLoadingActiveCount = Math.max(0, globalLoadingActiveCount - 1);
+        if (globalLoadingLabel && globalLoadingActiveCount === 0 && !globalLoadingNavigating) globalLoadingLabel.textContent = 'Loading';
+        globalLoadingPaint();
+    }
+    function finishInitialGlobalLoading() {
+        if (globalLoadingInitialDone) return;
+        var now = (window.performance && performance.now) ? performance.now() : GLOBAL_LOADING_MIN_MS;
+        var wait = Math.max(0, GLOBAL_LOADING_MIN_MS - (now - globalLoadingStartedAt));
+        globalLoadingInitialDone = true;
+        setTimeout(function () {
+            globalLoadingActiveCount = Math.max(0, globalLoadingActiveCount - 1);
+            if (globalLoadingLabel && globalLoadingActiveCount === 0) globalLoadingLabel.textContent = 'Loading';
+            globalLoadingPaint();
+        }, wait);
+    }
+    function startNavigationGlobalLoading(label) {
+        globalLoadingNavigating = true;
+        if (globalLoadingLabel) globalLoadingLabel.textContent = label || 'Loading';
+        if (globalLoadingOverlay) globalLoadingOverlay.classList.add('gl-instant');
+        globalLoadingPaint();
+        clearTimeout(globalLoadingNavTimer);
+        globalLoadingNavTimer = setTimeout(stopNavigationGlobalLoading, GLOBAL_LOADING_NAV_STUCK_MS);
+    }
+    function stopNavigationGlobalLoading() {
+        clearTimeout(globalLoadingNavTimer);
+        globalLoadingClearReturn();
+        globalLoadingNavigating = false;
+        if (globalLoadingLabel && globalLoadingActiveCount === 0) globalLoadingLabel.textContent = 'Loading';
+        globalLoadingPaint();
+    }
+    if (document.readyState === 'complete') { finishInitialGlobalLoading(); }
+    else { window.addEventListener('load', finishInitialGlobalLoading); }
+    setTimeout(finishInitialGlobalLoading, GLOBAL_LOADING_SAFETY_MS);
+
+    // Reload / leave / form submit — keeps a more specific label already set (e.g. "Registering student").
+    window.addEventListener('beforeunload', function () {
+        if (!globalLoadingNavigating) startNavigationGlobalLoading('Loading');
+    });
+    // Same-tab links: show the overlay on click, before beforeunload even fires.
+    document.addEventListener('click', function (e) {
+        if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+        var a = e.target && e.target.closest ? e.target.closest('a[href]') : null;
+        if (!a) return;
+        var href = a.getAttribute('href') || '';
+        if (!href || href.charAt(0) === '#' || /^(javascript|mailto|tel|blob|data):/i.test(href)) return;
+        if (a.hasAttribute('download')) return;
+        if (a.target && a.target.toLowerCase() !== '_self') return;
+        if (a.origin && a.origin !== window.location.origin) return;
+        startNavigationGlobalLoading('Loading');
+    });
+    // "Register Student" is a native form post that comes back to this very page.
+    document.addEventListener('submit', function (e) {
+        var f = e.target;
+        if (e.defaultPrevented || !f || !f.querySelector || !f.querySelector('input[name="student_search"]')) return;
+        globalLoadingMarkReturn();
+        startNavigationGlobalLoading('Registering student');
+    });
+    // Back/Forward cache restore: the page did not reload, so re-sync the overlay.
+    window.addEventListener('pageshow', function (e) {
+        if (e.persisted) {
+            globalLoadingInitialDone = true;
+            globalLoadingActiveCount = 0;
+            stopNavigationGlobalLoading();
+        }
+    });
+</script>
 
 <!-- ── CONFIRM POPUP ── -->
 <div id="confirmPopup" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.5); z-index:5000; justify-content:center; align-items:center;">
@@ -2597,17 +2751,6 @@ $result = $stmt->get_result();
 
 <!-- ── TOAST ── -->
 <div id="actionToast"><i id="actionToastIcon" class="fas fa-check-circle"></i> <span id="actionToastMsg"></span></div>
-
-<!-- ADJUSTMENT: loading page (administrator.php markup) — hidden until needed -->
-<div id="globalLoadingOverlay" class="hidden">
-    <div class="global-loading-box">
-        <div class="global-loading-spinner"></div>
-        <div class="global-loading-text">
-            <span id="globalLoadingLabel">Loading</span>
-            <span class="global-loading-dots"><span>.</span><span>.</span><span>.</span></span>
-        </div>
-    </div>
-</div>
 
 <!-- ── ADJUSTMENT: UNDO TOAST (top) — same markup as administrator.php ── -->
 <div id="undoToast">
@@ -3048,6 +3191,7 @@ function acceptApp(appId, btn, opts) {
             fd.append('accept_app', '1');
             fd.append('app_id', String(appId));
 
+            const _loadStarted = endoShowLoading(opts.loading || 'Accepting application'); // loading page
             fetch('add_ojt_student.php', { method: 'POST', body: fd })
                 .then(function(response) { return response.text(); })
                 .then(function(rawText) {
@@ -3093,7 +3237,8 @@ function acceptApp(appId, btn, opts) {
                 .catch(function() {
                     if (btn) { btn.disabled = false; btn.innerHTML = _origBtnHtml; }
                     showToast('Network error. Please try again.', 'error');
-                });
+                })
+                .finally(function() { endoHideLoading(_loadStarted); });
         }
     );
 }
@@ -3145,6 +3290,7 @@ document.getElementById('rejectForm').addEventListener('submit', function(e) {
     fd.append('reject_app_id', appId);
     fd.append('reject_reason', reason);
 
+    const _rejLoad = endoShowLoading('Rejecting application'); // loading page
     fetch('add_ojt_student.php', { method: 'POST', body: fd })
         .then(r => r.text())
         .then(() => {
@@ -3165,7 +3311,8 @@ document.getElementById('rejectForm').addEventListener('submit', function(e) {
             btn.disabled = false;
             btn.innerHTML = '<i class="fas fa-paper-plane"></i> Send &amp; Reject';
             showToast('Network error. Please try again.', 'error');
-        });
+        })
+        .finally(() => endoHideLoading(_rejLoad));
 });
 
 // ── INBOX BADGE UPDATER ───────────────────────────────────────────────────────
@@ -3848,6 +3995,7 @@ document.getElementById('studentTableBody').addEventListener('click', function(e
             fd.append('remove_student', '1');
             fd.append('ojt_id', ojtId);
 
+            const _rmLoad = endoShowLoading('Removing student'); // loading page
             fetch('add_ojt_student.php', { method: 'POST', body: fd })
                 .then(function(response) { return response.text(); })
                 .then(function(rawText) {
@@ -3880,7 +4028,8 @@ document.getElementById('studentTableBody').addEventListener('click', function(e
                     btn.disabled = false;
                     btn.innerHTML = 'Remove';
                     showToast('Network error. Please try again.', 'error');
-                });
+                })
+                .finally(function() { endoHideLoading(_rmLoad); });
         }
     );
 });
@@ -3899,7 +4048,8 @@ function verifyEndorsement(appId, btn, name) {
     acceptApp(appId, btn, {
         title: 'Verify Endorsement Letter',
         msg:   'Mark ' + (name || 'this student') + '\u2019s endorsement letter as Verified and register the student to your company?',
-        busy:  'Verifying…'
+        busy:  'Verifying…',
+        loading: 'Verifying endorsement letter'
     });
 }
 
@@ -4042,6 +4192,7 @@ function submitEndoReject() {
     fd.append('reject_endorsement', '1');
     fd.append('app_id', String(appId));
     fd.append('remark', remark);
+    const _erLoad = endoShowLoading('Rejecting endorsement letter'); // loading page
     fetch('add_ojt_student.php', { method: 'POST', body: fd })
         .then(function(r) { return r.json(); })
         .then(function(res) {
@@ -4059,7 +4210,8 @@ function submitEndoReject() {
             btn.disabled = false;
             btn.innerHTML = '<i class="fas fa-paper-plane"></i> Send &amp; Reject';
             showToast('Network error. Please try again.', 'error');
-        });
+        })
+        .finally(function() { endoHideLoading(_erLoad); });
 }
 
 document.addEventListener('keydown', function(e) {
@@ -4115,6 +4267,7 @@ function endoSaveValidation(form) {
     fd.append('app_id', appId);
     fd.append('status', status);
     fd.append('remark', status === 'Rejected' ? reason.value : '');
+    const _evLoad = endoShowLoading('Saving validation'); // loading page
     fetch('add_ojt_student.php', { method: 'POST', body: fd })
         .then(function (r) { return r.json(); })
         .then(function (res) {
@@ -4136,7 +4289,8 @@ function endoSaveValidation(form) {
             btn.classList.remove('saving');
             btn.textContent = 'Save';
             showToast('Network error. Please try again.', 'error');
-        });
+        })
+        .finally(function () { endoHideLoading(_evLoad); });
 }
 
 // Used by the letter viewer's Verify / Reject buttons.
@@ -4241,13 +4395,12 @@ function triggerEndoUndo() {
    so it never just flashes. */
 var ENDO_LOADING_MIN_MS = 600;
 function endoShowLoading(label) {
-    document.getElementById('globalLoadingLabel').textContent = label || 'Loading';
-    document.getElementById('globalLoadingOverlay').classList.remove('hidden');
+    showGlobalLoading(label);   // the one shared loading page (counter based — overlapping actions never stack a second one)
     return Date.now();
 }
 function endoHideLoading(startedAt) {
     var wait = Math.max(0, ENDO_LOADING_MIN_MS - (Date.now() - (startedAt || 0)));
-    setTimeout(function () { document.getElementById('globalLoadingOverlay').classList.add('hidden'); }, wait);
+    setTimeout(hideGlobalLoading, wait);
 }
 
 // Leaving the page closes the undo window (a held rejection email is sent).
@@ -4374,6 +4527,7 @@ function endoSaveRemarkFromViewer(appId, name) {
             fd.append('app_id', String(appId));
             fd.append('status', 'Rejected');
             fd.append('remark', remark);
+            const _rkLoad = endoShowLoading('Sending remark'); // loading page
             fetch('add_ojt_student.php', { method: 'POST', body: fd })
                 .then(function (r) { return r.json(); })
                 .then(function (res) {
@@ -4390,7 +4544,8 @@ function endoSaveRemarkFromViewer(appId, name) {
                 .catch(function () {
                     btn.disabled = false; btn.textContent = 'Save';
                     showToast('Network error. Please try again.', 'error');
-                });
+                })
+                .finally(function () { endoHideLoading(_rkLoad); });
         }
     );
 }
@@ -4546,6 +4701,7 @@ function schedSubmit(day, eve) {
     fd.append('day_sched', day);
     fd.append('evening_sched', eve);
     fd.append('reason', document.getElementById('schedReason').value.trim());
+    var schedLoad = endoShowLoading('Updating schedule'); // loading page (the e-mails are sent during this request)
     fetch('add_ojt_student.php', { method: 'POST', body: fd })
         .then(function (r) { return r.json(); })
         .then(function (res) {
@@ -4566,7 +4722,8 @@ function schedSubmit(day, eve) {
             btn.innerHTML = 'Continue';
             schedValidate();
             aplShowTopToast('', 'Network error. Please try again.', 'fa-circle-exclamation', true);
-        });
+        })
+        .finally(function () { endoHideLoading(schedLoad); });
 }
 document.getElementById('schedModal').addEventListener('click', function (e) { if (e.target === this) closeSchedModal(); });
 document.getElementById('schedConfirmModal').addEventListener('click', function (e) { if (e.target === this) closeSchedConfirm(); });
@@ -4623,9 +4780,15 @@ function aplForEachApp(apps, buildFd) {
     }, Promise.resolve()).then(function () { return results; });
 }
 
+// The batch actions already show their loading page; reloading must not bring up a second one.
+function aplReloadPage(label) {
+    globalLoadingMarkReturn();
+    startNavigationGlobalLoading(label || 'Loading');
+    window.location.reload();
+}
 function aplReloadWithToast(msg, type) {
     try { sessionStorage.setItem('apl_after_reload_toast', JSON.stringify({ msg: msg, type: type })); } catch (e) {}
-    window.location.reload();
+    aplReloadPage(globalLoadingLabel ? globalLoadingLabel.textContent : 'Loading'); // keep the label that is already showing
 }
 (function () {
     try {
@@ -4655,7 +4818,7 @@ function acceptBatch(bid, btn) {
                     // ADJUSTMENT: no success popup after registering the batch — only when a member
                     // could not be registered is the message kept (shown after the reload).
                     if (bad.length) aplReloadWithToast(msg, 'error');
-                    else window.location.reload();
+                    else aplReloadPage('Registering the batch');
                 });
             }
         );
