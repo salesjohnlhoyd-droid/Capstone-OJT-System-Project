@@ -2814,6 +2814,57 @@ body { background: var(--grid-bg); color: #2d3748; font-family: 'Segoe UI', Taho
     .main-content { height: 100vh; overflow: hidden; }
     .page-wrap { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
 }
+
+/* ══ Balanced fill of the screen (desktop, window locked to the screen) ══
+   The camera and the right-hand cards now share the same top and bottom
+   edges, so no empty band is left under the content. The log card takes
+   whatever height is left; sizes grow gently with the window height
+   (--g is 0 on windows up to 760px tall and tops out at 30px on tall ones) so
+   larger screens feel spacious instead of stretched or tight. Layout and
+   sizing only. */
+@media (min-width: 1024px) and (min-height: 620px) {
+    .page-wrap {
+        --g: clamp(0px, calc((100vh - 760px) / 11), 30px);
+        padding: calc(14px + var(--g) * .3) 24px calc(16px + var(--g) * .4);
+    }
+    .att-header { margin-bottom: calc(12px + var(--g) * .3); }
+    .camera-card { aspect-ratio: auto; max-height: none; align-self: stretch; min-height: 0; }
+    .page-wrap > .step-card, .page-wrap > .done-card, .page-wrap > .weekend-banner,
+    .skipped-duty-notice, .progress-track { margin-bottom: calc(12px + var(--g) * .3); }
+    .page-wrap > .step-card { padding: calc(14px + var(--g) * .35) calc(16px + var(--g) * .25); }
+    .progress-track { padding: calc(12px + var(--g) * .35) calc(16px + var(--g) * .25); }
+    .action-btn { padding: calc(14px + var(--g) * .3); }
+
+    /* log card fills the remaining height; its two duty blocks share it */
+    .log-card {
+        align-self: stretch; max-height: none; min-height: 0;
+        display: flex; flex-direction: column;
+        padding: calc(12px + var(--g) * .35) calc(16px + var(--g) * .25);
+    }
+    .log-card .log-duty { flex: 1 0 auto; display: flex; flex-direction: column; }
+    .log-card .log-rows { flex: 1 1 auto; }              /* the sign in / sign out boxes grow, no loose gaps */
+    .log-card .log-item { align-items: center; }
+    .log-card .log-item-info { display: flex; flex-direction: column; justify-content: center; align-self: stretch; }
+    .log-card .log-item-info .li-label { font-size: calc(10px + var(--g) * .12); }
+    .log-card .log-item-info .li-time  { font-size: calc(13px + var(--g) * .5); }
+    .log-card .log-duty-label { font-size: calc(12px + var(--g) * .12); }
+
+    /* all attendance recorded: a fuller confirmation card + larger progress dots */
+    .done-card { padding: calc(22px + var(--g) * .9) 20px; }
+    .done-card .done-icon { font-size: calc(36px + var(--g) * .7); margin-bottom: calc(8px + var(--g) * .3); }
+    .done-card h3 { font-size: calc(16px + var(--g) * .15); }
+    .done-card p  { font-size: calc(13px + var(--g) * .1); }
+    .done-card ~ .progress-track .step-circle { width: calc(28px + var(--g) * .4); height: calc(28px + var(--g) * .4); font-size: calc(11px + var(--g) * .1); }
+    .done-card ~ .progress-track .track-step:not(:last-child)::after {
+        top: calc(14px + var(--g) * .2);
+        left: calc(50% + 14px + var(--g) * .2);
+        right: calc(-50% + 14px + var(--g) * .2);
+    }
+    .done-card ~ .progress-track .track-step-label { font-size: calc(9.5px + var(--g) * .06); }
+}
+@media (min-width: 1600px) and (min-height: 620px) {
+    .page-wrap { max-width: 1500px; }
+}
     </style>
 </head>
 <body>
