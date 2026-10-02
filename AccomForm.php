@@ -1353,7 +1353,7 @@ if ($stmt_si) {
 }
 
 /* NEW (schedule change): when the company supervisor set a new schedule for this student (add_ojt_student.php),
-   the Student/University Contract was removed. The student sees why — until the new contract is Verified.
+   the Application SIT was removed. The student sees why — until the new Application SIT is Verified.
    Read-only and fully guarded: any problem simply shows nothing. */
 $sched_change_notice = null;
 try {
@@ -1368,7 +1368,7 @@ try {
         $_sc_row = $_sc_q->get_result()->fetch_assoc();
         $_sc_q->close();
         if ($_sc_row) {
-            $_sc_v = $conn->prepare("SELECT 1 FROM requirements WHERE user_id = ? AND requirement_type = 'student_contract' AND status = 'Verified' AND file_name IS NOT NULL AND file_name <> '' LIMIT 1");
+            $_sc_v = $conn->prepare("SELECT 1 FROM requirements WHERE user_id = ? AND requirement_type = 'application_sit' AND status = 'Verified' AND file_name IS NOT NULL AND file_name <> '' LIMIT 1");
             $_sc_v->bind_param("i", $user_id);
             $_sc_v->execute();
             $_sc_ok = (bool)$_sc_v->get_result()->fetch_row();
@@ -3962,7 +3962,7 @@ if (isset($_GET['msg']) && ($_GET['msg'] === 'profile_saved' || $_GET['msg'] ===
                                 Day &mdash; <?= htmlspecialchars(accomSchedLabel($sched_change_notice['new_day_sched'])) ?>;
                                 Evening &mdash; <?= htmlspecialchars(accomSchedLabel($sched_change_notice['new_evening_sched'])) ?>.
                                 <?php if (trim((string)$sched_change_notice['reason']) !== ''): ?>Reason: <?= htmlspecialchars(rtrim(trim((string)$sched_change_notice['reason']), '. ')) ?>.<?php endif; ?>
-                                <?php if (!empty($sched_change_notice['contract_removed'])): ?>Because of this, your Student/University Contract was removed &mdash; please upload a new one that reflects your updated schedule.<?php else: ?>Please upload a Student/University Contract that reflects your updated schedule.<?php endif; ?></span>
+                                <?php if (!empty($sched_change_notice['contract_removed'])): ?>Because of this, your Application SIT was removed &mdash; please upload a new one that reflects your updated schedule.<?php else: ?>Please upload an Application SIT that reflects your updated schedule.<?php endif; ?></span>
                         </div>
                         <?php endif; ?>
                     </div>

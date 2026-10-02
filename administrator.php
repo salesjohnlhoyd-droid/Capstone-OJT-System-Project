@@ -50,8 +50,8 @@ function cv_vt_ensure($conn) {
         $conn->query("CREATE TABLE IF NOT EXISTS verify_toast_gate ( undo_token VARCHAR(64) NOT NULL PRIMARY KEY, student_id INT NOT NULL, created_ts BIGINT NOT NULL, KEY idx_vtg_student (student_id) )");
         $done = true;
     } catch (\Throwable $e) { error_log('verify_toast_gate ensure: ' . $e->getMessage()); return false; }
-    // NEW (this adjustment): which requirement the toast is for ('student_contract', '__photo', …). add_ojt_student.php reads it so
-    // the company's Accept / Reject buttons wait for the Student/University Contract toast specifically. Optional: without the
+    // NEW (this adjustment): which requirement the toast is for ('application_sit', '__photo', …). add_ojt_student.php reads it so
+    // the company's Accept / Reject buttons wait for the Application SIT toast specifically. Optional: without the
     // column everything behaves exactly as before.
     try { $conn->query("ALTER TABLE verify_toast_gate ADD COLUMN IF NOT EXISTS requirement_type VARCHAR(50) NULL"); } catch (\Throwable $e) { error_log('verify_toast_gate type column: ' . $e->getMessage()); }
     return $done;
@@ -867,10 +867,10 @@ function cv_ph_detect($conn) {
 // NEW (this adjustment): SCHEDULE CHANGED BY THE COMPANY SUPERVISOR → CONTRACT NEEDS VALIDATION AGAIN
 // ----------------------------------------------------------------------------
 // On add_ojt_student.php a supervisor can set a new Day / Evening Schedule for an applicant. That removes the
-// student's Student/University Contract (record + stored files) and writes a row to student_schedule_changes.
+// student's Application SIT (record + stored files) and writes a row to student_schedule_changes.
 // This works exactly like the "preferred placement replaced" flow above:
-//   • cv_sc_open() — the students whose LATEST schedule change is still open: active, and the new Student/University
-//     Contract has not been reviewed (Verified / Denied) yet.
+//   • cv_sc_open() — the students whose LATEST schedule change is still open: active, and the new Application SIT
+//     one has not been reviewed (Verified / Denied) yet.
 //   • cv_sc_reconcile() — puts such a student back to 'Pending' (the value stored while a requirement is not verified),
 //     so they are listed on this page again, with the contract waiting for the new upload. Returns their ids.
 //   • cv_sc_detect() — announces each change ONCE as a notification in the SAME table / pipeline as the other student
@@ -889,7 +889,7 @@ function cv_sc_open($conn) {
                            INNER JOIN (SELECT student_id, MAX(id) AS mid FROM student_schedule_changes GROUP BY student_id) m ON m.mid = c.id
                            INNER JOIN users u ON u.id = c.student_id
                            WHERE u.role = 'student' AND COALESCE(u.is_archived, 0) = 0
-                             AND NOT EXISTS (SELECT 1 FROM requirements r WHERE r.user_id = c.student_id AND r.requirement_type = 'student_contract'
+                             AND NOT EXISTS (SELECT 1 FROM requirements r WHERE r.user_id = c.student_id AND r.requirement_type = 'application_sit'
                                              AND r.file_name IS NOT NULL AND r.file_name <> '' AND r.status IN ('Verified', 'Denied'))");
         if ($r) while ($x = $r->fetch_assoc()) $open[(int)$x['student_id']] = $x;
     } catch (\Throwable $e) { /* never affects the page */ }
@@ -925,7 +925,7 @@ function cv_sc_label($row) {
     $reason = trim(preg_replace('/\s+/', ' ', (string)($row['reason'] ?? '')));
     if (function_exists('mb_strlen') && mb_strlen($reason) > 140) $reason = mb_substr($reason, 0, 137) . '...';
     return 'Schedule changed by the company supervisor (Day: ' . $lab($row['new_day_sched'] ?? '') . ' | Evening: ' . $lab($row['new_evening_sched'] ?? '')
-         . ') — the Student/University Contract needs to be validated again' . ($reason !== '' ? '. Reason: ' . $reason : '');
+         . ') — the Application SIT needs to be validated again' . ($reason !== '' ? '. Reason: ' . $reason : '');
 }
 function cv_sc_detect($conn) {
     try {
@@ -7039,7 +7039,7 @@ if (!$courseOfferingsLoaded) {
         var needs = Array.isArray(data.needs_validation) ? data.needs_validation : [];
         var held  = {};
         (Array.isArray(data.held) ? data.held : []).forEach(function (id) { held[String(id)] = true; });
-        var schedHeld = {};   // NEW (this adjustment): schedule changed by the supervisor → the Student/University Contract needs the new upload
+        var schedHeld = {};   // NEW (this adjustment): schedule changed by the supervisor → the Application SIT needs the new upload
         (Array.isArray(data.schedule_held) ? data.schedule_held : []).forEach(function (id) { schedHeld[String(id)] = true; });
 
         needs.forEach(function (n) {
@@ -7049,7 +7049,7 @@ if (!$courseOfferingsLoaded) {
             var row = document.getElementById('student-row-' + uid);
             var st  = data.state ? data.state[uid] : null;
             var isSched = !!schedHeld[uid] && !held[uid];
-            var chkType = isSched ? 'student_contract' : 'application_sit';
+            var chkType = 'application_sit';   // a placement replacement AND a schedule change both need a new Application SIT
             var sit = st && st.reqs ? st.reqs[chkType] : null;
             var hasSit = !!(sit && sit.has_file);
 
@@ -8650,7 +8650,7 @@ if (!$courseOfferingsLoaded) {
             (keys || []).forEach(function (k) {
                 var isPlacement = (k === '__placement' || k === '__schedule');
                 if (k === '__placement') k = 'application_sit';   // NEW (this adjustment): the card that needs the new submission (no "New upload" tag — nothing was uploaded yet)
-                else if (k === '__schedule') k = 'student_contract';   // NEW (this adjustment): schedule changed → the new Student/University Contract
+                else if (k === '__schedule') k = 'application_sit';   // NEW (this adjustment): schedule changed → the new Application SIT
                 var card = (k === '__photo') ? row.querySelector('.profile-card') : document.getElementById('req-item-' + uid + '-' + k);
                 if (!card) return;
                 if (!isPlacement) svFlagNewUpload(card);
@@ -10954,8 +10954,8 @@ window.addEventListener('pageshow', function (e) {
         var div = document.createElement('div');
         div.className = 'cv-top-toast';
         div.setAttribute('role', 'status');
-        if (r.kind === 'schedule') {   // NEW (this adjustment): schedule changed by the supervisor → the new Student/University Contract needs validation
-            div.innerHTML = '<i class="fas fa-calendar-days"></i><span><strong>' + esc(r.full_name || 'A student') + '</strong>\u2019s schedule was changed by the company supervisor \u2014 the new Student/University Contract needs validation.</span>';
+        if (r.kind === 'schedule') {   // NEW (this adjustment): schedule changed by the supervisor → the new Application SIT needs validation
+            div.innerHTML = '<i class="fas fa-calendar-days"></i><span><strong>' + esc(r.full_name || 'A student') + '</strong>\u2019s schedule was changed by the company supervisor \u2014 the new Application SIT needs validation.</span>';
         } else if (r.kind === 'placement') {   // NEW (this adjustment): preferred placement replaced → the new Application SIT needs validation
             div.innerHTML = '<i class="fas fa-right-left"></i><span><strong>' + esc(r.full_name || 'A student') + '</strong> replaced the preferred placement \u2014 the new Application SIT needs validation.</span>';
         } else {

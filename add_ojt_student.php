@@ -245,7 +245,7 @@ function ensureScheduleChangesTable($conn) {
             new_day_sched VARCHAR(100) NULL,
             new_evening_sched VARCHAR(100) NULL,
             reason TEXT NULL,
-            contract_removed TINYINT(1) NOT NULL DEFAULT 0,
+            contract_removed TINYINT(1) NOT NULL DEFAULT 0, /* historic column name: 1 = the Application SIT was removed */
             created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
             KEY idx_ssc_student (student_id),
             KEY idx_ssc_company (company_id))");
@@ -256,7 +256,7 @@ function ensureScheduleChangesTable($conn) {
     }
 }
 
-/* Removes the verified copies of the student's Student/University Contract from uploads/<First>_<Middle>_<Last>/.
+/* Removes the verified copies of the student's Application SIT (Application for Supervised Industrial Training) from uploads/<First>_<Middle>_<Last>/.
    Same rules as company_list.php (cl_remove_application_sit): the folder name and file names are rebuilt exactly
    like administrator.php builds them when it verifies a requirement
    (<Label>_verified_<time>.<ext> / <Label>_<n>_verified_<time>.<ext>), only matching regular files are deleted,
@@ -268,7 +268,7 @@ function aplStudentUploadFolder($first, $middle, $last) {
     $l = preg_replace("/[^a-zA-Z0-9]/", "_", (string)$last);
     return !empty($m) ? $f . "_" . $m . "_" . $l : $f . "_" . $l;
 }
-function aplContractFiles($dir, $labels) {
+function aplSitFiles($dir, $labels) {
     $out  = [];
     $alts = [];
     foreach ((array)$labels as $lbl) {
@@ -288,7 +288,7 @@ function aplContractFiles($dir, $labels) {
     }
     return $out;
 }
-function aplRemoveContractFiles($conn, $student_id) {
+function aplRemoveSitFiles($conn, $student_id) {
     $res = ['files_removed' => 0, 'files_failed' => 0, 'folder' => '', 'note' => ''];
     try {
         $uq = $conn->prepare("SELECT first_name, middle_name, last_name FROM users WHERE id = ?");
@@ -309,7 +309,7 @@ function aplRemoveContractFiles($conn, $student_id) {
             if (aplStudentUploadFolder($o['first_name'], $o['middle_name'], $o['last_name']) === $folder) {
                 $cq->close();
                 $res['note'] = 'folder shared with another student';
-                error_log("add_ojt_student.php: contract files of student " . $student_id . " left in place - folder '" . $folder . "' is shared with another student");
+                error_log("add_ojt_student.php: Application SIT files of student " . $student_id . " left in place - folder '" . $folder . "' is shared with another student");
                 return $res;
             }
         }
@@ -324,12 +324,12 @@ function aplRemoveContractFiles($conn, $student_id) {
             error_log("add_ojt_student.php: refusing to clean '" . $dir . "' (outside uploads)");
             return $res;
         }
-        foreach (aplContractFiles($dir, ['Student/University Contract', 'Student/University contract']) as $file) {
+        foreach (aplSitFiles($dir, ['Application for Supervised Industrial Training', 'Application for supervised Industrial Training']) as $file) {
             if (@unlink($file)) $res['files_removed']++;
-            else { $res['files_failed']++; error_log("add_ojt_student.php: could not delete contract file " . $file); }
+            else { $res['files_failed']++; error_log("add_ojt_student.php: could not delete Application SIT file " . $file); }
         }
     } catch (\Throwable $e) {
-        error_log("add_ojt_student.php: contract folder cleanup failed for student " . $student_id . ": " . $e->getMessage());
+        error_log("add_ojt_student.php: Application SIT folder cleanup failed for student " . $student_id . ": " . $e->getMessage());
     }
     return $res;
 }
@@ -356,7 +356,7 @@ function aplAdminRecipients($conn) {
 }
 
 /* Schedule changed — e-mail to the STUDENT (formal, friendly, informative; the supervisor's reason is attached). */
-function buildScheduleChangedStudentEmail($studentName, $companyName, $oldDay, $oldEve, $newDay, $newEve, $reason, $contractRemoved = true) {
+function buildScheduleChangedStudentEmail($studentName, $companyName, $oldDay, $oldEve, $newDay, $newEve, $reason, $sitRemoved = true) {
     $h = fn($v) => htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8');
     return buildOjtEmail([
         'theme'        => 'warning',
@@ -366,9 +366,9 @@ function buildScheduleChangedStudentEmail($studentName, $companyName, $oldDay, $
             "We hope you are doing well. We would like to let you know that your OJT supervisor at <strong>" . $h($companyName) . "</strong> has set up a new training schedule for you.",
             "<strong style='color:#374151;'>Previous schedule</strong><br>Day: " . $h(aplSchedLabel($oldDay)) . "<br>Evening: " . $h(aplSchedLabel($oldEve)),
             "<strong style='color:#16a34a;'>New schedule</strong><br>Day: <strong>" . $h(aplSchedLabel($newDay)) . "</strong><br>Evening: <strong>" . $h(aplSchedLabel($newEve)) . "</strong>",
-            ($contractRemoved
-                ? "Because your Student/University Contract was prepared with your previous schedule in mind, it has been removed from your requirements. Please prepare a new Student/University Contract that reflects your updated schedule and upload it on the <strong>Requirements</strong> page of the OJT portal. The administrator will validate it once it has been submitted, and some portal features may stay limited until then."
-                : "Please prepare a Student/University Contract that reflects your updated schedule and upload it on the <strong>Requirements</strong> page of the OJT portal. The administrator will validate it once it has been submitted, and some portal features may stay limited until then."),
+            ($sitRemoved
+                ? "Because your Application for Supervised Industrial Training (Application SIT) was prepared with your previous schedule in mind, it has been removed from your requirements. Please prepare a new Application SIT that reflects your updated schedule and upload it on the <strong>Requirements</strong> page of the OJT portal. The administrator will validate it once it has been submitted, and some portal features may stay limited until then."
+                : "Please prepare an Application SIT that reflects your updated schedule and upload it on the <strong>Requirements</strong> page of the OJT portal. The administrator will validate it once it has been submitted, and some portal features may stay limited until then."),
         ],
         'reason_label' => 'Reason for the change',
         'reason'       => $reason,
@@ -378,24 +378,24 @@ function buildScheduleChangedStudentEmail($studentName, $companyName, $oldDay, $
 }
 
 /* Schedule changed — e-mail to the ADMINISTRATOR. */
-function buildScheduleChangedAdminEmail($adminName, $studentName, $course, $companyName, $supervisorName, $oldDay, $oldEve, $newDay, $newEve, $reason, $contractRemoved = true) {
+function buildScheduleChangedAdminEmail($adminName, $studentName, $course, $companyName, $supervisorName, $oldDay, $oldEve, $newDay, $newEve, $reason, $sitRemoved = true) {
     $h = fn($v) => htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8');
     $who = ($supervisorName !== '' ? "<strong>" . $h($supervisorName) . "</strong> of " : '') . "<strong>" . $h($companyName) . "</strong>";
     return buildOjtEmail([
         'theme'        => 'warning',
-        'heading'      => 'Student Schedule Updated - Contract Re-validation Required',
+        'heading'      => 'Student Schedule Updated - Application SIT Re-validation Required',
         'name'         => $adminName,
         'paragraphs'   => [
             "Good day. This is to inform you that " . $who . " has updated the training schedule of <strong>" . $h($studentName) . "</strong>" . ($course !== '' ? " (" . $h($course) . ")" : '') . ".",
             "<strong style='color:#374151;'>Previous schedule</strong><br>Day: " . $h(aplSchedLabel($oldDay)) . "<br>Evening: " . $h(aplSchedLabel($oldEve)),
             "<strong style='color:#16a34a;'>New schedule</strong><br>Day: <strong>" . $h(aplSchedLabel($newDay)) . "</strong><br>Evening: <strong>" . $h(aplSchedLabel($newEve)) . "</strong>",
-            ($contractRemoved
-                ? "As a result, the student's Student/University Contract (the record and its stored file copies) has been removed and the student has returned to your validation list. The student has been notified by email and asked to upload a new contract that reflects the updated schedule."
-                : "The student had no Student/University Contract on file at the time, and has returned to your validation list. The student has been notified by email and asked to upload a contract that reflects the updated schedule."),
+            ($sitRemoved
+                ? "As a result, the student's Application for Supervised Industrial Training (Application SIT), including the record and its stored file copies, has been removed and the student has returned to your validation list. The student has been notified by email and asked to upload a new Application SIT that reflects the updated schedule."
+                : "The student had no Application SIT on file at the time, and has returned to your validation list. The student has been notified by email and asked to upload an Application SIT that reflects the updated schedule."),
         ],
         'reason_label' => 'Reason given by the supervisor',
         'reason'       => $reason,
-        'note'         => "Please review and validate the new Student/University Contract once the student submits it. Thank you.",
+        'note'         => "Please review and validate the new Application SIT once the student submits it. Thank you.",
         'signoff'      => "Best regards,<br><strong>Atate On the Job Training System</strong>",
     ]);
 }
@@ -574,16 +574,16 @@ function endorsementAcceptBlockMessage($conn, $student_id, $company_id) {
     return "Please verify the endorsement letter first (set it to Verified and click Save), then accept the application.";
 }
 
-/* NEW (contract gate): once the student has uploaded the endorsement letter, the application can only be accepted
-   or rejected after the student's Student/University Contract requirement has been VERIFIED by the administrator
+/* NEW (Application SIT gate): once the student has uploaded the endorsement letter, the application can only be accepted
+   or rejected after the student's Application SIT requirement has been VERIFIED by the administrator
    (the requirements row must hold a file with status 'Verified'). Returns a message while it is still blocked,
    or null. Applications without an uploaded letter (and legacy ones) are not affected. */
 /* administrator.php writes "Verified" at once and keeps an Undo toast up for up to 5 minutes (verify_toast_gate, one row
    per live toast, removed when the toast ends or is undone, expired after 305 s). While the toast of the student's
-   contract is live, the verification is not final, so the contract still counts as NOT verified here. The row's
+   Application SIT is live, the verification is not final, so the Application SIT still counts as NOT verified here. The row's
    requirement_type says which requirement the toast is for; a toast without a type (written by an older
-   administrator.php) is treated as a possible contract toast, so the page errs on the side of waiting. Fails open on errors. */
-function contractToastActive($conn, $student_id) {
+   administrator.php) is treated as a possible Application SIT toast, so the page errs on the side of waiting. Fails open on errors. */
+function sitToastActive($conn, $student_id) {
     try {
         static $tableOk = null, $typeOk = null;
         if ($tableOk === null) {
@@ -596,7 +596,7 @@ function contractToastActive($conn, $student_id) {
         $since = time() - 305;
         $sid   = (int)$student_id;
         $sql = "SELECT 1 FROM verify_toast_gate WHERE student_id = ? AND created_ts >= ?"
-             . ($typeOk ? " AND (requirement_type IS NULL OR requirement_type = 'student_contract')" : "") . " LIMIT 1";
+             . ($typeOk ? " AND (requirement_type IS NULL OR requirement_type = 'application_sit')" : "") . " LIMIT 1";
         $q = $conn->prepare($sql);
         $q->bind_param("ii", $sid, $since);
         $q->execute();
@@ -604,40 +604,40 @@ function contractToastActive($conn, $student_id) {
         $q->close();
         return $live;
     } catch (\Throwable $e) {
-        error_log('add_ojt_student.php: contract toast check failed: ' . $e->getMessage());
+        error_log('add_ojt_student.php: Application SIT toast check failed: ' . $e->getMessage());
         return false;
     }
 }
 // 'verified' | 'toast' (verified, but the administrator's undo toast is still live) | 'unverified'
-function studentContractState($conn, $student_id) {
-    $q = $conn->prepare("SELECT 1 FROM requirements WHERE user_id = ? AND requirement_type = 'student_contract'
+function studentSitState($conn, $student_id) {
+    $q = $conn->prepare("SELECT 1 FROM requirements WHERE user_id = ? AND requirement_type = 'application_sit'
                          AND status = 'Verified' AND file_name IS NOT NULL AND LENGTH(file_name) > 0 LIMIT 1");
     $q->bind_param("i", $student_id);
     $q->execute();
     $ok = (bool)$q->get_result()->fetch_row();
     $q->close();
     if (!$ok) return 'unverified';
-    return contractToastActive($conn, (int)$student_id) ? 'toast' : 'verified';
+    return sitToastActive($conn, (int)$student_id) ? 'toast' : 'verified';
 }
-function studentContractVerified($conn, $student_id) {
-    return studentContractState($conn, $student_id) === 'verified';
+function studentSitVerified($conn, $student_id) {
+    return studentSitState($conn, $student_id) === 'verified';
 }
-function contractBlockMessage($conn, $student_id, $company_id) {
+function sitBlockMessage($conn, $student_id, $company_id) {
     try {
         $e = getEndorsementRow($conn, $student_id, $company_id);
         if (!$e || empty($e['has_file'])) return null;          // the rule starts once the letter is uploaded
-        $state = studentContractState($conn, (int)$student_id);
+        $state = studentSitState($conn, (int)$student_id);
         if ($state === 'verified') return null;
-        if ($state === 'toast') return "The administrator's verification of the student's Student/University Contract is not final yet (it can still be undone for a few minutes). The application can be accepted or rejected once it is final.";
-        return "The student's Student/University Contract has not been verified yet. The application can be accepted or rejected once the administrator verifies it.";
+        if ($state === 'toast') return "The administrator's verification of the student's Application SIT is not final yet (it can still be undone for a few minutes). The application can be accepted or rejected once it is final.";
+        return "The student's Application SIT has not been verified yet. The application can be accepted or rejected once the administrator verifies it.";
     } catch (\Throwable $e) {
-        error_log('add_ojt_student.php: contract gate check failed: ' . $e->getMessage());
+        error_log('add_ojt_student.php: Application SIT gate check failed: ' . $e->getMessage());
         return null; // never block on an error of our own
     }
 }
-// table rows: letter uploaded + contract not verified (needs the contract_verified column from fetchApplicantRows)
-function aplContractBlocked($app) {
-    return !empty($app['endo_has_file']) && (int)($app['contract_verified'] ?? 0) === 0;
+// table rows: letter uploaded + Application SIT not verified (needs the sit_verified column from fetchApplicantRows)
+function aplSitBlocked($app) {
+    return !empty($app['endo_has_file']) && (int)($app['sit_verified'] ?? 0) === 0;
 }
 
 function endoStatusMeta($status) {
@@ -659,8 +659,8 @@ function fetchApplicantRows($conn, $company_id) {
                el.uploaded_at AS endo_uploaded_at, el.sent_at AS endo_sent_at, el.uploaded_mime AS endo_mime,
                el.uploaded_name AS endo_uploaded_name, el.batch_id AS endo_batch_id,
                (el.uploaded_file IS NOT NULL) AS endo_has_file,
-               (SELECT COUNT(*) FROM requirements rq WHERE rq.user_id = a.student_id AND rq.requirement_type = 'student_contract'
-                   AND rq.status = 'Verified' AND rq.file_name IS NOT NULL AND LENGTH(rq.file_name) > 0) AS contract_verified
+               (SELECT COUNT(*) FROM requirements rq WHERE rq.user_id = a.student_id AND rq.requirement_type = 'application_sit'
+                   AND rq.status = 'Verified' AND rq.file_name IS NOT NULL AND LENGTH(rq.file_name) > 0) AS sit_verified
         FROM ojt_applications a
         INNER JOIN users u ON u.id = a.student_id
         LEFT JOIN student_information si ON si.user_id = u.id
@@ -673,11 +673,11 @@ function fetchApplicantRows($conn, $company_id) {
     $res = $st->get_result();
     $rows = [];
     while ($r = $res->fetch_assoc()) {
-        // NEW (contract gate): the administrator's Verified toast of the contract is still live -> not verified yet
-        $r['contract_toast'] = 0;
-        if ((int)($r['contract_verified'] ?? 0) > 0 && !empty($r['endo_has_file']) && contractToastActive($conn, (int)$r['student_id'])) {
-            $r['contract_verified'] = 0;
-            $r['contract_toast']    = 1;
+        // NEW (Application SIT gate): the administrator's Verified toast of the Application SIT is still live -> not verified yet
+        $r['sit_toast'] = 0;
+        if ((int)($r['sit_verified'] ?? 0) > 0 && !empty($r['endo_has_file']) && sitToastActive($conn, (int)$r['student_id'])) {
+            $r['sit_verified'] = 0;
+            $r['sit_toast']    = 1;
         }
         $rows[] = $r;
     }
@@ -699,8 +699,8 @@ function aplGroupBatches(array $rows) {
     $out = [];
     foreach ($groups as $g) {
         usort($g['rows'], fn($a, $b) => (int)$a['id'] <=> (int)$b['id']);
-        $batchBlocked = (bool)array_filter($g['rows'], 'aplContractBlocked'); // a batch is accepted / rejected as a whole
-        foreach ($g['rows'] as $r) { $r['batch_size'] = count($g['rows']); $r['batch_contract_blocked'] = $batchBlocked; $out[] = $r; }
+        $batchBlocked = (bool)array_filter($g['rows'], 'aplSitBlocked'); // a batch is accepted / rejected as a whole
+        foreach ($g['rows'] as $r) { $r['batch_size'] = count($g['rows']); $r['batch_sit_blocked'] = $batchBlocked; $out[] = $r; }
     }
     return $out;
 }
@@ -710,7 +710,7 @@ function applicantTableSignature($rows) {
     $parts = [];
     foreach ($rows as $r) {
         $parts[] = [(int)$r['id'], $r['endo_id'] ?? null, $r['endo_status'] ?? null, $r['endo_uploaded_at'] ?? null, $r['endo_remark'] ?? null,
-                    $r['day_sched'] ?? null, $r['evening_sched'] ?? null, (int)($r['contract_verified'] ?? 0), (int)($r['contract_toast'] ?? 0)]; // schedule / contract: the table re-renders when they change
+                    $r['day_sched'] ?? null, $r['evening_sched'] ?? null, (int)($r['sit_verified'] ?? 0), (int)($r['sit_toast'] ?? 0)]; // schedule / Application SIT: the table re-renders when they change
     }
     return md5(json_encode($parts));
 }
@@ -799,27 +799,27 @@ function renderApplicantRow($conn, $company_id, $company_name, $app, $currentCou
        (existing reject-with-reason modal). Accept is available once the letter is Verified
        (or for applications from before endorsement letters). */
     // ADJUSTMENT: no Verify step — accept once the student's letter is uploaded (or for older applications).
-    $contractBlocked = aplContractBlocked($app) || !empty($app['batch_contract_blocked']); // NEW (contract gate)
-    $canAccept = ($status === null || $status === 'Verified' || ($status === 'Pending' && !empty($app['endo_has_file']))) && !$contractBlocked;
+    $sitBlocked = aplSitBlocked($app) || !empty($app['batch_sit_blocked']); // NEW (Application SIT gate)
+    $canAccept = ($status === null || $status === 'Verified' || ($status === 'Pending' && !empty($app['endo_has_file']))) && !$sitBlocked;
     // ADJUSTMENT (batches): one Accept / Reject for the whole admin batch — it acts on every member.
     $batchId   = (string)($app['endo_batch_id'] ?? '');
     $isBatch   = ($batchId !== '' && (int)($app['batch_size'] ?? 1) > 1);
     $bidJs     = $h(json_encode($batchId));
     // ADJUSTMENT: icon buttons with tooltips (the tooltip sits on a wrapper so it also shows on the disabled Accept).
-    $contractTip = !empty($app['contract_toast'])
-        ? "Waiting for the administrator to finalize the contract verification"
-        : "Waiting for the student's Student/University Contract to be verified";
-    $acceptTip = $contractBlocked ? $contractTip : ($canAccept ? ($isBatch ? 'Accept the whole batch' : 'Accept application') : "Waiting for the student's uploaded endorsement letter"); // ADJUSTMENT
-    $rejectTip = $contractBlocked ? $contractTip : ($isBatch ? 'Reject the whole batch' : 'Reject application');
+    $sitTip = !empty($app['sit_toast'])
+        ? "Waiting for the administrator to finalize the Application SIT verification"
+        : "Waiting for the student's Application SIT to be verified";
+    $acceptTip = $sitBlocked ? $sitTip : ($canAccept ? ($isBatch ? 'Accept the whole batch' : 'Accept application') : "Waiting for the student's uploaded endorsement letter"); // ADJUSTMENT
+    $rejectTip = $sitBlocked ? $sitTip : ($isBatch ? 'Reject the whole batch' : 'Reject application');
     $applicationCell = '<div class="apl-app-actions">'
         . '<span class="apl-tip" data-tip="' . $h($acceptTip) . '">'
         .   '<button type="button" class="endo-btn verify apl-icon-btn" aria-label="' . $h($acceptTip) . '"' . ($canAccept ? ' onclick="' . ($isBatch ? 'acceptBatch(' . $bidJs . ', this)' : 'acceptApp(' . $id . ', this)') . '"' : ' disabled') . '><i class="fas fa-check"></i></button>'
         . '</span>'
         . '<span class="apl-tip" data-tip="' . $h($rejectTip) . '">'
-        .   '<button type="button" class="endo-btn reject apl-icon-btn" aria-label="' . $h($rejectTip) . '"' . ($contractBlocked ? ' disabled' : ' onclick="' . ($isBatch ? 'rejectBatch(' . $bidJs . ')' : 'openRejectModal(' . $id . ')') . '"') . '><i class="fas fa-times"></i></button>'
+        .   '<button type="button" class="endo-btn reject apl-icon-btn" aria-label="' . $h($rejectTip) . '"' . ($sitBlocked ? ' disabled' : ' onclick="' . ($isBatch ? 'rejectBatch(' . $bidJs . ')' : 'openRejectModal(' . $id . ')') . '"') . '><i class="fas fa-times"></i></button>'
         . '</span>'
         . '</div>'
-        . ($contractBlocked ? '<div class="endo-note">' . (!empty($app['contract_toast']) ? 'Waiting for the administrator to finalize the contract verification.' : 'Waiting for the Student/University Contract to be verified.') . '</div>'
+        . ($sitBlocked ? '<div class="endo-note">' . (!empty($app['sit_toast']) ? 'Waiting for the administrator to finalize the Application SIT verification.' : 'Waiting for the Application SIT to be verified.') . '</div>'
             : ($canAccept ? '' : '<div class="endo-note">Waiting for the uploaded letter.</div>')); // ADJUSTMENT
 
     /* NEW (schedule change): the student's Day / Evening Schedule from AccomForm.php + an Edit button */
@@ -1254,7 +1254,7 @@ if (isset($_POST['check_applicants_table'])) {
 
 /* ================= NEW (schedule change): SUPERVISOR SETS A NEW SCHEDULE FOR AN APPLICANT =================
    1) the student's Day / Evening Schedule (student_information, the values shown on AccomForm.php) is updated;
-   2) the student's Student/University Contract is removed: the `requirements` row (the uploaded file is the blob in
+   2) the student's Application SIT is removed: the `requirements` row (the uploaded file is the blob in
       that row), the application snapshots of it, and the verified copies in uploads/<student>/ — the same clean-up
       company_list.php does for the Application SIT when a student replaces the preferred placement;
    3) the student goes back to "Pending" validation and the change is recorded in student_schedule_changes, which
@@ -1311,13 +1311,13 @@ if (isset($_POST['update_student_schedule'])) {
         $u->execute();
         $u->close();
 
-        // the Student/University Contract: the requirement row (= the uploaded file) and its application snapshots
-        $d = $conn->prepare("DELETE FROM requirements WHERE user_id = ? AND requirement_type = 'student_contract'");
+        // the Application SIT: the requirement row (= the uploaded file) and its application snapshots
+        $d = $conn->prepare("DELETE FROM requirements WHERE user_id = ? AND requirement_type = 'application_sit'");
         $d->bind_param("i", $sid);
         $d->execute();
-        $contractRemoved = $d->affected_rows > 0 ? 1 : 0;
+        $sitRemoved = $d->affected_rows > 0 ? 1 : 0;
         $d->close();
-        $d = $conn->prepare("DELETE FROM application_requirements WHERE student_id = ? AND requirement_type = 'student_contract'");
+        $d = $conn->prepare("DELETE FROM application_requirements WHERE student_id = ? AND requirement_type = 'application_sit'");
         $d->bind_param("i", $sid);
         $d->execute();
         $d->close();
@@ -1333,7 +1333,7 @@ if (isset($_POST['update_student_schedule'])) {
         $h = $conn->prepare("INSERT INTO student_schedule_changes
                 (student_id, company_id, old_day_sched, old_evening_sched, new_day_sched, new_evening_sched, reason, contract_removed)
                 VALUES (?,?,?,?,?,?,?,?)");
-        $h->bind_param("iisssssi", $sid, $company_id, $oldDay, $oldEve, $newDay, $newEve, $reason, $contractRemoved);
+        $h->bind_param("iisssssi", $sid, $company_id, $oldDay, $oldEve, $newDay, $newEve, $reason, $sitRemoved);
         $h->execute();
         $h->close();
 
@@ -1342,21 +1342,21 @@ if (isset($_POST['update_student_schedule'])) {
 
         // ── after the commit: stored files + e-mails (never able to undo the change) ──
         $notes = [];
-        $clean = aplRemoveContractFiles($conn, $sid);
-        if (!empty($clean['files_failed'])) $notes[] = (int)$clean['files_failed'] . ' stored contract file(s) could not be deleted from the uploads folder';
+        $clean = aplRemoveSitFiles($conn, $sid);
+        if (!empty($clean['files_failed'])) $notes[] = (int)$clean['files_failed'] . ' stored Application SIT file(s) could not be deleted from the uploads folder';
 
         $studentName = trim($app['first_name'] . ' ' . $app['last_name']);
         $mail = ['student' => false, 'admins' => 0, 'admins_total' => 0];
         try {
             if (filter_var((string)$app['email'], FILTER_VALIDATE_EMAIL)) {
                 $mail['student'] = sendMail($app['email'], 'Your OJT Schedule Has Been Updated',
-                    buildScheduleChangedStudentEmail($studentName, $company_name, $oldDay, $oldEve, $newDay, $newEve, $reason, (bool)$contractRemoved));
+                    buildScheduleChangedStudentEmail($studentName, $company_name, $oldDay, $oldEve, $newDay, $newEve, $reason, (bool)$sitRemoved));
             }
             $admins = aplAdminRecipients($conn);
             $mail['admins_total'] = count($admins);
             foreach ($admins as $adm) {
                 if (sendMail($adm['email'], 'Student Schedule Updated: ' . $studentName,
-                        buildScheduleChangedAdminEmail($adm['name'], $studentName, (string)($app['course'] ?? ''), $company_name, $supervisor_name, $oldDay, $oldEve, $newDay, $newEve, $reason, (bool)$contractRemoved))) {
+                        buildScheduleChangedAdminEmail($adm['name'], $studentName, (string)($app['course'] ?? ''), $company_name, $supervisor_name, $oldDay, $oldEve, $newDay, $newEve, $reason, (bool)$sitRemoved))) {
                     $mail['admins']++;
                 }
             }
@@ -1365,12 +1365,12 @@ if (isset($_POST['update_student_schedule'])) {
         if ($mail['admins'] < $mail['admins_total'])        $notes[] = "the e-mail to the administrator could not be sent";
         if ($mail['admins_total'] === 0)                    $notes[] = "no administrator e-mail address is on file";
 
-        $msg = "Schedule updated for " . $studentName . ". " . ($contractRemoved
-            ? "The Student/University Contract was removed and has to be submitted again."
-            : "No Student/University Contract was on file, so the student has to submit one that reflects the new schedule.");
+        $msg = "Schedule updated for " . $studentName . ". " . ($sitRemoved
+            ? "The Application SIT was removed and has to be submitted again."
+            : "No Application SIT was on file, so the student has to submit one that reflects the new schedule.");
         if (!$notes) $msg .= " The student and the administrator were notified by e-mail.";
         else         $msg .= " Note: " . implode('; ', $notes) . ".";
-        $out = ['success' => true, 'message' => $msg, 'mail' => $mail, 'contract_removed' => (bool)$contractRemoved,
+        $out = ['success' => true, 'message' => $msg, 'mail' => $mail, 'sit_removed' => (bool)$sitRemoved,
                 'day_sched' => $newDay, 'evening_sched' => $newEve];
     } catch (RuntimeException $e) {
         if ($inTx) { try { $conn->rollback(); } catch (\Throwable $e2) {} }
@@ -1494,9 +1494,9 @@ if (isset($_POST['accept_app'])) {
             echo json_encode($ajax_response);
             exit;
         }
-        $contractBlockMsg = contractBlockMessage($conn, $student_id, $company_id); // NEW (contract gate)
-        if ($contractBlockMsg !== null) {
-            $ajax_response['message'] = $contractBlockMsg;
+        $sitBlockMsg = sitBlockMessage($conn, $student_id, $company_id); // NEW (Application SIT gate)
+        if ($sitBlockMsg !== null) {
+            $ajax_response['message'] = $sitBlockMsg;
             $ajax_response['blocked'] = true;
             header('Content-Type: application/json');
             echo json_encode($ajax_response);
@@ -1605,8 +1605,8 @@ if (isset($_POST['reject_app'])) {
     $srow = $stmt->get_result()->fetch_assoc();
     $stmt->close();
 
-    if ($srow && ($contractBlockMsg = contractBlockMessage($conn, (int)$srow['student_id'], $company_id)) !== null) { // NEW (contract gate)
-        $ajax_response['message'] = $contractBlockMsg;
+    if ($srow && ($sitBlockMsg = sitBlockMessage($conn, (int)$srow['student_id'], $company_id)) !== null) { // NEW (Application SIT gate)
+        $ajax_response['message'] = $sitBlockMsg;
         $ajax_response['blocked'] = true;
     } elseif ($srow) {
         // UPDATED (this adjustment): administrator.php email design, no emoji
@@ -2865,7 +2865,7 @@ $result = $stmt->get_result();
             <div class="sched-label">Reason for the change <span style="color:#A02A2A">*</span></div>
             <textarea id="schedReason" maxlength="500" placeholder="e.g. Our department needs interns on different days starting next week..." oninput="schedValidate()"></textarea>
             <div id="schedMsg" role="status"></div>
-            <p class="sm-note">Saving also removes the student's current <strong>Student/University Contract</strong> &mdash; the student will need to upload a new one that reflects the new schedule.</p>
+            <p class="sm-note">Saving also removes the student's current <strong>Application SIT</strong> &mdash; the student will need to upload a new one that reflects the new schedule.</p>
         </div>
         <div class="sm-actions">
             <button type="button" class="sm-btn-no" onclick="closeSchedModal()">Cancel</button>
@@ -2887,7 +2887,7 @@ $result = $stmt->get_result();
             <div class="sc-h">When you confirm</div>
             <ol class="sc-steps">
                 <li>The student's schedule is updated.</li>
-                <li>The student's <strong>Student/University Contract</strong> is removed (the record and the uploaded file), if one is on file. The student has to submit a new one and have it validated again.</li>
+                <li>The student's <strong>Application SIT</strong> is removed (the record and the uploaded file), if one is on file. The student has to submit a new one and have it validated again.</li>
                 <li>The student and the administrator are notified by email, together with your reason.</li>
             </ol>
             <div class="sc-h">Your reason</div>
@@ -3446,7 +3446,7 @@ document.getElementById('rejectForm').addEventListener('submit', function(e) {
         .then(r => r.text())
         .then((rawText) => {
             var rj = null; try { rj = JSON.parse(rawText); } catch (e) {}
-            if (rj && rj.blocked) { // NEW (contract gate): the server refused — nothing was rejected
+            if (rj && rj.blocked) { // NEW (Application SIT gate): the server refused — nothing was rejected
                 btn.disabled = false;
                 btn.innerHTML = '<i class="fas fa-paper-plane"></i> Send &amp; Reject';
                 showToast(rj.message || 'This application cannot be rejected yet.', 'error');
@@ -4750,7 +4750,7 @@ function moveAppToTable(appId, btn) {
 // ══════════════════════════════════════════════════════════════════════
 // NEW (schedule change): the supervisor sets a new Day / Evening Schedule for an applicant.
 //   Edit → "Set Up New Schedule" popup (days + reason) → Continue → confirmation popup →
-//   server updates the schedule, removes the Student/University Contract and e-mails the
+//   server updates the schedule, removes the Application SIT and e-mails the
 //   student and the administrator (update_student_schedule handler).
 // ══════════════════════════════════════════════════════════════════════
 var SCHED_DAYS = [['M','Mon'],['T','Tue'],['W','Wed'],['Th','Thu'],['F','Fri']];
@@ -5020,9 +5020,9 @@ document.addEventListener('submit', function (e) {
         var fd = new FormData(); fd.append('reject_app', '1'); fd.append('reject_app_id', String(app.id)); fd.append('reject_reason', reason); return fd;
     }).then(function (results) {
         var blocked = results.filter(function (r) { return r.res && r.res.blocked; });
-        if (blocked.length) { // NEW (contract gate): the server refused some members
+        if (blocked.length) { // NEW (Application SIT gate): the server refused some members
             aplReloadWithToast((apps.length - blocked.length) + ' of ' + apps.length + ' students in the batch were rejected and notified. Not rejected: ' +
-                blocked.map(function (r) { return r.app.name; }).join(', ') + " (the Student/University Contract is not verified yet).", 'error');
+                blocked.map(function (r) { return r.app.name; }).join(', ') + " (the Application SIT is not verified yet).", 'error');
         } else {
             aplReloadWithToast('All ' + apps.length + ' students in the batch were rejected and notified.', 'error');
         }
