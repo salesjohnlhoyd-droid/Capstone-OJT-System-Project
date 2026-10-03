@@ -8,8 +8,11 @@ require_once __DIR__ . '/phpmailer/src/SMTP.php';
 
 function sendStatusEmail($toEmail, $fullName, $requirementName, $status, $remark = null)
 {
-    // ADJUSTMENT: "Rejected" means the same as "Denied" (both are shown to the student as "Declined"); the status values the callers send are unchanged.
-    if ($status === 'Rejected') $status = 'Denied';
+    // ADJUSTMENT: no email is sent when a requirement is declined (status "Denied", or its alias "Rejected") — the student
+    // sees the decline and the admin's remark on the portal itself. Callers are unchanged: they still call this for every
+    // status, and a declined one simply returns true without sending anything.
+    if ($status === 'Denied' || $status === 'Rejected') return true;
+
     $mail = new PHPMailer(true);
 
     try {
@@ -28,53 +31,16 @@ function sendStatusEmail($toEmail, $fullName, $requirementName, $status, $remark
         $mail->isHTML(true);
         $mail->Subject = 'Document Submission Update — ' . $requirementName;
 
-        // ================= STATUS STYLING & MESSAGING =================
+        // ================= STATUS MESSAGING =================
+        $safeReq = htmlspecialchars($requirementName);
         if ($status === 'Verified') {
-            $statusIcon     = '';
-            $statusColor    = '#16a34a';
-            $statusBg       = '#f0fdf4';
-            $statusBorder   = '#bbf7d0';
             $statusLabel    = 'Accepted';
-            $statusHeading  = 'Great news! Your document has been accepted.';
-            $statusMessage  = "Your requirement <strong>" . htmlspecialchars($requirementName) . "</strong> has been accepted and you're one step closer to your OJT. Keep up the great work!";
-            $subMessage     = "No further action is needed for this document. Please log in to the portal to check your overall submission progress.";
-        } elseif ($status === 'Denied') {
-            $statusIcon     = '';
-            $statusColor    = '#b45309';
-            $statusBg       = '#fffbeb';
-            $statusBorder   = '#fde68a';
-            $statusLabel    = 'Declined';   // ADJUSTMENT: was 'Needs Attention' — "Declined" everywhere
-            $statusHeading  = "Your document has been declined — don't worry, it needs only a small correction.";
-            $statusMessage  = "Your requirement <strong>" . htmlspecialchars($requirementName) . "</strong> has been <strong style='color:#b45309;'>DECLINED</strong> and needs a correction before it can be accepted. Please review the remark below and resubmit the updated document.";
-            $subMessage     = "Once you have made the necessary corrections, simply log in to the portal and re-upload the document. We're here to help you get it right!";
+            $statusMessage  = "Great news! Your <strong>{$safeReq}</strong> has been reviewed and <strong style='color:#16a34a;'>accepted</strong>. Thank you for submitting it — you're one step closer to starting your OJT!";
+            $subMessage     = "There's nothing more you need to do for this document. You can log in to the portal anytime to see how the rest of your requirements are coming along.";
         } else {
-            $statusIcon     = '';
-            $statusColor    = '#0369a1';
-            $statusBg       = '#f0f9ff';
-            $statusBorder   = '#bae6fd';
             $statusLabel    = 'Being Processed';
-            $statusHeading  = 'Hang tight! Your document is being processed.';
-            $statusMessage  = "Your requirement <strong>" . htmlspecialchars($requirementName) . "</strong> is in the queue and will be reviewed by the administrator shortly.";
-            $subMessage     = "You will receive another notification once your document has been reviewed. In the meantime, feel free to log in to the portal to check your submission status.";
-        }
-
-        // ================= REMARK BLOCK (only for Denied) =================
-        $remarkBlock = '';
-        if ($status === 'Denied' && $remark) {
-            $remarkBlock = "
-                <table width='100%' cellpadding='0' cellspacing='0' style='background:#fff7ed; border:1px solid #fed7aa; border-radius:8px; margin:18px 0 6px;'>
-                    <tr>
-                        <td style='padding:14px 18px;'>
-                            <div style='font-size:11px; color:#92400e; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; margin-bottom:6px;'>
-                                 Reason for Declining
-                            </div>
-                            <div style='font-size:14px; color:#78350f; line-height:1.7;'>
-                                " . htmlspecialchars($remark) . "
-                            </div>
-                        </td>
-                    </tr>
-                </table>
-            ";
+            $statusMessage  = "Thank you for your submission! Your <strong>{$safeReq}</strong> has been received and is now in line to be reviewed by the administrator.";
+            $subMessage     = "We'll send you another update as soon as the review is done. In the meantime, you can check the status of all your documents in the portal anytime.";
         }
 
         // ================= EMAIL BODY =================
@@ -92,38 +58,13 @@ function sendStatusEmail($toEmail, $fullName, $requirementName, $status, $remark
                   </td>
                 </tr>
 
-                <!-- Status Banner -->
-                <tr>
-                  <td style='background:{$statusBg}; border-bottom:2px solid {$statusBorder}; padding:22px 36px; text-align:center;'>
-                    <div style='font-size:36px; margin-bottom:8px;'>{$statusIcon}</div>
-                    <div style='font-size:13px; font-weight:700; text-transform:uppercase; letter-spacing:1px; color:{$statusColor}; margin-bottom:6px;'>{$statusLabel}</div>
-                    <div style='font-size:16px; font-weight:700; color:#1e293b;'>{$statusHeading}</div>
-                  </td>
-                </tr>
-
                 <!-- Body -->
                 <tr>
                   <td style='padding:28px 36px 10px;'>
                     <p style='margin:0 0 14px; font-size:15px; color:#374151;'>Hi <strong>" . htmlspecialchars($fullName) . "</strong>,</p>
                     <p style='margin:0 0 10px; font-size:14px; color:#4b5563; line-height:1.7;'>{$statusMessage}</p>
 
-                    {$remarkBlock}
-
                     <p style='margin:16px 0 0; font-size:14px; color:#4b5563; line-height:1.7;'>{$subMessage}</p>
-                  </td>
-                </tr>
-
-                <!-- Requirement Card -->
-                <tr>
-                  <td style='padding:16px 36px;'>
-                    <table width='100%' cellpadding='0' cellspacing='0' style='background:#f8f7ff; border:1px solid #e0d9ff; border-radius:8px;'>
-                      <tr>
-                        <td style='padding:14px 18px;'>
-                          <div style='font-size:11px; color:#6b7280; font-weight:600; text-transform:uppercase; letter-spacing:0.5px; margin-bottom:4px;'>Document</div>
-                          <div style='font-size:15px; font-weight:700; color:#07145f;'>" . htmlspecialchars($requirementName) . "</div>
-                        </td>
-                      </tr>
-                    </table>
                   </td>
                 </tr>
 
@@ -147,7 +88,9 @@ function sendStatusEmail($toEmail, $fullName, $requirementName, $status, $remark
         </div>
         ";
 
-        $mail->AltBody = "Hi $fullName, your requirement $requirementName is now $statusLabel. Please log in to the OJT portal for details.";
+        $mail->AltBody = $status === 'Verified'
+            ? "Hi $fullName, great news! Your $requirementName has been accepted. Log in to the OJT portal anytime to see your overall progress."
+            : "Hi $fullName, thank you for your submission! Your $requirementName has been received and will be reviewed soon. Log in to the OJT portal anytime to check its status.";
 
         $mail->send();
         return true;
@@ -182,9 +125,9 @@ function sendApplicationResultEmail($toEmail, $fullName, $companyName, $result)
             $statusBorder  = '#bbf7d0';
             $statusIcon    = '';
             $statusHeading = 'Your Application Has Been Approved!';
-            $bodyMessage   = "Congratulations! Your OJT application to <strong>" . htmlspecialchars($companyName) . "</strong> has been <strong style='color:#16a34a;'>APPROVED</strong> by the administrator.";
-            $subMessage    = "You may now proceed to the next steps of your OJT process. Please log in to the portal for further instructions.";
-            $footerNote    = "We're excited for you to begin your OJT journey. Good luck! 🎉";
+            $bodyMessage   = "Congratulations! Your OJT application to <strong>" . htmlspecialchars($companyName) . "</strong> has been <strong style='color:#16a34a;'>approved</strong> by the administrator.";
+            $subMessage    = "You're all set to move on to the next steps of your OJT. Please log in to the portal for your further instructions.";
+            $footerNote    = "We're excited for you to begin this journey — best of luck! 🎉";
         } else {
             $mail->Subject = 'OJT Application Declined — ' . $companyName;   // ADJUSTMENT: was "Status Update"
 
@@ -193,9 +136,9 @@ function sendApplicationResultEmail($toEmail, $fullName, $companyName, $result)
             $statusBorder  = '#fecaca';
             $statusIcon    = '';
             $statusHeading = 'Your Application Has Been Declined';
-            $bodyMessage   = "We regret to inform you that your OJT application to <strong>" . htmlspecialchars($companyName) . "</strong> has been <strong style='color:#dc2626;'>DECLINED</strong> by the administrator.";
-            $subMessage    = "You may apply to a different company through the portal. If you have questions or concerns, please contact your OJT coordinator.";
-            $footerNote    = "Don't be discouraged — other opportunities are available. Please reach out to your coordinator for guidance.";
+            $bodyMessage   = "Thank you for your interest in <strong>" . htmlspecialchars($companyName) . "</strong> — after careful review, your application has been <strong style='color:#dc2626;'>declined</strong> by the administrator at this time.";
+            $subMessage    = "This isn't the end of the road — you're welcome to apply to another company through the portal, and your OJT coordinator is happy to help if you have any questions.";
+            $footerNote    = "Keep going — the right opportunity is out there for you.";
         }
 
         $mail->Body = "
@@ -212,30 +155,12 @@ function sendApplicationResultEmail($toEmail, $fullName, $companyName, $result)
                   </td>
                 </tr>
 
-                <!-- Status Banner -->
-                <tr>
-                  <td style='background:{$statusBg}; border-bottom:2px solid {$statusBorder}; padding:22px 36px; text-align:center;'>
-                    <div style='font-size:32px; margin-bottom:8px;'>{$statusIcon}</div>
-                    <div style='font-size:17px; font-weight:700; color:{$statusColor};'>{$statusHeading}</div>
-                  </td>
-                </tr>
-
                 <!-- Body -->
                 <tr>
                   <td style='padding:30px 36px;'>
-                    <p style='margin:0 0 14px; font-size:15px; color:#374151;'>Dear <strong>{$fullName}</strong>,</p>
+                    <p style='margin:0 0 14px; font-size:15px; color:#374151;'>Hi <strong>" . htmlspecialchars($fullName) . "</strong>,</p>
                     <p style='margin:0 0 10px; font-size:14px; color:#4b5563; line-height:1.7;'>{$bodyMessage}</p>
-                    <p style='margin:0 0 24px; font-size:14px; color:#4b5563; line-height:1.7;'>{$subMessage}</p>
-
-                    <!-- Company Card -->
-                    <table width='100%' cellpadding='0' cellspacing='0' style='background:#f8f7ff; border:1px solid #e0d9ff; border-radius:8px; margin-bottom:24px;'>
-                      <tr>
-                        <td style='padding:14px 18px;'>
-                          <div style='font-size:11px; color:#6b7280; font-weight:600; text-transform:uppercase; letter-spacing:0.5px; margin-bottom:4px;'>Company Applied To</div>
-                          <div style='font-size:16px; font-weight:700; color:#07145f;'>" . htmlspecialchars($companyName) . "</div>
-                        </td>
-                      </tr>
-                    </table>
+                    <p style='margin:0 0 20px; font-size:14px; color:#4b5563; line-height:1.7;'>{$subMessage}</p>
 
                     <p style='margin:0; font-size:13px; color:#6b7280; font-style:italic;'>{$footerNote}</p>
                   </td>
@@ -261,7 +186,7 @@ function sendApplicationResultEmail($toEmail, $fullName, $companyName, $result)
         </div>
         ";
 
-        $mail->AltBody = "Hi $fullName, your OJT application to $companyName has been " . ($result === 'approved' ? 'APPROVED' : 'DECLINED') . ". Please log in to the portal for details.";
+        $mail->AltBody = "Hi $fullName, your OJT application to $companyName has been " . ($result === 'approved' ? 'approved. Congratulations!' : 'declined at this time. You are welcome to apply to another company — your OJT coordinator can help.') . " Log in to the portal for details.";
 
         $mail->send();
         return true;
@@ -317,8 +242,8 @@ function sendMoaWorkflowEmail($toEmail, $fullName, $companyName, $stage, $commen
                 $statusBorder  = '#bfdbfe';
                 $statusLabel   = 'Under Review';
                 $statusHeading = 'Your MOA Document is now being reviewed.';
-                $bodyMessage   = "Your submitted Memorandum of Agreement (MOA) document for <strong>" . htmlspecialchars($companyName) . "</strong> is currently <strong style='color:#1e40af;'>UNDER REVIEW</strong> by the administrator.";
-                $subMessage    = "No action is needed from you at this time. We will notify you again once the review has been completed.";
+                $bodyMessage   = "Thank you for submitting the Memorandum of Agreement (MOA) for <strong>" . htmlspecialchars($companyName) . "</strong> — it is now <strong style='color:#1e40af;'>under review</strong> by the administrator.";
+                $subMessage    = "There's nothing you need to do right now — we'll let you know as soon as the review is complete.";
                 break;
 
             case 'approved':
@@ -327,8 +252,8 @@ function sendMoaWorkflowEmail($toEmail, $fullName, $companyName, $stage, $commen
                 $statusBorder  = '#a7f3d0';
                 $statusLabel   = 'Approved';
                 $statusHeading = 'Great news! Your MOA Document has been approved.';
-                $bodyMessage   = "Your Memorandum of Agreement (MOA) document for <strong>" . htmlspecialchars($companyName) . "</strong> has been <strong style='color:#065f46;'>APPROVED</strong> by the administrator.";
-                $subMessage    = "The next step is the official signing schedule. You will receive another email shortly with the proposed date and time for signing.";
+                $bodyMessage   = "Great news! The Memorandum of Agreement (MOA) for <strong>" . htmlspecialchars($companyName) . "</strong> has been <strong style='color:#065f46;'>approved</strong> by the administrator. Thank you for your partnership!";
+                $subMessage    = "Next up is the official signing. You'll receive another email shortly with the proposed date and time.";
                 break;
 
             case 'scheduled':
@@ -337,8 +262,8 @@ function sendMoaWorkflowEmail($toEmail, $fullName, $companyName, $stage, $commen
                 $statusBorder  = '#ddd6fe';
                 $statusLabel   = 'Scheduled for Signing';
                 $statusHeading = 'Your MOA signing has been scheduled!';
-                $bodyMessage   = "Your Memorandum of Agreement (MOA) document for <strong>" . htmlspecialchars($companyName) . "</strong> has been verified and is now <strong style='color:#5b21b6;'>SCHEDULED FOR SIGNING</strong>.";
-                $subMessage    = "Please review the signing schedule below. Should you have any questions or need to make adjustments, kindly contact your OJT coordinator.";
+                $bodyMessage   = "The Memorandum of Agreement (MOA) for <strong>" . htmlspecialchars($companyName) . "</strong> has been verified and is now <strong style='color:#5b21b6;'>scheduled for signing</strong>. We're looking forward to it!";
+                $subMessage    = "Please take a look at the signing schedule above. If you have questions or need to adjust anything, feel free to reach out to your OJT coordinator.";
                 break;
 
             case 'pending':
@@ -348,8 +273,8 @@ function sendMoaWorkflowEmail($toEmail, $fullName, $companyName, $stage, $commen
                 $statusBorder  = '#fde68a';
                 $statusLabel   = 'Pending';
                 $statusHeading = 'Your MOA Document has been received.';
-                $bodyMessage   = "We have received your Memorandum of Agreement (MOA) document for <strong>" . htmlspecialchars($companyName) . "</strong>. It is now <strong style='color:#854d0e;'>PENDING</strong> and will be reviewed by the administrator shortly.";
-                $subMessage    = "You will receive another notification once your document review begins.";
+                $bodyMessage   = "Thank you! We've received the Memorandum of Agreement (MOA) for <strong>" . htmlspecialchars($companyName) . "</strong> — it is <strong style='color:#854d0e;'>pending</strong> and will be reviewed by the administrator shortly.";
+                $subMessage    = "We'll notify you as soon as the review begins. No action is needed from you for now.";
                 break;
         }
 
@@ -422,14 +347,6 @@ function sendMoaWorkflowEmail($toEmail, $fullName, $companyName, $stage, $commen
                   </td>
                 </tr>
 
-                <!-- Status Banner -->
-                <tr>
-                  <td style='background:{$statusBg}; border-bottom:2px solid {$statusBorder}; padding:22px 36px; text-align:center;'>
-                    <div style='font-size:13px; font-weight:700; text-transform:uppercase; letter-spacing:1px; color:{$statusColor}; margin-bottom:6px;'>MOA Document — {$statusLabel}</div>
-                    <div style='font-size:16px; font-weight:700; color:#1e293b;'>{$statusHeading}</div>
-                  </td>
-                </tr>
-
                 <!-- Body -->
                 <tr>
                   <td style='padding:28px 36px 10px;'>
@@ -440,20 +357,6 @@ function sendMoaWorkflowEmail($toEmail, $fullName, $companyName, $stage, $commen
                     {$commentBlock}
 
                     <p style='margin:16px 0 0; font-size:14px; color:#4b5563; line-height:1.7;'>{$subMessage}</p>
-                  </td>
-                </tr>
-
-                <!-- Company Card -->
-                <tr>
-                  <td style='padding:16px 36px;'>
-                    <table width='100%' cellpadding='0' cellspacing='0' style='background:#f8f7ff; border:1px solid #e0d9ff; border-radius:8px;'>
-                      <tr>
-                        <td style='padding:14px 18px;'>
-                          <div style='font-size:11px; color:#6b7280; font-weight:600; text-transform:uppercase; letter-spacing:0.5px; margin-bottom:4px;'>Company</div>
-                          <div style='font-size:15px; font-weight:700; color:#07145f;'>" . htmlspecialchars($companyName) . "</div>
-                        </td>
-                      </tr>
-                    </table>
                   </td>
                 </tr>
 
@@ -477,7 +380,7 @@ function sendMoaWorkflowEmail($toEmail, $fullName, $companyName, $stage, $commen
         </div>
         ";
 
-        $altBody = "Hi $fullName, the MOA document for $companyName is now \"$statusLabel\".";
+        $altBody = "Hi $fullName, thank you for your partnership! The MOA for $companyName is now \"$statusLabel\".";
         if (!empty($comment)) {
             $altBody .= " Admin note: " . $comment;
         }
