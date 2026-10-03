@@ -8,6 +8,8 @@ require_once __DIR__ . '/phpmailer/src/SMTP.php';
 
 function sendStatusEmail($toEmail, $fullName, $requirementName, $status, $remark = null)
 {
+    // ADJUSTMENT: "Rejected" means the same as "Denied" (both are shown to the student as "Declined"); the status values the callers send are unchanged.
+    if ($status === 'Rejected') $status = 'Denied';
     $mail = new PHPMailer(true);
 
     try {
@@ -41,9 +43,9 @@ function sendStatusEmail($toEmail, $fullName, $requirementName, $status, $remark
             $statusColor    = '#b45309';
             $statusBg       = '#fffbeb';
             $statusBorder   = '#fde68a';
-            $statusLabel    = 'Needs Attention';
-            $statusHeading  = "Don't worry! Your document needs a small correction.";
-            $statusMessage  = "Your requirement <strong>" . htmlspecialchars($requirementName) . "</strong> needs a correction before it can be accepted. Please review the remark below and resubmit the updated document.";
+            $statusLabel    = 'Declined';   // ADJUSTMENT: was 'Needs Attention' — "Declined" everywhere
+            $statusHeading  = "Your document has been declined — don't worry, it needs only a small correction.";
+            $statusMessage  = "Your requirement <strong>" . htmlspecialchars($requirementName) . "</strong> has been <strong style='color:#b45309;'>DECLINED</strong> and needs a correction before it can be accepted. Please review the remark below and resubmit the updated document.";
             $subMessage     = "Once you have made the necessary corrections, simply log in to the portal and re-upload the document. We're here to help you get it right!";
         } else {
             $statusIcon     = '';
@@ -64,7 +66,7 @@ function sendStatusEmail($toEmail, $fullName, $requirementName, $status, $remark
                     <tr>
                         <td style='padding:14px 18px;'>
                             <div style='font-size:11px; color:#92400e; font-weight:700; text-transform:uppercase; letter-spacing:0.5px; margin-bottom:6px;'>
-                                 Reason for Correction
+                                 Reason for Declining
                             </div>
                             <div style='font-size:14px; color:#78350f; line-height:1.7;'>
                                 " . htmlspecialchars($remark) . "
@@ -184,13 +186,14 @@ function sendApplicationResultEmail($toEmail, $fullName, $companyName, $result)
             $subMessage    = "You may now proceed to the next steps of your OJT process. Please log in to the portal for further instructions.";
             $footerNote    = "We're excited for you to begin your OJT journey. Good luck! 🎉";
         } else {
-            $mail->Subject = 'OJT Application Status Update — ' . $companyName;
+            $mail->Subject = 'OJT Application Declined — ' . $companyName;   // ADJUSTMENT: was "Status Update"
+
             $statusColor   = '#dc2626';
             $statusBg      = '#fff1f1';
             $statusBorder  = '#fecaca';
             $statusIcon    = '';
-            $statusHeading = 'Application Not Approved';
-            $bodyMessage   = "We regret to inform you that your OJT application to <strong>" . htmlspecialchars($companyName) . "</strong> has been <strong style='color:#dc2626;'>DENIED</strong> by the administrator.";
+            $statusHeading = 'Your Application Has Been Declined';
+            $bodyMessage   = "We regret to inform you that your OJT application to <strong>" . htmlspecialchars($companyName) . "</strong> has been <strong style='color:#dc2626;'>DECLINED</strong> by the administrator.";
             $subMessage    = "You may apply to a different company through the portal. If you have questions or concerns, please contact your OJT coordinator.";
             $footerNote    = "Don't be discouraged — other opportunities are available. Please reach out to your coordinator for guidance.";
         }
@@ -258,7 +261,7 @@ function sendApplicationResultEmail($toEmail, $fullName, $companyName, $result)
         </div>
         ";
 
-        $mail->AltBody = "Hi $fullName, your OJT application to $companyName has been " . strtoupper($result) . ". Please log in to the portal for details.";
+        $mail->AltBody = "Hi $fullName, your OJT application to $companyName has been " . ($result === 'approved' ? 'APPROVED' : 'DECLINED') . ". Please log in to the portal for details.";
 
         $mail->send();
         return true;
