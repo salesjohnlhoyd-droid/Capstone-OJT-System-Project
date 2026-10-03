@@ -32,12 +32,12 @@ function sendStatusEmail($toEmail, $fullName, $requirementName, $status, $remark
         // ================= STATUS MESSAGING =================
         $safeReq = htmlspecialchars($requirementName);
         if ($status === 'Verified') {
-            $statusLabel    = 'Accepted';
-            $statusMessage  = "Great news! Your <strong>{$safeReq}</strong> has been reviewed and <strong style='color:#16a34a;'>accepted</strong>. Thank you for submitting it — you're one step closer to starting your OJT!";
+            $statusLabel    = 'Verified';
+            $statusMessage  = "Great news! Your <strong>{$safeReq}</strong> has been reviewed and <strong style='color:#16a34a;'>verified</strong>. Thank you for submitting it — you're one step closer to starting your OJT!";
             $subMessage     = "There's nothing more you need to do for this document. You can log in to the portal anytime to see how the rest of your requirements are coming along.";
         } elseif ($status === 'Denied') {
             $statusLabel    = 'Declined';
-            $statusMessage  = "Thank you for submitting your <strong>{$safeReq}</strong>. After review, it has been <strong style='color:#b45309;'>declined</strong> and needs a small correction before it can be accepted.";
+            $statusMessage  = "Thank you for submitting your <strong>{$safeReq}</strong>. After review, it has been <strong style='color:#b45309;'>declined</strong> and needs a small correction before it can be verified.";
             $subMessage     = "Please take a look at the reason above, then log in to the portal and re-upload the corrected document. You've got this — and we're here to help if you need anything!";
         } else {
             $statusLabel    = 'Being Processed';
@@ -105,7 +105,7 @@ function sendStatusEmail($toEmail, $fullName, $requirementName, $status, $remark
         ";
 
         $mail->AltBody = $status === 'Verified'
-            ? "Hi $fullName, great news! Your $requirementName has been accepted. Log in to the OJT portal anytime to see your overall progress."
+            ? "Hi $fullName, great news! Your $requirementName has been verified. Log in to the OJT portal anytime to see your overall progress."
             : ($status === 'Denied'
             ? "Hi $fullName, your $requirementName has been declined and needs a small correction." . (trim((string)$remark) !== '' ? " Reason: " . rtrim(trim((string)$remark), '.') . "." : '') . " Please log in to the OJT portal and re-upload the corrected document."
             : "Hi $fullName, thank you for your submission! Your $requirementName has been received and will be reviewed soon. Log in to the OJT portal anytime to check its status.");
