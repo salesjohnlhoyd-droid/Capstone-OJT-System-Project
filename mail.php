@@ -114,7 +114,7 @@ function sendStatusEmail($toEmail, $fullName, $requirementName, $status, $remark
         $mail->AltBody = $status === 'Verified'
             ? "Hi $fullName, great news! Your $requirementName has been accepted. Log in to the OJT portal anytime to see your overall progress."
             : ($status === 'Denied'
-            ? "Hi $fullName, your $requirementName has been declined and needs a small correction." . (trim((string)$remark) !== '' ? " Reason: " . trim((string)$remark) . "." : '') . " Please log in to the OJT portal and re-upload the corrected document."
+            ? "Hi $fullName, your $requirementName has been declined and needs a small correction." . (trim((string)$remark) !== '' ? " Reason: " . rtrim(trim((string)$remark), '.') . "." : '') . " Please log in to the OJT portal and re-upload the corrected document."
             : "Hi $fullName, thank you for your submission! Your $requirementName has been received and will be reviewed soon. Log in to the OJT portal anytime to check its status.");
 
         $mail->send();
