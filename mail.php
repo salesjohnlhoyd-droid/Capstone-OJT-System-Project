@@ -91,13 +91,6 @@ function sendStatusEmail($toEmail, $fullName, $requirementName, $status, $remark
                   </td>
                 </tr>
 
-                <!-- CTA -->
-                <tr>
-                  <td style='padding:8px 36px 28px; text-align:center;'>
-                    <a href='#' style='display:inline-block; background:#07145f; color:#FFD700; text-decoration:none; font-weight:700; font-size:13px; padding:12px 30px; border-radius:8px;'>Log In to OJT Portal</a>
-                  </td>
-                </tr>
-
                 <!-- Footer -->
                 <tr>
                   <td style='background:#f9fafb; border-top:1px solid #e5e7eb; padding:16px 36px; text-align:center;'>
@@ -188,13 +181,6 @@ function sendApplicationResultEmail($toEmail, $fullName, $companyName, $result)
                     <p style='margin:0 0 20px; font-size:14px; color:#4b5563; line-height:1.7;'>{$subMessage}</p>
 
                     <p style='margin:0; font-size:13px; color:#6b7280; font-style:italic;'>{$footerNote}</p>
-                  </td>
-                </tr>
-
-                <!-- CTA -->
-                <tr>
-                  <td style='padding:0 36px 28px; text-align:center;'>
-                    <a href='#' style='display:inline-block; background:#07145f; color:#FFD700; text-decoration:none; font-weight:700; font-size:13px; padding:12px 30px; border-radius:8px;'>Log In to OJT Portal</a>
                   </td>
                 </tr>
 
@@ -382,13 +368,6 @@ function sendMoaWorkflowEmail($toEmail, $fullName, $companyName, $stage, $commen
                     {$commentBlock}
 
                     <p style='margin:16px 0 0; font-size:14px; color:#4b5563; line-height:1.7;'>{$subMessage}</p>
-                  </td>
-                </tr>
-
-                <!-- CTA -->
-                <tr>
-                  <td style='padding:8px 36px 28px; text-align:center;'>
-                    <a href='#' style='display:inline-block; background:#07145f; color:#FFD700; text-decoration:none; font-weight:700; font-size:13px; padding:12px 30px; border-radius:8px;'>Log In to OJT Portal</a>
                   </td>
                 </tr>
 
