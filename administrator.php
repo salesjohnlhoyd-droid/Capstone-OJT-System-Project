@@ -351,7 +351,7 @@ if (!function_exists('cv_alog_capture')) {
     function cv_alog_plural($n, $one, $many) { return $n . ' ' . ($n == 1 ? $one : $many); }
     function cv_alog_status_word($status) {
         $s = strtolower(trim((string)$status));
-        $map = ['verified' => 'Verified', 'approved' => 'Approved', 'rejected' => 'Rejected', 'pending' => 'Set to Pending', 'complied' => 'Complied'];
+        $map = ['verified' => 'Verified', 'approved' => 'Approved', 'rejected' => 'Declined', 'denied' => 'Declined', 'pending' => 'Set to Pending', 'complied' => 'Complied'];
         return $map[$s] ?? ($s !== '' ? ucwords($s ?? '') : 'Updated');
     }
     function cv_alog_performer($conn) {
@@ -463,7 +463,7 @@ cv_alog_capture($conn, [
         $aid = (int)($_POST['approval_id'] ?? 0); $sid = (int)cv_alog_scalar($conn, "SELECT student_id FROM admin_application_approvals WHERE id = ?", 'i', [$aid]);
         $cid = (int)cv_alog_scalar($conn, "SELECT company_id FROM admin_application_approvals WHERE id = ?", 'i', [$aid]);
         $n = cv_alog_user_name($conn, $sid); $co = cv_alog_company_name($conn, $cid); $ok = isset($_POST['ajax_approve_app_request']);
-        return [$ok ? 'Application Approved' : 'Application Denied', 'Student', $n, ($ok ? 'Approved' : 'Denied') . " $n's application" . ($co !== '' ? " to $co" : '') . " via Student Requirements"];
+        return [$ok ? 'Application Approved' : 'Application Declined', 'Student', $n, ($ok ? 'Approved' : 'Declined') . " $n's application" . ($co !== '' ? " to $co" : '') . " via Student Requirements"];
     }],
     [function () { return cv_alog_is_post('ajax_endorsement_signatory_delete'); }, function ($conn) {
         return ['Signatory Deleted', 'Endorsement Letter', '—', "Deleted a saved endorsement-letter signatory via Student Requirements"];
@@ -2090,7 +2090,7 @@ if(isset($_POST['update_photo'])){
     }
 
     if($status == "Denied" && $remark === ''){
-        echo "<script>alert('Please enter a remark if Denied'); window.history.back();</script>";
+        echo "<script>alert('Please enter a remark if Declined'); window.history.back();</script>";
         exit;
     }
     if($status == "Denied" && svRemarkLength($remark) > svRemarkMaxLen($conn, 'student_information', 'photo_remark')){
@@ -2136,7 +2136,7 @@ if(isset($_POST['update_requirement'])){
     }
 
     if($status == "Denied" && $remark === ''){
-        echo "<script>alert('Please enter a remark if Denied'); window.history.back();</script>";
+        echo "<script>alert('Please enter a remark if Declined'); window.history.back();</script>";
         exit;
     }
     if($status == "Denied" && svRemarkLength($remark) > svRemarkMaxLen($conn, 'requirements', 'remark')){
@@ -5499,9 +5499,9 @@ if (!$courseOfferingsLoaded) {
                                             <span class="cv-rb cv-rb-verified"><i class="fas fa-check"></i> Verified</span>
                                             <span class="cv-rb cv-rb-pending">Pending</span>
                                             <span class="cv-rb cv-rb-awaiting">Awaiting</span>
-                                            <span class="cv-rb cv-rb-rejected"><i class="fas fa-ban"></i> Rejected</span>
+                                            <span class="cv-rb cv-rb-rejected"><i class="fas fa-ban"></i> Declined</span>
                                         </div>
-                                        <div class="cv-rej-placeholder"><i class="fas fa-file-circle-xmark"></i><span>Rejected<br>Awaiting re-submission</span></div>
+                                        <div class="cv-rej-placeholder"><i class="fas fa-file-circle-xmark"></i><span>Declined<br>Awaiting re-submission</span></div>
                                     </div>
                                     <div class="cv-card-body">
                                         <div class="cv-card-label">Profile Photo (ID)</div>
@@ -5525,10 +5525,10 @@ if (!$courseOfferingsLoaded) {
                                                 <select name="photo_status" onchange="toggleRemark(this,'photo_rem_<?= $user_id ?>')">
                                                     <option value="Pending" <?= ($student['photo_status']=="Pending")?"selected":"" ?>>Pending</option>
                                                     <option value="Verified" <?= ($student['photo_status']=="Verified")?"selected":"" ?>>Verified</option>
-                                                    <option value="Denied" <?= ($student['photo_status']=="Denied")?"selected":"" ?>>Denied</option>
+                                                    <option value="Denied" <?= ($student['photo_status']=="Denied")?"selected":"" ?>>Declined</option>
                                                 </select>
                                                 <!-- UPDATED (this adjustment): the rejection remark is free text (it used to be a dropdown of preset reasons) -->
-                                                <textarea name="photo_remark" id="photo_rem_<?= $user_id ?>" rows="3" maxlength="<?= (int) svRemarkMaxLen($conn, 'student_information', 'photo_remark') ?>" autocomplete="off" placeholder="Remark (reason for rejection)" style="<?= ($student['photo_status']=="Denied")?'':'display:none' ?>"><?= ($student['photo_status']=="Denied") ? htmlspecialchars($student['photo_remark'] ?? '') : '' ?></textarea>
+                                                <textarea name="photo_remark" id="photo_rem_<?= $user_id ?>" rows="3" maxlength="<?= (int) svRemarkMaxLen($conn, 'student_information', 'photo_remark') ?>" autocomplete="off" placeholder="Remark (reason for declining)" style="<?= ($student['photo_status']=="Denied")?'':'display:none' ?>"><?= ($student['photo_status']=="Denied") ? htmlspecialchars($student['photo_remark'] ?? '') : '' ?></textarea>
                                                 <button type="submit" style="display:block; width:100%; margin-top:10px;">Update ID</button>
                                             </form>
                                         <?php endif; ?>
@@ -5583,9 +5583,9 @@ if (!$courseOfferingsLoaded) {
                                             <span class="cv-rb cv-rb-verified"><i class="fas fa-check"></i> Verified</span>
                                             <span class="cv-rb cv-rb-pending">Pending</span>
                                             <span class="cv-rb cv-rb-awaiting">Awaiting</span>
-                                            <span class="cv-rb cv-rb-rejected"><i class="fas fa-ban"></i> Rejected</span>
+                                            <span class="cv-rb cv-rb-rejected"><i class="fas fa-ban"></i> Declined</span>
                                         </div>
-                                        <div class="cv-rej-placeholder"><i class="fas fa-file-circle-xmark"></i><span>Rejected<br>Awaiting re-submission</span></div>
+                                        <div class="cv-rej-placeholder"><i class="fas fa-file-circle-xmark"></i><span>Declined<br>Awaiting re-submission</span></div>
                                     </div>
                                     <div class="cv-card-body">
                                         <div class="cv-card-remark"><i class="fas fa-comment-dots"></i><span><b>Remark:</b> <span class="cv-card-remark-text"><?= htmlspecialchars(($res['remark'] ?? '') !== '' ? $res['remark'] : '—') ?></span></span></div>
@@ -5615,10 +5615,10 @@ if (!$courseOfferingsLoaded) {
                                                     <select name="status" onchange="toggleRemark(this,'rem_<?= $user_id.$type ?>')">
                                                         <option value="Pending" <?= ($res && $res['status']=="Pending")?"selected":"" ?>>Pending</option>
                                                         <option value="Verified" <?= ($res && $res['status']=="Verified")?"selected":"" ?>>Verified</option>
-                                                        <option value="Denied" <?= ($res && $res['status']=="Denied")?"selected":"" ?>>Denied</option>
+                                                        <option value="Denied" <?= ($res && $res['status']=="Denied")?"selected":"" ?>>Declined</option>
                                                     </select>
                                                     <!-- UPDATED (this adjustment): the rejection remark is free text (it used to be a dropdown of preset reasons) -->
-                                                    <textarea name="remark" id="rem_<?= $user_id.$type ?>" rows="3" maxlength="<?= (int) svRemarkMaxLen($conn, 'requirements', 'remark') ?>" autocomplete="off" placeholder="Remark (reason for rejection)" style="<?= ($res && $res['status']=="Denied")?'':'display:none' ?>"><?= ($res && $res['status']=="Denied") ? htmlspecialchars($res['remark'] ?? '') : '' ?></textarea>
+                                                    <textarea name="remark" id="rem_<?= $user_id.$type ?>" rows="3" maxlength="<?= (int) svRemarkMaxLen($conn, 'requirements', 'remark') ?>" autocomplete="off" placeholder="Remark (reason for declining)" style="<?= ($res && $res['status']=="Denied")?'':'display:none' ?>"><?= ($res && $res['status']=="Denied") ? htmlspecialchars($res['remark'] ?? '') : '' ?></textarea>
                                                     <button type="submit">Save</button>
                                                 </form>
                                             <?php endif; ?>
@@ -5847,13 +5847,13 @@ if (!$courseOfferingsLoaded) {
             <div id="fv-date" style="display:none;"></div>
 
             <div class="fv-submit-bar">
-                <div class="fv-submit-bar-note">Review the application above, then Allow or Deny.</div>
+                <div class="fv-submit-bar-note">Review the application above, then Allow or Decline.</div>
                 <div class="fv-submit-bar-actions">
                     <button id="fv-allow-btn" class="fv-allow-btn2" onclick="fvHandleAction('allow')">
                         <i class="fas fa-check"></i> Allow Application
                     </button>
                     <button id="fv-deny-btn" class="fv-deny-btn2" onclick="fvHandleAction('deny')">
-                        <i class="fas fa-times"></i> Deny Application
+                        <i class="fas fa-times"></i> Decline Application
                     </button>
                 </div>
             </div>
@@ -6417,7 +6417,7 @@ if (!$courseOfferingsLoaded) {
         var toast    = document.getElementById('undoToast');
 
         if (isDenied) {
-            statusEl.textContent = ' Denied pending — undo to cancel';
+            statusEl.textContent = ' Declined pending — undo to cancel';
             statusEl.classList.add('denied-mode');
             ringEl.classList.add('denied-ring');
             numEl.classList.add('denied-num');
@@ -6604,9 +6604,9 @@ if (!$courseOfferingsLoaded) {
                     <select name="status" onchange="toggleRemark(this,'rem_${userId}${reqType}')">
                         <option value="Pending" selected>Pending</option>
                         <option value="Verified">Verified</option>
-                        <option value="Denied">Denied</option>
+                        <option value="Denied">Declined</option>
                     </select>
-                    <textarea name="remark" id="rem_${userId}${reqType}" rows="3" maxlength="${SV_REMARK_MAX_REQ}" autocomplete="off" placeholder="Remark (reason for rejection)" style="display:none"></textarea>
+                    <textarea name="remark" id="rem_${userId}${reqType}" rows="3" maxlength="${SV_REMARK_MAX_REQ}" autocomplete="off" placeholder="Remark (reason for declining)" style="display:none"></textarea>
                     <button type="submit">Save</button>
                 </form>
             `;
@@ -6648,9 +6648,9 @@ if (!$courseOfferingsLoaded) {
                     <select name="photo_status" onchange="toggleRemark(this,'photo_rem_${userId}')">
                         <option value="Pending" selected>Pending</option>
                         <option value="Verified">Verified</option>
-                        <option value="Denied">Denied</option>
+                        <option value="Denied">Declined</option>
                     </select>
-                    <textarea name="photo_remark" id="photo_rem_${userId}" rows="3" maxlength="${SV_REMARK_MAX_PHOTO}" autocomplete="off" placeholder="Remark (reason for rejection)" style="display:none"></textarea>
+                    <textarea name="photo_remark" id="photo_rem_${userId}" rows="3" maxlength="${SV_REMARK_MAX_PHOTO}" autocomplete="off" placeholder="Remark (reason for declining)" style="display:none"></textarea>
                     <button type="submit" style="display:block; width:100%; margin-top:10px;">Update ID</button>
                 </form>
             `;
@@ -6857,7 +6857,7 @@ if (!$courseOfferingsLoaded) {
             // NEW (this adjustment): rejecting needs a remark — say so right away instead of a round trip to the server.
             if (status === 'Denied' && remark === '') {
                 if (remarkEl) { remarkEl.style.display = 'inline-block'; remarkEl.focus(); }
-                alert('Please enter a remark explaining why this requirement is being rejected.');
+                alert('Please enter a remark explaining why this requirement is being declined.');
                 return;
             }
 
@@ -6895,7 +6895,7 @@ if (!$courseOfferingsLoaded) {
                         } else if (data.guard === 'no_submission') {
                             showGuardModal('','No Submission Yet','There\'s no existing student requirement for <strong>' + (data.field||'') + '</strong>.<br>Please wait until the student submits this requirement.');
                         } else if (data.guard === 'no_remark') {
-                            alert('Please enter a remark when setting status to Denied.');
+                            alert('Please enter a remark when setting status to Declined.');
                         } else {
                             alert('Failed to save: ' + (data.message || 'Unknown error'));
                         }
@@ -6923,7 +6923,7 @@ if (!$courseOfferingsLoaded) {
             // NEW (this adjustment): rejecting needs a remark — say so right away instead of a round trip to the server.
             if (status === 'Denied' && remark === '') {
                 if (remarkEl) { remarkEl.style.display = 'inline-block'; remarkEl.focus(); }
-                alert('Please enter a remark explaining why the photo is being rejected.');
+                alert('Please enter a remark explaining why the photo is being declined.');
                 return;
             }
 
@@ -6959,7 +6959,7 @@ if (!$courseOfferingsLoaded) {
                         } else if (data.guard === 'no_submission') {
                             showGuardModal('','No Submission Yet','There\'s no profile photo submitted yet.<br>Please wait until the student submits their photo.');
                         } else if (data.guard === 'no_remark') {
-                            alert('Please enter a remark when setting status to Denied.');
+                            alert('Please enter a remark when setting status to Declined.');
                         } else {
                             alert('Failed to save: ' + (data.message || 'Unknown error'));
                         }
@@ -7173,9 +7173,9 @@ if (!$courseOfferingsLoaded) {
                     '<select name="status" onchange="toggleRemark(this,\'rem_' + userId + type + '\')">' +
                         '<option value="Pending"' + (statusVal === 'Pending' ? ' selected' : '') + '>Pending</option>' +
                         '<option value="Verified"' + (statusVal === 'Verified' ? ' selected' : '') + '>Verified</option>' +
-                        '<option value="Denied"' + (statusVal === 'Denied' ? ' selected' : '') + '>Denied</option>' +
+                        '<option value="Denied"' + (statusVal === 'Denied' ? ' selected' : '') + '>Declined</option>' +
                     '</select>' +
-                    '<textarea name="remark" id="rem_' + userId + type + '" rows="3" maxlength="' + SV_REMARK_MAX_REQ + '" autocomplete="off" placeholder="Remark (reason for rejection)" style="' + (statusVal === 'Denied' ? '' : 'display:none') + '">' + remarkVal + '</textarea>' +
+                    '<textarea name="remark" id="rem_' + userId + type + '" rows="3" maxlength="' + SV_REMARK_MAX_REQ + '" autocomplete="off" placeholder="Remark (reason for declining)" style="' + (statusVal === 'Denied' ? '' : 'display:none') + '">' + remarkVal + '</textarea>' +
                     '<button type="submit">Save</button>' +
                 '</form>';
             attachReqFormListener(contentEl.querySelector('.ajax-req-form'));
@@ -7214,9 +7214,9 @@ if (!$courseOfferingsLoaded) {
                     '<select name="photo_status" onchange="toggleRemark(this,\'photo_rem_' + userId + '\')">' +
                         '<option value="Pending"' + (statusVal === 'Pending' ? ' selected' : '') + '>Pending</option>' +
                         '<option value="Verified"' + (statusVal === 'Verified' ? ' selected' : '') + '>Verified</option>' +
-                        '<option value="Denied"' + (statusVal === 'Denied' ? ' selected' : '') + '>Denied</option>' +
+                        '<option value="Denied"' + (statusVal === 'Denied' ? ' selected' : '') + '>Declined</option>' +
                     '</select>' +
-                    '<textarea name="photo_remark" id="photo_rem_' + userId + '" rows="3" maxlength="' + SV_REMARK_MAX_PHOTO + '" autocomplete="off" placeholder="Remark (reason for rejection)" style="' + (statusVal === 'Denied' ? '' : 'display:none') + '">' + remarkVal + '</textarea>' +
+                    '<textarea name="photo_remark" id="photo_rem_' + userId + '" rows="3" maxlength="' + SV_REMARK_MAX_PHOTO + '" autocomplete="off" placeholder="Remark (reason for declining)" style="' + (statusVal === 'Denied' ? '' : 'display:none') + '">' + remarkVal + '</textarea>' +
                     '<button type="submit" style="display:block; width:100%; margin-top:10px;">Update ID</button>' +
                 '</form>';
             attachPhotoFormListener(ctrlEl.querySelector('.ajax-photo-form'));
@@ -8088,7 +8088,7 @@ if (!$courseOfferingsLoaded) {
             '<div class="ar-summary-count"><i class="fas fa-users" style="font-size:10px;"></i> ' + escHtml(ojtCountText) + '</div>' +
             '<div class="ar-actions">' +
                 '<button class="ar-allow-btn" onclick="handleAppRequest(' + app.id + ', \'allow\', this)"><i class="fas fa-check"></i> Allow</button>' +
-                '<button class="ar-deny-btn"  onclick="handleAppRequest(' + app.id + ', \'deny\', this)"><i class="fas fa-times"></i> Deny</button>' +
+                '<button class="ar-deny-btn"  onclick="handleAppRequest(' + app.id + ', \'deny\', this)"><i class="fas fa-times"></i> Decline</button>' +
                 '<button class="ar-fullview-btn" onclick="openAppFullView(' + app.id + ')"><i class="fas fa-expand-alt"></i> Full View</button>' +
             '</div>';
         return card;
@@ -8416,7 +8416,7 @@ if (!$courseOfferingsLoaded) {
         var fvPreviewDocs = window._fvPreviewDocs = [];   // NEW (this adjustment): this application's PDFs, paged by the preview modal
         (app.req_docs || []).forEach(function (doc) {
             var statusClass = (doc.status === 'Verified') ? 'verified' : (doc.status === 'Denied') ? 'denied' : 'pending';
-            var statusText  = (doc.status === 'Verified') ? '✓ Verified' : (doc.status === 'Denied') ? '✗ Denied' : 'Pending';
+            var statusText  = (doc.status === 'Verified') ? '✓ Verified' : (doc.status === 'Denied') ? '✗ Declined' : 'Pending';
             // UPDATED (this adjustment): a PDF gets a PDF icon that opens the document preview modal (an image keeps the thumbnail + enlarge)
             var thumbHtml;
             if (doc.file && /^JVBERi/.test(doc.file)) {   // base64 of "%PDF"
@@ -8438,7 +8438,7 @@ if (!$courseOfferingsLoaded) {
         var allowBtn = document.getElementById('fv-allow-btn');
         var denyBtn  = document.getElementById('fv-deny-btn');
         allowBtn.disabled = false; allowBtn.innerHTML = '<i class="fas fa-check"></i> Allow Application';
-        denyBtn.disabled  = false; denyBtn.innerHTML  = '<i class="fas fa-times"></i> Deny Application';
+        denyBtn.disabled  = false; denyBtn.innerHTML  = '<i class="fas fa-times"></i> Decline Application';
 
         document.getElementById('appFullViewOverlay').classList.add('open');
 
@@ -8460,7 +8460,7 @@ if (!$courseOfferingsLoaded) {
     function fvSetStatusPill(el, status) {
         if (!el) return;
         var cls = (status === 'Verified') ? 'verified' : (status === 'Denied') ? 'denied' : 'pending';
-        var text = (status === 'Verified') ? '✓ Verified' : (status === 'Denied') ? '✗ Denied' : status;
+        var text = (status === 'Verified') ? '✓ Verified' : (status === 'Denied') ? '✗ Declined' : status;
         el.className = 'fv-status-chip fv-badge-photo ' + cls;
         el.textContent = text;
     }
@@ -8527,7 +8527,7 @@ if (!$courseOfferingsLoaded) {
                     allowBtn.disabled = false;
                     denyBtn.disabled  = false;
                     allowBtn.innerHTML = '<i class="fas fa-check"></i> Allow Application';
-                    denyBtn.innerHTML  = '<i class="fas fa-times"></i> Deny Application';
+                    denyBtn.innerHTML  = '<i class="fas fa-times"></i> Decline Application';
                     if (endoLetterFlow) endoStatusFailed(data.message || 'Unknown error', function () { fvHandleAction('allow', endorsementData); }); // UPDATED
                     else alert('Action failed: ' + (data.message || 'Unknown error'));
                 }
@@ -8536,7 +8536,7 @@ if (!$courseOfferingsLoaded) {
                 allowBtn.disabled = false;
                 denyBtn.disabled  = false;
                 allowBtn.innerHTML = '<i class="fas fa-check"></i> Allow Application';
-                denyBtn.innerHTML  = '<i class="fas fa-times"></i> Deny Application';
+                denyBtn.innerHTML  = '<i class="fas fa-times"></i> Decline Application';
                 if (endoLetterFlow) endoStatusFailed('Network error — the server could not be reached.', function () { fvHandleAction('allow', endorsementData); }); // UPDATED
                 else alert('Network error. Please try again.');
             });
@@ -8594,7 +8594,7 @@ if (!$courseOfferingsLoaded) {
                     _lastKnownAppCount = data.remaining;
                 } else {
                     btns.forEach(function (b) { b.disabled = false; });
-                    if (btnEl) { btnEl.textContent = action === 'allow' ? 'Allow' : 'Deny'; }
+                    if (btnEl) { btnEl.textContent = action === 'allow' ? 'Allow' : 'Decline'; }
                     if (endoLetterFlow) endoStatusFailed(data.message || 'Unknown error', function () { handleAppRequest(approvalId, 'allow', btnEl, endorsementData); }); // UPDATED
                     else alert('Action failed: ' + (data.message || 'Unknown error'));
                 }
@@ -10651,6 +10651,8 @@ window.addEventListener('pageshow', function (e) {
         'allow application': "Approve this student's application",
         'deny': "Decline this student's application",
         'deny application': "Decline this student's application",
+        'decline': "Decline this student's application",
+        'decline application': "Decline this student's application",
         'approve & send letter': 'Approve and email the endorsement letter',
         'application requests': 'See new student application requests',
         'update id': "Save the student's new ID number",
