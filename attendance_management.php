@@ -1,55 +1,66 @@
 <?php
 session_start();
 include "db.php";
+// Logged-out plain page visit (no query string, not an XHR) -> the company login page. Any other request keeps this
+// page's own response further below (AJAX / action requests are never redirected).
+if (empty($_SESSION['user_id']) && ($_SERVER['REQUEST_METHOD'] ?? '') === 'GET' && empty($_SERVER['HTTP_X_REQUESTED_WITH']) && empty($_GET) && !headers_sent()) {
+    header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+    header('Location: company_login.php');
+    exit;
+}
 
-if (!isset($_SESSION['user_id'])) {
+if (!isset($_SESSION['user_id']) || ($_SESSION['role'] ?? '') !== "company") { // same company-only gate as the other company pages
     die("Unauthorized access.");
 }
 
-$company_id = $_SESSION['user_id'];
+$company_id = (int)$_SESSION['user_id'];
+
+/**
+ * Fault-tolerant COUNT helper for the sidebar badges: a failed query (missing table, DB hiccup)
+ * shows 0 instead of taking the whole page down.
+ */
+function attm_safe_count($conn, $sql, $company_id) {
+    try {
+        $st = $conn->prepare($sql);
+        if (!$st) return 0;
+        $st->bind_param("i", $company_id);
+        if (!$st->execute()) { $st->close(); return 0; }
+        $row = $st->get_result()->fetch_assoc();
+        $st->close();
+        return (int)($row['total'] ?? 0);
+    } catch (Throwable $e) {
+        return 0;
+    }
+}
 
 // ================= FETCH INBOX COUNT =================
-$inbox_count = 0;
-$stmt_inbox = $conn->prepare("SELECT COUNT(*) as total FROM ojt_applications WHERE company_id=? AND phase='pending'");
-$stmt_inbox->bind_param("i", $company_id);
-$stmt_inbox->execute();
-$res_inbox = $stmt_inbox->get_result()->fetch_assoc();
-$inbox_count = $res_inbox['total'] ?? 0;
-$stmt_inbox->close();
+$inbox_count = attm_safe_count($conn, "SELECT COUNT(*) as total FROM ojt_applications WHERE company_id=? AND phase='pending'", $company_id);
 
 // ================= FETCH UNGRADED COUNT =================
-$ungraded_count = 0;
-$stmt_ungraded = $conn->prepare("
+/* UPDATED (weekly report indicator): the NEW weekly reports (not opened yet). attm_safe_count() returns 0 while reports.company_viewed_at does not exist yet. */
+$ungraded_count = attm_safe_count($conn, "
     SELECT COUNT(*) as total
     FROM reports r
-    JOIN ojt_assignments oa ON oa.student_id = r.user_id AND oa.company_id = r.company_id
     WHERE r.company_id = ?
-      AND r.week_start <= CURDATE()
-      AND (r.remark IS NULL OR r.remark != 'Wrong Document')
-      AND r.company_grade IS NULL
-");
-$stmt_ungraded->bind_param("i", $company_id);
-$stmt_ungraded->execute();
-$res_ungraded = $stmt_ungraded->get_result()->fetch_assoc();
-$ungraded_count = $res_ungraded['total'] ?? 0;
-$stmt_ungraded->close();
+      AND (r.remark IS NULL OR r.remark <> 'Wrong Document')
+      AND (r.company_viewed_at IS NULL OR r.submitted_at > r.company_viewed_at)
+      AND EXISTS (SELECT 1 FROM ojt_assignments oa WHERE oa.student_id = r.user_id AND oa.company_id = r.company_id)
+", $company_id);
 
 // ================= FETCH PENDING LATE REQUESTS COUNT (for sidebar badge) =================
-$pending_lr_count = 0;
-$stmt_plr = $conn->prepare("SELECT COUNT(*) as total FROM late_requests WHERE company_id=? AND status='pending'");
-$stmt_plr->bind_param("i", $company_id);
-$stmt_plr->execute();
-$res_plr = $stmt_plr->get_result()->fetch_assoc();
-$pending_lr_count = $res_plr['total'] ?? 0;
-$stmt_plr->close();
+$pending_lr_count = attm_safe_count($conn, "SELECT COUNT(*) as total FROM late_requests WHERE company_id=? AND status='pending'", $company_id);
 
 // ================= FETCH SUPERVISOR NAME =================
 $supervisor_name_display = 'Supervisor';
-$stmt_sv = $conn->prepare("SELECT first_name, middle_name, last_name FROM users WHERE id=? LIMIT 1");
-$stmt_sv->bind_param("i", $company_id);
-$stmt_sv->execute();
-$sv_row = $stmt_sv->get_result()->fetch_assoc();
-$stmt_sv->close();
+$sv_row = null;
+try {
+    $stmt_sv = $conn->prepare("SELECT first_name, middle_name, last_name FROM users WHERE id=? LIMIT 1");
+    if ($stmt_sv) {
+        $stmt_sv->bind_param("i", $company_id);
+        if ($stmt_sv->execute()) $sv_row = $stmt_sv->get_result()->fetch_assoc();
+        $stmt_sv->close();
+    }
+} catch (Throwable $e) { $sv_row = null; }
 if ($sv_row) {
     $sv_mn = trim($sv_row['middle_name'] ?? '');
     $supervisor_name_display = trim(
@@ -324,6 +335,216 @@ if (!function_exists('attm_before_start')) {
 }
 
 /* ════════════════════════════════════════════════════════════════════
+   NEW (student schedule): attendance follows each student's own training
+   schedule (Day / Evening Schedule set on AccomForm.php and changed by the
+   company supervisor on add_ojt_student.php; stored in student_information
+   as Mon–Fri acronyms such as "MWF", "TTh" or "None").
+   Day Schedule = AM duty days, Evening Schedule = PM duty days. A student with
+   only a Day schedule reports (and is judged) on the AM duty only; with only an
+   Evening schedule, on the PM duty only; with both, on both.
+   A weekday with neither duty scheduled and no real attendance entry is never
+   counted as Absent / Missed / Incomplete — it is shown as "Not scheduled".
+   A duty period that holds a real entry is always judged, scheduled or not.
+   Schedule changes are dated (student_schedule_changes), so past days keep the
+   schedule that was in force back then. A student whose schedule is empty or
+   unreadable is treated as scheduled every weekday (nothing changes for them).
+   ════════════════════════════════════════════════════════════════════ */
+if (!function_exists('attsch_parse_days')) {
+    // "MWF" -> [1,3,5] (date('w') numbers); "None" / empty / unreadable -> []
+    function attsch_parse_days($value): array {
+        $rest = trim((string)$value);
+        if ($rest === '' || strcasecmp($rest, 'None') === 0) return [];
+        $codes = ['Th' => 4, 'M' => 1, 'T' => 2, 'W' => 3, 'F' => 5];
+        $found = [];
+        while ($rest !== '') {
+            $hit = false;
+            foreach ($codes as $code => $n) {
+                if (stripos($rest, $code) === 0) { $found[$n] = true; $rest = substr($rest, strlen($code)); $hit = true; break; }
+            }
+            if (!$hit) return [];
+        }
+        $days = array_keys($found);
+        sort($days);
+        return $days;
+    }
+}
+if (!function_exists('attsch_days')) {
+    // Day (AM duty) / Evening (PM duty) schedule -> ['d' => AM days, 'e' => PM days]; null = no usable schedule (both duties every weekday)
+    function attsch_days($day, $evening): ?array {
+        $d = attsch_parse_days($day);
+        $e = attsch_parse_days($evening);
+        if (empty($d) && empty($e)) return null;
+        return ['d' => $d, 'e' => $e];
+    }
+}
+if (!function_exists('attsch_load')) {
+    // [student_id => ['cur' => ['d'=>…,'e'=>…]|null, 'changes' => [['d' => 'Y-m-d', 'old' => same|null], ...oldest first]]]
+    function attsch_load($conn, array $ids): array {
+        static $cache = [];
+        $ids = array_values(array_unique(array_filter(array_map('intval', $ids))));
+        sort($ids);
+        if (empty($ids)) return [];
+        $key = implode(',', $ids);
+        if (isset($cache[$key])) return $cache[$key];
+        $map = [];
+        foreach ($ids as $i) $map[$i] = ['cur' => null, 'changes' => []];
+        try {
+            $r = $conn->query("SELECT user_id, day_sched, evening_sched FROM student_information WHERE user_id IN ($key)");
+            if ($r) { while ($row = $r->fetch_assoc()) $map[(int)$row['user_id']]['cur'] = attsch_days($row['day_sched'], $row['evening_sched']); }
+        } catch (\Throwable $e) {}
+        try {
+            $t = $conn->query("SHOW TABLES LIKE 'student_schedule_changes'");
+            if ($t && $t->num_rows > 0) {
+                $r = $conn->query("SELECT student_id, old_day_sched, old_evening_sched, DATE(created_at) AS d
+                                   FROM student_schedule_changes WHERE student_id IN ($key) ORDER BY created_at ASC, id ASC");
+                if ($r) {
+                    while ($row = $r->fetch_assoc()) {
+                        $map[(int)$row['student_id']]['changes'][] = ['d' => $row['d'], 'old' => attsch_days($row['old_day_sched'], $row['old_evening_sched'])];
+                    }
+                }
+            }
+        } catch (\Throwable $e) {}
+        return $cache[$key] = $map;
+    }
+}
+if (!function_exists('attsch_periods')) {
+    // which duty periods the student is scheduled for on $day: ['am' => bool, 'pm' => bool] (unknown student = both)
+    function attsch_periods(array $map, $studentId, string $day): array {
+        $s = $map[(int)$studentId] ?? null;
+        if ($s === null) return ['am' => true, 'pm' => true];
+        $sc = $s['cur'];
+        foreach ($s['changes'] as $c) {            // a change applies from its own date onward
+            if ($c['d'] > $day) { $sc = $c['old']; break; }
+        }
+        if ($sc === null) return ['am' => true, 'pm' => true];
+        $dow = (int)date('w', strtotime($day));
+        return ['am' => in_array($dow, $sc['d'], true), 'pm' => in_array($dow, $sc['e'], true)];
+    }
+}
+if (!function_exists('attsch_is_scheduled')) {
+    // true when the student is scheduled for at least one duty period on $day
+    function attsch_is_scheduled(array $map, $studentId, string $day): bool {
+        $p = attsch_periods($map, $studentId, $day);
+        return $p['am'] || $p['pm'];
+    }
+}
+if (!function_exists('attsch_has_real_entry')) {
+    // true when the log row holds at least one real time (a "missed"-only row is not an entry)
+    function attsch_has_real_entry($row): bool {
+        if (!is_array($row)) return false;
+        foreach (['am_time_in', 'am_time_out', 'pm_time_in', 'pm_time_out'] as $c) {
+            $v = $row[$c] ?? null;
+            if ($v !== null && $v !== '' && $v !== 'missed') return true;
+        }
+        return false;
+    }
+}
+if (!function_exists('attsch_limit_duty')) {
+    // narrows the day's active duty periods (['am' => bool, 'pm' => bool]) to the ones the student is scheduled for;
+    // a period that holds a real entry stays active so recorded attendance is never ignored
+    function attsch_limit_duty(array $duty, array $periods, $row): array {
+        $hv = fn($v) => ($v !== null && $v !== '' && $v !== 'missed');
+        $realAm = is_array($row) && ($hv($row['am_time_in'] ?? null) || $hv($row['am_time_out'] ?? null));
+        $realPm = is_array($row) && ($hv($row['pm_time_in'] ?? null) || $hv($row['pm_time_out'] ?? null));
+        $duty['am'] = !empty($duty['am']) && ($periods['am'] || $realAm);
+        $duty['pm'] = !empty($duty['pm']) && ($periods['pm'] || $realPm);
+        return $duty;
+    }
+}
+if (!function_exists('attsch_js_map')) {
+    // compact form for the page script: {id: {c: {d: AM days, e: PM days}|null, h: [[date, {d,e}|null], ...]}}
+    function attsch_js_map(array $map): object {
+        $o = [];
+        foreach ($map as $id => $s) {
+            $h = [];
+            foreach ($s['changes'] as $c) $h[] = [$c['d'], $c['old']];
+            $o[(string)$id] = ['c' => $s['cur'], 'h' => $h];
+        }
+        return (object)$o;
+    }
+}
+
+/* ════════════════════════════════════════════════════════════════════
+   NEW (OJT ends at the required hours): a student's OJT ends on the day their
+   rendered duty hours (all logs, all companies — same total as the Student List
+   and the OJT End marker) reach the "Total Required Hours" of their course on
+   course_offering.php. From the next day on, nothing is required of the student:
+   no Absent / Missed / Incomplete, no new sign-ins. A student without a Course
+   Offering (or without a total) simply never ends. A day that holds a real entry
+   is always shown as recorded.
+   ════════════════════════════════════════════════════════════════════ */
+if (!function_exists('ojtend_dates')) {
+    // [student_id => 'Y-m-d' (the day the required hours were reached)]; students who have not reached them are left out
+    function ojtend_dates($conn, array $ids): array {
+        static $cache = [];
+        $ids = array_values(array_unique(array_filter(array_map('intval', $ids))));
+        sort($ids);
+        if (empty($ids)) return [];
+        $key = implode(',', $ids);
+        if (isset($cache[$key])) return $cache[$key];
+        $out = [];
+        try {
+            $norm = function($c) { $c = preg_replace('/\s+/', ' ', trim((string)$c)); return function_exists('mb_strtolower') ? mb_strtolower($c) : strtolower($c); };
+            $hasCol = function($table, $col) use ($conn) {
+                $r = $conn->query("SHOW COLUMNS FROM `$table` LIKE '" . $conn->real_escape_string($col) . "'");
+                return $r && $r->num_rows > 0;
+            };
+            $rules = [];
+            $r = $conn->query("SELECT course, total_hours FROM course_offerings");
+            if ($r) { while ($row = $r->fetch_assoc()) { if ((int)$row['total_hours'] > 0) $rules[$norm($row['course'])] = (int)$row['total_hours']; } }
+            if (empty($rules)) return $cache[$key] = [];
+
+            $courses = [];
+            if ($hasCol('users', 'course')) {
+                $r = $conn->query("SELECT id, course FROM users WHERE id IN ($key)");
+                if ($r) { while ($row = $r->fetch_assoc()) if (trim((string)$row['course']) !== '') $courses[(int)$row['id']] = $row['course']; }
+            }
+            if ($hasCol('student_information', 'course')) {
+                $r = $conn->query("SELECT user_id, MAX(course) AS course FROM student_information WHERE user_id IN ($key) GROUP BY user_id");
+                if ($r) { while ($row = $r->fetch_assoc()) if (!isset($courses[(int)$row['user_id']]) && trim((string)$row['course']) !== '') $courses[(int)$row['user_id']] = $row['course']; }
+            }
+
+            $need = [];
+            foreach ($ids as $i) { $k = $norm($courses[$i] ?? ''); if ($k !== '' && isset($rules[$k])) $need[$i] = (int)round($rules[$k] * 3600); }
+            if (empty($need)) return $cache[$key] = [];
+
+            $sec = function($p) {
+                return "GREATEST(0, COALESCE(CASE
+                    WHEN {$p}_time_in  IS NOT NULL AND {$p}_time_in  != '' AND {$p}_time_in  != 'missed'
+                     AND {$p}_time_out IS NOT NULL AND {$p}_time_out != '' AND {$p}_time_out != 'missed'
+                    THEN CASE
+                        WHEN {$p}_time_in LIKE '%-%-% %' AND {$p}_time_out LIKE '%-%-% %'
+                        THEN TIMESTAMPDIFF(SECOND, {$p}_time_in, {$p}_time_out)
+                        ELSE (TIME_TO_SEC(TIME({$p}_time_out)) - TIME_TO_SEC(TIME({$p}_time_in)))
+                    END
+                    ELSE 0
+                END, 0))";
+            };
+            $needList = implode(',', array_keys($need));
+            $r = $conn->query("SELECT user_id, date, SUM(" . $sec('am') . " + " . $sec('pm') . ") AS secs
+                               FROM attendance_logs WHERE user_id IN ($needList) GROUP BY user_id, date ORDER BY user_id, date ASC");
+            $running = [];
+            if ($r) {
+                while ($row = $r->fetch_assoc()) {
+                    $u = (int)$row['user_id'];
+                    if (isset($out[$u])) continue;
+                    $running[$u] = ($running[$u] ?? 0) + (int)round((float)$row['secs']);
+                    if ($running[$u] >= $need[$u]) $out[$u] = $row['date'];
+                }
+            }
+        } catch (\Throwable $e) { $out = []; }
+        return $cache[$key] = $out;
+    }
+}
+if (!function_exists('ojtend_is_after')) {
+    // true when $day is after the student's OJT end date (the day the required hours were reached)
+    function ojtend_is_after(array $endMap, $studentId, string $day): bool {
+        $e = $endMap[(int)$studentId] ?? null;
+        return $e !== null && $day > $e;
+    }
+}
+
+/* ════════════════════════════════════════════════════════════════════
    UPDATED (Live updates instead of auto page reload): a small fingerprint
    of everything this page displays (attendance logs, late requests,
    schedules, assigned students, course rules and today's date). The page
@@ -333,7 +554,7 @@ if (!function_exists('attm_before_start')) {
 if (!function_exists('attm_live_signature')) {
     function attm_live_signature($conn, $company_id): string {
         $cid   = (int)$company_id;
-        $parts = [date('Y-m-d')];
+        $parts = [date('Y-m-d H:i')]; // minute bucket: today's Present / Incomplete / Absent change as duty windows close, with no DB write
         $queries = [
             "SELECT COUNT(*) AS c, COALESCE(SUM(CRC32(CONCAT_WS('|', user_id, date, IFNULL(am_time_in,''), IFNULL(am_time_out,''), IFNULL(pm_time_in,''), IFNULL(pm_time_out,'')))), 0) AS s
              FROM attendance_logs WHERE company_id = $cid",
@@ -342,7 +563,12 @@ if (!function_exists('attm_live_signature')) {
             "SELECT COUNT(*) AS c, COALESCE(SUM(CRC32(CONCAT_WS('|', date, IFNULL(am_time_in_start,''), IFNULL(am_time_in_end,''), IFNULL(am_time_out_start,''), IFNULL(am_time_out_end,''), IFNULL(pm_time_in_start,''), IFNULL(pm_time_in_end,''), IFNULL(pm_time_out_start,''), IFNULL(pm_time_out_end,'')))), 0) AS s
              FROM attendance_settings WHERE company_id = $cid",
             "SELECT COUNT(*) AS c, COALESCE(SUM(student_id), 0) AS s FROM ojt_assignments WHERE company_id = $cid",
+            "SELECT COUNT(*) AS c, COALESCE(SUM(CRC32(CONCAT_WS('|', user_id, IFNULL(day_sched,''), IFNULL(evening_sched,'')))), 0) AS s FROM student_information WHERE user_id IN (SELECT student_id FROM ojt_assignments WHERE company_id = $cid)", // NEW (student schedule)
+            "SELECT COUNT(*) AS c, COALESCE(SUM(id), 0) AS s FROM student_schedule_changes WHERE company_id = $cid", // NEW (student schedule): absent table is ignored below
             "SELECT COUNT(*) AS c, COALESCE(SUM(CRC32(CONCAT_WS('|', course, total_hours, daily_hours))), 0) AS s FROM course_offerings",
+            "SELECT COUNT(*) AS c, COALESCE(SUM(id), 0) AS s FROM ojt_applications WHERE company_id = $cid AND phase = 'pending'", // sidebar badge: OJT Student List
+            "SELECT COUNT(*) AS c, COALESCE(SUM(r.id), 0) AS s FROM reports r
+             WHERE r.company_id = $cid AND (r.remark IS NULL OR r.remark <> 'Wrong Document') AND (r.company_viewed_at IS NULL OR r.submitted_at > r.company_viewed_at)", // sidebar badge: Company Reports (new weekly reports)
         ];
         foreach ($queries as $q) {
             try {
@@ -352,6 +578,700 @@ if (!function_exists('attm_live_signature')) {
             } catch (\Throwable $e) { $parts[] = '-'; }
         }
         return md5(implode('|', $parts));
+    }
+}
+
+/* ════════════════════════════════════════════════════════════════════
+   NEW (late request legitimacy check): evidence the SERVER records for every late request
+   (the student's browser cannot change it) so the supervisor can judge whether it is genuine:
+     late_requests.submit_ip / submit_ua / photo_hash / photo_valid, and
+     attendance_device_log — the device, network and photo fingerprint of every regular sign-in and late
+     request, which the request is compared against on attendance_management.php.
+   Columns / table are created automatically the first time they are needed (existing databases keep working).
+   ════════════════════════════════════════════════════════════════════ */
+if (!function_exists('ensureLateRequestEvidence')) {
+    function ensureLateRequestEvidence($conn): bool {
+        static $ok = null;
+        if ($ok !== null) return $ok;
+        try {
+            $have = [];
+            $r = $conn->query("SHOW COLUMNS FROM late_requests");
+            if ($r) { while ($c = $r->fetch_assoc()) $have[$c['Field']] = true; }
+            $add = [
+                'submit_ip'   => "VARCHAR(45) NULL",
+                'submit_ua'   => "VARCHAR(255) NULL",
+                'photo_hash'  => "CHAR(64) NULL",
+                'photo_valid' => "TINYINT(1) NULL",
+            ];
+            foreach ($add as $col => $def) {
+                if (!isset($have[$col])) {
+                    try { $conn->query("ALTER TABLE late_requests ADD COLUMN `$col` $def"); } catch (\Throwable $e) { /* added by a parallel request */ }
+                }
+            }
+            $conn->query("CREATE TABLE IF NOT EXISTS attendance_device_log (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                user_id INT NOT NULL,
+                company_id INT NOT NULL,
+                date DATE NOT NULL,
+                slot VARCHAR(20) NOT NULL,
+                kind VARCHAR(12) NOT NULL,
+                ip VARCHAR(45) NULL,
+                ua VARCHAR(255) NULL,
+                photo_hash CHAR(64) NULL,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                KEY idx_adl_user (user_id, created_at),
+                KEY idx_adl_hash (photo_hash)
+            )");
+            $r = $conn->query("SHOW COLUMNS FROM late_requests LIKE 'photo_hash'");
+            return $ok = ($r && $r->num_rows > 0);
+        } catch (\Throwable $e) { return $ok = false; }
+    }
+}
+
+if (!function_exists('attm_lr_ua_key')) {
+    // "Chrome / Windows" style key of a user-agent string (used to compare devices)
+    function attm_lr_ua_key(?string $ua): string {
+        $ua = (string)$ua;
+        if ($ua === '') return '';
+        $b = 'Browser';
+        if (preg_match('/Edg(e|A|iOS)?\//i', $ua))        $b = 'Edge';
+        elseif (preg_match('/OPR\/|Opera/i', $ua))         $b = 'Opera';
+        elseif (preg_match('/Firefox|FxiOS/i', $ua))       $b = 'Firefox';
+        elseif (preg_match('/Chrome|CriOS/i', $ua))        $b = 'Chrome';
+        elseif (preg_match('/Safari/i', $ua))              $b = 'Safari';
+        $o = 'Unknown OS';
+        if (preg_match('/Android/i', $ua))                 $o = 'Android';
+        elseif (preg_match('/iPhone|iPad|iPod/i', $ua))    $o = 'iOS';
+        elseif (preg_match('/Windows/i', $ua))             $o = 'Windows';
+        elseif (preg_match('/Mac OS X|Macintosh/i', $ua))  $o = 'Mac';
+        elseif (preg_match('/Linux|X11/i', $ua))           $o = 'Linux';
+        return $b . ' on ' . $o;
+    }
+}
+if (!function_exists('attm_lr_net_key')) {
+    // network of an IP address: IPv4 /24, IPv6 /48 (so a changing last number on the same network still matches)
+    function attm_lr_net_key(?string $ip): string {
+        $ip = (string)$ip;
+        if ($ip === '') return '';
+        if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) { $p = explode('.', $ip); return $p[0] . '.' . $p[1] . '.' . $p[2]; }
+        if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6)) { $b = @inet_pton($ip); return $b === false ? '' : bin2hex(substr($b, 0, 6)); }
+        return '';
+    }
+}
+if (!function_exists('attm_lr_mask_ip')) {
+    function attm_lr_mask_ip(?string $ip): string {
+        $ip = (string)$ip;
+        if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) { $p = explode('.', $ip); return $p[0] . '.' . $p[1] . '.' . $p[2] . '.xxx'; }
+        if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6)) { $p = explode(':', $ip); return implode(':', array_slice($p, 0, 3)) . ':…'; }
+        return '';
+    }
+}
+if (!function_exists('attm_lr_evidence')) {
+    /* Legitimacy check of ONE late request. Only evidence the server recorded or can verify is used:
+         photo (readable, not re-used), device + network compared with the student's regular sign-ins,
+         the rest of that day's attendance, how long after the window it was sent, how often the student asks,
+         and whether the same reason was already used. Returns
+         ['level' => 'ok'|'review'|'risk', 'label' => string, 'signals' => [['level' => 'ok'|'info'|'review'|'risk', 'text' => string], ...],
+          'device' => 'Chrome on Windows · 203.0.113.xxx'] — never throws. */
+    function attm_lr_evidence($conn, int $companyId, array $r): array {
+        $sig = [];
+        $add = function(string $lvl, string $txt) use (&$sig) { $sig[] = ['level' => $lvl, 'text' => $txt]; };
+        $device = '';
+        $detail = null;
+        $set = null;
+        try {
+            $id   = (int)($r['id'] ?? 0);
+            $sid  = (int)($r['student_id'] ?? 0);
+            $date = (string)($r['date'] ?? '');
+            $type = (string)($r['type'] ?? '');
+            $kind = 'late'; // overtime requests were removed (old overtime rows are handled as late requests)
+            $labels = ['am_time_in' => 'AM Sign In', 'am_time_out' => 'AM Sign Out', 'pm_time_in' => 'PM Sign In', 'pm_time_out' => 'PM Sign Out'];
+            $slotLbl = $labels[$type] ?? $type;
+
+            // 1) Photo
+            $hasPhoto = !empty($r['has_photo']) || !empty($r['photo']);
+            if (!$hasPhoto) {
+                $add('review', 'No photo was attached to this request.');
+            } elseif (isset($r['photo_valid']) && $r['photo_valid'] !== null && (int)$r['photo_valid'] === 0) {
+                $add('risk', 'The attached photo is not a valid image.');
+            } else {
+                $hash = (string)($r['photo_hash'] ?? '');
+                $dupMsg = null;
+                if ($hash !== '') {
+                    $q = $conn->prepare("SELECT lr2.student_id, lr2.date, CONCAT(u.first_name, ' ', u.last_name) AS nm FROM late_requests lr2 JOIN users u ON u.id = lr2.student_id WHERE lr2.photo_hash = ? AND lr2.id <> ? ORDER BY lr2.id ASC LIMIT 1");
+                    $q->bind_param("si", $hash, $id); $q->execute();
+                    $d = $q->get_result()->fetch_assoc(); $q->close();
+                    if ($d) {
+                        $dupMsg = ((int)$d['student_id'] === $sid)
+                            ? 'This exact photo was already used in an earlier request of this student (' . date('M j, Y', strtotime($d['date'])) . ').'
+                            : 'This exact photo was already submitted by another student (' . trim($d['nm']) . ', ' . date('M j, Y', strtotime($d['date'])) . ').';
+                    } else {
+                        $q = $conn->prepare("SELECT user_id, date FROM attendance_device_log WHERE photo_hash = ? AND NOT (kind IN ('late','overtime') AND user_id = ? AND date = ? AND slot = ?) ORDER BY id ASC LIMIT 1");
+                        $q->bind_param("siss", $hash, $sid, $date, $type); $q->execute();
+                        $d = $q->get_result()->fetch_assoc(); $q->close();
+                        if ($d) $dupMsg = 'This exact photo was already used for another attendance entry (' . date('M j, Y', strtotime($d['date'])) . ').';
+                    }
+                }
+                if ($dupMsg) $add('risk', $dupMsg);
+                else         $add('ok', 'A readable photo is attached and has not been used before.');
+            }
+
+            // 2) Device / network compared with the student's regular sign-ins (last 60 days)
+            $ip = (string)($r['submit_ip'] ?? ''); $ua = (string)($r['submit_ua'] ?? '');
+            if ($ip !== '' || $ua !== '') $device = trim(attm_lr_ua_key($ua) . ($ip !== '' ? ' · ' . attm_lr_mask_ip($ip) : ''), ' ·');
+            if ($ip === '' && $ua === '') {
+                $add('info', 'Device and network were not recorded for this request (sent before this check existed).');
+            } else {
+                $q = $conn->prepare("SELECT ip, ua FROM attendance_device_log WHERE user_id = ? AND kind = 'attendance' AND created_at >= (NOW() - INTERVAL 60 DAY) ORDER BY id DESC LIMIT 40");
+                $q->bind_param("i", $sid); $q->execute();
+                $hist = $q->get_result()->fetch_all(MYSQLI_ASSOC); $q->close();
+                if (empty($hist)) {
+                    $add('info', 'No earlier sign-ins are recorded to compare this device or network with.');
+                } else {
+                    $uaKey = attm_lr_ua_key($ua); $netKey = attm_lr_net_key($ip);
+                    $sameUa = false; $sameNet = false;
+                    foreach ($hist as $h) {
+                        if ($uaKey !== '' && attm_lr_ua_key($h['ua']) === $uaKey)   $sameUa = true;
+                        if ($netKey !== '' && attm_lr_net_key($h['ip']) === $netKey) $sameNet = true;
+                    }
+                    if ($sameUa && $sameNet)      $add('ok', 'Sent from the same device and network as the student\'s regular sign-ins.');
+                    elseif ($sameUa)              $add('review', 'Sent from a different network than the student\'s regular sign-ins (same device).');
+                    elseif ($sameNet)             $add('review', 'Sent from a different device than the student\'s regular sign-ins (same network).');
+                    else                          $add(count($hist) >= 3 ? 'risk' : 'review', 'Sent from a device and network the student has never signed in from.');
+                }
+            }
+
+            // 3) The rest of that day's attendance
+            $q = $conn->prepare("SELECT am_time_in, am_time_out, pm_time_in, pm_time_out FROM attendance_logs WHERE user_id = ? AND date = ? AND company_id = ? LIMIT 1");
+            $q->bind_param("isi", $sid, $date, $companyId); $q->execute();
+            $log = $q->get_result()->fetch_assoc(); $q->close();
+            $real = 0;
+            foreach (['am_time_in', 'am_time_out', 'pm_time_in', 'pm_time_out'] as $c) { $v = $log[$c] ?? null; if ($v !== null && $v !== '' && $v !== 'missed') $real++; }
+            if ($real === 0) {
+                $add('review', 'The student has no other attendance recorded on this day.');
+            } else {
+                $add('ok', 'The student has ' . $real . ' other recorded entr' . ($real === 1 ? 'y' : 'ies') . ' on this day.');
+            }
+            if ($kind === 'late' && in_array($type, ['am_time_out', 'pm_time_out'], true)) {
+                $inV = $log[$type === 'am_time_out' ? 'am_time_in' : 'pm_time_in'] ?? null;
+                if ($inV === null || $inV === '' || $inV === 'missed') $add('review', 'No ' . ($type === 'am_time_out' ? 'AM' : 'PM') . ' Sign In is recorded for this duty, so there is nothing to sign out from.');
+            }
+
+            // 4) How long after the window it was sent (information)
+            $endKeys = ['am_time_in' => 'am_time_in_end', 'am_time_out' => 'am_time_out_end', 'pm_time_in' => 'pm_time_in_end', 'pm_time_out' => 'pm_time_out_end'];
+            if (isset($endKeys[$type]) && $date !== '') {
+                $q = $conn->prepare("SELECT * FROM attendance_settings WHERE company_id = ? AND (date = ? OR (is_auto = 1 AND date <= ?)) ORDER BY (date = ?) DESC, date DESC LIMIT 1");
+                $q->bind_param("isss", $companyId, $date, $date, $date); $q->execute();
+                $set = $q->get_result()->fetch_assoc(); $q->close();
+                $endT = $set[$endKeys[$type]] ?? null;
+                $sentTs = strtotime((string)($r['created_at'] ?? ''));
+                if ($endT && $sentTs) {
+                    $endTs = strtotime($date . ' ' . $endT);
+                    if ($endTs) {
+                        $mins = (int)round(($sentTs - $endTs) / 60);
+                        if ($mins >= 0) $add('info', 'Sent ' . ($mins >= 60 ? floor($mins / 60) . ' h ' . ($mins % 60) . ' min' : $mins . ' min') . ' after the ' . $slotLbl . ' window closed.');
+                    }
+                }
+            }
+
+            // 4b) What allowing this late request records: the Sign Out is credited at the SCHEDULED sign-out time
+            //     (never later than the moment the request was sent, never before the Sign In).
+            if (in_array($type, ['am_time_out', 'pm_time_out'], true) && $set) {
+                $per = ($type === 'am_time_out') ? 'am' : 'pm';
+                $fmt = function($ts) { return $ts ? date('g:i A', $ts) : null; };
+                $dur = function($sec) { $m = (int)round(max(0, $sec) / 60); return floor($m / 60) . 'h ' . ($m % 60) . 'm'; };
+                $toTs = function($v) use ($date) {
+                    if (!$v || $v === 'missed') return null;
+                    $v = (strpos($v, ' ') === false) ? ($date . ' ' . $v) : $v;
+                    $t = strtotime($v);
+                    return $t === false ? null : $t;
+                };
+                $inTs    = $toTs($log[$per . '_time_in'] ?? null);
+                $schedTs = $toTs($set[$per . '_time_out_start'] ?? null);
+                $sentTs2 = strtotime((string)($r['created_at'] ?? '')) ?: null;
+                $detail = [
+                    'period' => strtoupper($per),
+                    'in' => $fmt($inTs), 'sched_out' => $fmt($schedTs), 'sent' => $fmt($sentTs2),
+                    'late_credit' => null,
+                ];
+                if ($inTs && $schedTs && $sentTs2) {
+                    $lateOut = min($schedTs, $sentTs2); if ($lateOut < $inTs) $lateOut = $inTs;
+                    $detail['late_credit'] = $dur($lateOut - $inTs);
+                    $add('info', 'Allowing it credits ' . $detail['late_credit'] . ' (sign-in to the scheduled sign-out, ' . $detail['sched_out'] . ').');
+                } elseif (!$inTs) {
+                    $detail['late_credit'] = '0h 0m';
+                }
+            }
+
+            // 5) How often this student asks
+            $q = $conn->prepare("SELECT COUNT(*) AS n, SUM(status = 'rejected') AS rej FROM late_requests WHERE student_id = ? AND id <> ? AND created_at >= (NOW() - INTERVAL 30 DAY)");
+            $q->bind_param("ii", $sid, $id); $q->execute();
+            $f = $q->get_result()->fetch_assoc(); $q->close();
+            $n = (int)($f['n'] ?? 0); $rej = (int)($f['rej'] ?? 0);
+            if ($n >= 5)      $add('risk',   $n . ' other late requests from this student in the last 30 days.');
+            elseif ($n >= 3)  $add('review', $n . ' other late requests from this student in the last 30 days.');
+            else              $add('ok',     $n === 0 ? 'No other late requests from this student in the last 30 days.' : $n . ' other late request' . ($n === 1 ? '' : 's') . ' from this student in the last 30 days.');
+            if ($rej >= 2)    $add('review', $rej . ' of this student\'s recent requests were rejected.');
+
+            // 6) The reason
+            $reason = trim((string)($r['reason'] ?? ''));
+            $norm = preg_replace('/[^a-z0-9]+/', ' ', function_exists('mb_strtolower') ? mb_strtolower($reason) : strtolower($reason));
+            $norm = trim($norm);
+            if ($norm !== '') {
+                if ((function_exists('mb_strlen') ? mb_strlen($reason) : strlen($reason)) < 15) $add('review', 'The reason is very short.');
+                $q = $conn->prepare("SELECT student_id, reason FROM late_requests WHERE company_id = ? AND id <> ? AND (student_id = ? OR date = ?) ORDER BY id DESC LIMIT 200");
+                $q->bind_param("iiis", $companyId, $id, $sid, $date); $q->execute();
+                $others = $q->get_result()->fetch_all(MYSQLI_ASSOC); $q->close();
+                $sameSelf = false; $sameOther = false;
+                foreach ($others as $o) {
+                    $on = trim(preg_replace('/[^a-z0-9]+/', ' ', function_exists('mb_strtolower') ? mb_strtolower((string)$o['reason']) : strtolower((string)$o['reason'])));
+                    if ($on === $norm) { if ((int)$o['student_id'] === $sid) $sameSelf = true; else $sameOther = true; }
+                }
+                if ($sameOther)     $add('risk',   'The same reason was submitted by another student on this day.');
+                if ($sameSelf)      $add('review', 'The student used exactly the same reason in an earlier request.');
+            }
+        } catch (\Throwable $e) {
+            $add('info', 'Some checks could not be completed.');
+        }
+        $rank = ['ok' => 0, 'info' => 0, 'review' => 1, 'risk' => 2];
+        $max = 0;
+        foreach ($sig as $s) $max = max($max, $rank[$s['level']] ?? 0);
+        $level = $max >= 2 ? 'risk' : ($max === 1 ? 'review' : 'ok');
+        $label = ['ok' => 'Looks consistent', 'review' => 'Review before approving', 'risk' => 'High risk — verify with the student first'][$level];
+        return ['level' => $level, 'label' => $label, 'signals' => $sig, 'device' => $device, 'detail' => $detail];
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// XLSX EXPORT HANDLER
+// (formerly the separate export_attendance_xlsx.php — the Export XLSX button of the
+//  Monthly Attendance Summary now calls attendance_management.php?export=xlsx&month=YYYY-MM)
+//
+// Filename format: {CompanyName}_{MonAbbrev}{Year}.xlsx   e.g.  AcmeCorp_Jan2025.xlsx
+// Uses the same student schedule (Day = AM duty, Evening = PM duty) and OJT-end rules as the page.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Minimal pure-PHP XLSX writer.
+ * Supports: cell values, bold header row, column auto-width, cell fill colours.
+ */
+if (!function_exists('attm_build_xlsx')) {
+function attm_build_xlsx(array $header, array $rows, string $sheet_title,
+                    string $company_display, string $month_label): string
+{
+    // ── Colour map for status values ──────────────────────────────────────────
+    $status_fills = [
+        'PRESENT'    => 'C6EFCE',   // green tint
+        'ABSENT'     => 'FFC7CE',   // red tint
+        'INCOMPLETE' => 'FFEB9C',   // amber tint
+        'OFF'        => 'E4DFEC',   // purple tint (Day Off)
+        'OFF'        => 'E4DFEC',
+    ];
+
+    // ── Shared strings ────────────────────────────────────────────────────────
+    $sst    = [];    // index => string
+    $sstMap = [];    // string => index
+
+    $si = function(string $v) use (&$sst, &$sstMap): int {
+        if (!isset($sstMap[$v])) {
+            $sstMap[$v] = count($sst);
+            $sst[]      = $v;
+        }
+        return $sstMap[$v];
+    };
+
+    // ── Figure out column widths (max char length per column) ─────────────────
+    $col_widths = [];
+    foreach ($header as $ci => $h) {
+        $col_widths[$ci] = mb_strlen((string)$h);
+    }
+    foreach ($rows as $row) {
+        foreach ($row as $ci => $cell) {
+            $len = mb_strlen((string)$cell);
+            if (!isset($col_widths[$ci]) || $len > $col_widths[$ci]) {
+                $col_widths[$ci] = $len;
+            }
+        }
+    }
+    // Add padding; cap at 40; Name column wider
+    foreach ($col_widths as $ci => &$w) {
+        $w = min(40, max(9, $w + 4));
+    }
+    unset($w);
+    $col_widths[0] = min(40, max(20, $col_widths[0] ?? 20)); // Name col
+
+    // ── Build sheet XML ───────────────────────────────────────────────────────
+    // Style indices (defined in styles.xml below):
+    //   0 = default, 1 = bold header, 2 = present, 3 = absent, 4 = incomplete, 5 = off
+    $style_map = [
+        'PRESENT'    => 2,
+        'ABSENT'     => 3,
+        'INCOMPLETE' => 4,
+        'OFF'        => 5,
+    ];
+
+    $col_letter = function(int $n): string {
+        $s = '';
+        $n++;   // 0-indexed → 1-indexed
+        while ($n > 0) {
+            $n--;
+            $s = chr(65 + ($n % 26)) . $s;
+            $n = intdiv($n, 26);
+        }
+        return $s;
+    };
+
+    $xml_sheet = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+    $xml_sheet .= '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">';
+
+    // column widths
+    $xml_sheet .= '<cols>';
+    foreach ($col_widths as $ci => $w) {
+        $c1 = $c2 = $ci + 1;
+        $xml_sheet .= '<col min="'.$c1.'" max="'.$c2.'" width="'.$w.'" customWidth="1"/>';
+    }
+    $xml_sheet .= '</cols>';
+
+    $xml_sheet .= '<sheetData>';
+
+    // Title row (row 1) — merged later via mergeCell; put text in A1
+    $title_text = $company_display . ' — Attendance Summary — ' . $month_label;
+    $xml_sheet .= '<row r="1"><c r="A1" t="s" s="6"><v>'.$si($title_text).'</v></c></row>';
+
+    // Header row (row 2)
+    $xml_sheet .= '<row r="2">';
+    foreach ($header as $ci => $h) {
+        $col = $col_letter($ci);
+        $xml_sheet .= '<c r="'.$col.'2" t="s" s="1"><v>'.$si((string)$h).'</v></c>';
+    }
+    $xml_sheet .= '</row>';
+
+    // Data rows (start at row 3)
+    $excel_row = 3;
+    foreach ($rows as $row) {
+        $xml_sheet .= '<row r="'.$excel_row.'">';
+        foreach ($row as $ci => $cell) {
+            $col   = $col_letter($ci);
+            $ref   = $col . $excel_row;
+            $upper = strtoupper(trim((string)$cell));
+            $s_idx = isset($style_map[$upper]) ? $style_map[$upper] : 0;
+            if ($cell === '') {
+                $xml_sheet .= '<c r="'.$ref.'" s="'.$s_idx.'"/>';
+            } else {
+                $xml_sheet .= '<c r="'.$ref.'" t="s" s="'.$s_idx.'"><v>'.$si((string)$cell).'</v></c>';
+            }
+        }
+        $xml_sheet .= '</row>';
+        $excel_row++;
+    }
+
+    $xml_sheet .= '</sheetData>';
+
+    // Merge title row across all columns
+    $total_cols  = count($header);
+    $last_col    = $col_letter($total_cols - 1);
+    $xml_sheet .= '<mergeCells><mergeCell ref="A1:'.$last_col.'1"/></mergeCells>';
+
+    $xml_sheet .= '</worksheet>';
+
+    // ── Shared strings XML ────────────────────────────────────────────────────
+    $xml_sst = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+    $xml_sst .= '<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="'.count($sst).'" uniqueCount="'.count($sst).'">';
+    foreach ($sst as $sv) {
+        $xml_sst .= '<si><t xml:space="preserve">'.htmlspecialchars($sv, ENT_XML1, 'UTF-8').'</t></si>';
+    }
+    $xml_sst .= '</sst>';
+
+    // ── Styles XML ────────────────────────────────────────────────────────────
+    // Fill indices: 0=none,1=gray(reserved),2=present(green),3=absent(red),4=incomplete(amber),5=off(purple),6=header(dark blue),7=title(navy)
+    $xml_styles = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+    $xml_styles .= '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">';
+
+    // fonts: 0=default, 1=bold, 2=bold+white(for header), 3=bold+dark(for status), 4=bold+white+larger(title)
+    $xml_styles .= '<fonts count="5">';
+    $xml_styles .= '<font><sz val="11"/><name val="Arial"/></font>';                                                         // 0 default
+    $xml_styles .= '<font><b/><sz val="11"/><name val="Arial"/></font>';                                                     // 1 bold
+    $xml_styles .= '<font><b/><sz val="11"/><color rgb="FFFFFFFF"/><name val="Arial"/></font>';                              // 2 bold white (header bg)
+    $xml_styles .= '<font><b/><sz val="10"/><name val="Arial"/></font>';                                                     // 3 bold dark (status cells)
+    $xml_styles .= '<font><b/><sz val="13"/><color rgb="FFFFFFFF"/><name val="Arial"/></font>';                              // 4 bold white large (title)
+    $xml_styles .= '</fonts>';
+
+    // fills: 0=none,1=gray,2=present,3=absent,4=incomplete,5=off,6=header,7=title
+    $xml_styles .= '<fills count="8">';
+    $xml_styles .= '<fill><patternFill patternType="none"/></fill>';
+    $xml_styles .= '<fill><patternFill patternType="gray125"/></fill>';
+    $xml_styles .= '<fill><patternFill patternType="solid"><fgColor rgb="FFC6EFCE"/></patternFill></fill>';   // 2 present
+    $xml_styles .= '<fill><patternFill patternType="solid"><fgColor rgb="FFFFC7CE"/></patternFill></fill>';   // 3 absent
+    $xml_styles .= '<fill><patternFill patternType="solid"><fgColor rgb="FFFFEB9C"/></patternFill></fill>';   // 4 incomplete
+    $xml_styles .= '<fill><patternFill patternType="solid"><fgColor rgb="FFE4DFEC"/></patternFill></fill>';   // 5 off
+    $xml_styles .= '<fill><patternFill patternType="solid"><fgColor rgb="FF1565C0"/></patternFill></fill>';   // 6 header dark blue
+    $xml_styles .= '<fill><patternFill patternType="solid"><fgColor rgb="FF0D2B6B"/></patternFill></fill>';   // 7 title navy
+    $xml_styles .= '</fills>';
+
+    // borders
+    $border_thin = '<border><left style="thin"><color rgb="FFD0D0D0"/></left><right style="thin"><color rgb="FFD0D0D0"/></right><top style="thin"><color rgb="FFD0D0D0"/></top><bottom style="thin"><color rgb="FFD0D0D0"/></bottom></border>';
+    $xml_styles .= '<borders count="2">';
+    $xml_styles .= '<border/>';
+    $xml_styles .= $border_thin;
+    $xml_styles .= '</borders>';
+
+    // cellStyleXfs (required)
+    $xml_styles .= '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>';
+
+    // cellXfs:
+    // 0 = default (data)
+    // 1 = header  (bold white text, dark-blue fill, thin border, centered)
+    // 2 = present (bold, green fill, border, centered)
+    // 3 = absent  (bold, red fill, border, centered)
+    // 4 = incomplete (bold, amber fill, border, centered)
+    // 5 = off     (bold, purple fill, border, centered)
+    // 6 = title   (bold white, navy fill, larger, wrap, centered)
+    $center  = '<alignment horizontal="center" vertical="center"/>';
+    $wrap_c  = '<alignment horizontal="center" vertical="center" wrapText="1"/>';
+    $xml_styles .= '<cellXfs count="7">';
+    $xml_styles .= '<xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0"><alignment vertical="center"/></xf>'; // 0
+    $xml_styles .= '<xf numFmtId="0" fontId="2" fillId="6" borderId="1" xfId="0">'.$center.'</xf>';  // 1 header
+    $xml_styles .= '<xf numFmtId="0" fontId="3" fillId="2" borderId="1" xfId="0">'.$center.'</xf>';  // 2 present
+    $xml_styles .= '<xf numFmtId="0" fontId="3" fillId="3" borderId="1" xfId="0">'.$center.'</xf>';  // 3 absent
+    $xml_styles .= '<xf numFmtId="0" fontId="3" fillId="4" borderId="1" xfId="0">'.$center.'</xf>';  // 4 incomplete
+    $xml_styles .= '<xf numFmtId="0" fontId="3" fillId="5" borderId="1" xfId="0">'.$center.'</xf>';  // 5 off
+    $xml_styles .= '<xf numFmtId="0" fontId="4" fillId="7" borderId="1" xfId="0">'.$wrap_c.'</xf>'; // 6 title
+    $xml_styles .= '</cellXfs>';
+
+    $xml_styles .= '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>';
+    $xml_styles .= '</styleSheet>';
+
+    // ── Workbook XML ──────────────────────────────────────────────────────────
+    $xml_workbook = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+    $xml_workbook .= '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">';
+    $xml_workbook .= '<sheets><sheet name="'.htmlspecialchars($sheet_title, ENT_XML1).'" sheetId="1" r:id="rId1"/></sheets>';
+    $xml_workbook .= '</workbook>';
+
+    // ── Relationships ─────────────────────────────────────────────────────────
+    $xml_wb_rels = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+    $xml_wb_rels .= '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">';
+    $xml_wb_rels .= '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>';
+    $xml_wb_rels .= '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="sharedStrings.xml"/>';
+    $xml_wb_rels .= '<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>';
+    $xml_wb_rels .= '</Relationships>';
+
+    $xml_root_rels = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+    $xml_root_rels .= '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">';
+    $xml_root_rels .= '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>';
+    $xml_root_rels .= '</Relationships>';
+
+    $xml_ct = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+    $xml_ct .= '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">';
+    $xml_ct .= '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>';
+    $xml_ct .= '<Default Extension="xml" ContentType="application/xml"/>';
+    $xml_ct .= '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>';
+    $xml_ct .= '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>';
+    $xml_ct .= '<Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>';
+    $xml_ct .= '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>';
+    $xml_ct .= '</Types>';
+
+    // ── ZIP it into XLSX ──────────────────────────────────────────────────────
+    $tmp = tempnam(sys_get_temp_dir(), 'xlsx_');
+    @unlink($tmp);
+    $tmp .= '.xlsx';
+
+    $zip = new ZipArchive();
+    $zip->open($tmp, ZipArchive::CREATE | ZipArchive::OVERWRITE);
+    $zip->addFromString('[Content_Types].xml',       $xml_ct);
+    $zip->addFromString('_rels/.rels',               $xml_root_rels);
+    $zip->addFromString('xl/workbook.xml',           $xml_workbook);
+    $zip->addFromString('xl/_rels/workbook.xml.rels',$xml_wb_rels);
+    $zip->addFromString('xl/worksheets/sheet1.xml',  $xml_sheet);
+    $zip->addFromString('xl/sharedStrings.xml',      $xml_sst);
+    $zip->addFromString('xl/styles.xml',             $xml_styles);
+    $zip->close();
+
+    $blob = file_get_contents($tmp);
+    @unlink($tmp);
+    return $blob;
+}
+
+}
+
+if (!function_exists('attm_export_xlsx')) {
+    function attm_export_xlsx($conn, $company_id) {
+        if (!class_exists('ZipArchive')) {
+            http_response_code(500);
+            header('Content-Type: text/plain; charset=UTF-8');
+            echo 'Excel export is unavailable: the PHP zip extension is not enabled on this server.';
+            exit;
+        }
+        $company_id = (int)$company_id;
+
+    // ── Fetch company name ────────────────────────────────────────────────────────
+    $co_stmt = $conn->prepare("
+        SELECT ci.company, u.first_name, u.last_name
+        FROM users u
+        LEFT JOIN company_information ci ON ci.user_id = u.id
+        WHERE u.id = ? LIMIT 1
+    ");
+    $co_stmt->bind_param("i", $company_id);
+    $co_stmt->execute();
+    $co_row = $co_stmt->get_result()->fetch_assoc();
+    $company_name_raw = !empty($co_row['company'])
+        ? $co_row['company']
+        : trim(($co_row['first_name'] ?? '') . ' ' . ($co_row['last_name'] ?? ''));
+    if (!$company_name_raw) $company_name_raw = 'Company';
+    // Sanitise for filename (remove chars that aren't word chars / spaces / hyphens)
+    $company_name_safe = preg_replace('/[^\w\s\-]/', '', $company_name_raw);
+    $company_name_safe = preg_replace('/\s+/', '_', trim($company_name_safe));
+
+    // ── Month & date range ────────────────────────────────────────────────────────
+    $exp_month = $_GET['month'] ?? date('Y-m');
+    if (!preg_match('/^\d{4}-(0[1-9]|1[0-2])$/', (string)$exp_month)) $exp_month = date('Y-m'); // NEW: bad / missing month falls back to the current month
+
+    $s2 = $conn->prepare("SELECT MIN(date) as sd FROM attendance_settings WHERE company_id=?");
+    $s2->bind_param("i", $company_id);
+    $s2->execute();
+    $sd_row = $s2->get_result()->fetch_assoc();
+    $sd = $sd_row['sd'] ?? date('Y-m-d');
+
+    if (date('Y-m', strtotime($sd)) === $exp_month) {
+        $exp_start = $sd;
+    } else {
+        $exp_start = $exp_month . '-01';
+    }
+    $exp_end = date('Y-m-t', strtotime($exp_month . '-01'));
+
+    // ── Filename: CompanyName_MonYear.xlsx ────────────────────────────────────────
+    $month_abbrev = date('M', strtotime($exp_month . '-01'));   // e.g. "Jan"
+    $year_4       = date('Y', strtotime($exp_month . '-01'));   // e.g. "2025"
+    $filename     = $company_name_safe . '_' . $month_abbrev . $year_4 . '.xlsx';
+
+    // ── Students ──────────────────────────────────────────────────────────────────
+    $stud_res = $conn->query("
+        SELECT u.id, u.first_name, u.last_name
+        FROM ojt_assignments oa
+        JOIN users u ON oa.student_id = u.id
+        WHERE oa.company_id = $company_id
+        ORDER BY u.first_name ASC
+    ");
+    $exp_students = [];
+    while ($sr = $stud_res->fetch_assoc()) {
+        $exp_students[$sr['id']] = $sr;
+    }
+
+
+    $exp_sched = attsch_load($conn, array_keys($exp_students)); // NEW (student schedule)
+    $exp_ojt_end = ojtend_dates($conn, array_keys($exp_students)); // NEW (OJT ends at the required hours)
+
+    // ── Logs ──────────────────────────────────────────────────────────────────────
+    $log_res = $conn->query("
+        SELECT user_id, date, am_time_in, am_time_out, pm_time_in, pm_time_out
+        FROM attendance_logs
+        WHERE company_id = $company_id
+          AND date BETWEEN '$exp_start' AND '$exp_end'
+    ");
+    $exp_logs = [];
+    $exp_has_entry = []; // real times only (a "missed"-only row is not an entry)
+    while ($lr = $log_res->fetch_assoc()) {
+        foreach (['am_time_in','am_time_out','pm_time_in','pm_time_out'] as $c_) {
+            if ($lr[$c_] !== null && $lr[$c_] !== '' && $lr[$c_] !== 'missed') { $exp_has_entry[$lr['user_id']][$lr['date']] = true; break; }
+        }
+        $dow   = (int)date('w', strtotime($lr['date']));
+        $wknd  = ($dow === 0 || $dow === 6);
+        $isMissed = fn($v) => ($v === 'missed');
+        $hasVal   = fn($v) => ($v !== null && $v !== '' && $v !== 'missed');
+        // NEW (student schedule): judged on the duty periods scheduled that day (Day = AM duty, Evening = PM duty);
+        // a period holding a real entry always counts. Students on both duties are judged exactly as before.
+        $per    = attsch_periods($exp_sched, $lr['user_id'], $lr['date']);
+        $needAm = $per['am'] || $hasVal($lr['am_time_in']) || $hasVal($lr['am_time_out']);
+        $needPm = $per['pm'] || $hasVal($lr['pm_time_in']) || $hasVal($lr['pm_time_out']);
+        if (!$needAm && !$needPm) { $needAm = $needPm = true; }
+        if ($wknd) {
+            $st = 'OFF';
+        } elseif ((!$needAm || ($hasVal($lr['am_time_in']) && $hasVal($lr['am_time_out'])))
+               && (!$needPm || ($hasVal($lr['pm_time_in']) && $hasVal($lr['pm_time_out'])))) {
+            $st = 'PRESENT';
+        } elseif (($needAm && ($hasVal($lr['am_time_in']) || $isMissed($lr['am_time_in']) || $isMissed($lr['am_time_out'])))
+               || ($needPm && ($hasVal($lr['pm_time_in']) || $isMissed($lr['pm_time_in']) || $isMissed($lr['pm_time_out'])))
+               || ($per['am'] && $per['pm'] && ($hasVal($lr['am_time_in']) || $hasVal($lr['pm_time_in'])))) {
+            $st = 'INCOMPLETE';
+        } else {
+            $st = 'ABSENT';
+        }
+        $exp_logs[$lr['user_id']][$lr['date']] = $st;
+    }
+
+    // ── Date columns ──────────────────────────────────────────────────────────────
+    $exp_dates = [];
+    for ($d = strtotime($exp_start); $d <= strtotime($exp_end); $d = strtotime('+1 day', $d)) {
+        $exp_dates[] = date('Y-m-d', $d);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Build the data array (header + rows)
+    // ─────────────────────────────────────────────────────────────────────────────
+    $today_str = date('Y-m-d');
+
+    $header_row = ['Name'];
+    foreach ($exp_dates as $d) {
+        $dow = (int)date('w', strtotime($d));
+        $label = date('D d', strtotime($d));
+        if ($dow === 0 || $dow === 6) $label .= ' (Off)';
+        $header_row[] = $label;
+    }
+
+    $data_rows = [];
+    foreach ($exp_students as $sid => $stu) {
+        $row = [$stu['first_name'] . ' ' . $stu['last_name']];
+        foreach ($exp_dates as $d) {
+            $dow = (int)date('w', strtotime($d));
+            if ($dow === 0 || $dow === 6) {
+                $row[] = 'OFF';
+            } elseif ($d > $today_str) {
+                $row[] = '';
+            } elseif (empty($exp_has_entry[$sid][$d]) && ojtend_is_after($exp_ojt_end, $sid, $d)) {
+                $row[] = ''; // NEW (OJT ends at the required hours): the student already completed the OJT
+            } elseif (empty($exp_has_entry[$sid][$d]) && !attsch_is_scheduled($exp_sched, $sid, $d)) {
+                $row[] = 'NOT SCHEDULED'; // NEW (student schedule): not a duty day for this student — never absent
+            } elseif ($d === $today_str && empty($exp_has_entry[$sid][$d])) {
+                $row[] = ''; // today with no attendance entry yet: blank until the day has passed
+            } else {
+                $row[] = $exp_logs[$sid][$d] ?? 'ABSENT';
+            }
+        }
+        $data_rows[] = $row;
+    }
+
+    // Generate & stream
+    // ─────────────────────────────────────────────────────────────────────────────
+    $sheet_title     = 'Attendance ' . $month_abbrev . $year_4;
+    $month_label_fmt = date('F Y', strtotime($exp_month . '-01'));
+
+    $xlsx_blob = attm_build_xlsx(
+        $header_row,
+        $data_rows,
+        $sheet_title,
+        $company_name_raw,
+        $month_label_fmt
+    );
+
+    header('Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    header('Content-Disposition: attachment; filename="' . $filename . '"');
+    header('Content-Length: ' . strlen($xlsx_blob));
+    header('Cache-Control: no-cache, no-store, must-revalidate');
+    header('Pragma: no-cache');
+    header('Expires: 0');
+    echo $xlsx_blob;
+    exit;
+
+    }
+}
+if (isset($_GET['export']) && $_GET['export'] === 'xlsx') {
+    try {
+        attm_export_xlsx($conn, $company_id);
+    } catch (\Throwable $e) {
+        while (ob_get_level() > 0) { ob_end_clean(); }
+        http_response_code(500);
+        header('Content-Type: text/plain; charset=UTF-8');
+        echo 'The Excel export could not be generated. Please try again.';
+        exit;
     }
 }
 
@@ -388,6 +1308,8 @@ if (isset($_GET['export']) && $_GET['export'] == '1') {
         $exp_students[$sr['id']] = $sr;
     }
     $exp_first = attm_first_attendance_map($conn, array_keys($exp_students)); // UPDATED (Start = first attendance)
+    $exp_sched = attsch_load($conn, array_keys($exp_students)); // NEW (student schedule)
+    $exp_ojt_end = ojtend_dates($conn, array_keys($exp_students)); // NEW (OJT ends at the required hours)
 
     $log_res = $conn->query("
         SELECT user_id, date, am_time_in, am_time_out, pm_time_in, pm_time_out
@@ -396,13 +1318,18 @@ if (isset($_GET['export']) && $_GET['export'] == '1') {
           AND date BETWEEN '$exp_start' AND '$exp_end'
     ");
     $exp_logs = [];
+    $exp_has_entry = []; // real times only (a "missed"-only row is not an entry)
     while ($lr = $log_res->fetch_assoc()) {
+        foreach (['am_time_in','am_time_out','pm_time_in','pm_time_out'] as $c_) {
+            if ($lr[$c_] !== null && $lr[$c_] !== '' && $lr[$c_] !== 'missed') { $exp_has_entry[$lr['user_id']][$lr['date']] = true; break; }
+        }
         $dow = (int)date('w', strtotime($lr['date']));
         $wknd = ($dow === 0 || $dow === 6);
         if ($wknd) {
             $st = 'DAY OFF';
         } else {
             $duty = getActiveDutyPeriods($lr['date'], $all_settings_map);
+            $duty = attsch_limit_duty($duty, attsch_periods($exp_sched, $lr['user_id'], $lr['date']), $lr); // NEW (student schedule): Day = AM duty, Evening = PM duty
             $st   = computeStatusForLog($lr, $duty['am'], $duty['pm']);
         }
         $exp_logs[$lr['user_id']][$lr['date']] = $st;
@@ -440,6 +1367,12 @@ if (isset($_GET['export']) && $_GET['export'] == '1') {
                 $row[] = '';
             } elseif (attm_before_start($exp_first, $sid, $d)) {
                 $row[] = ''; // UPDATED: before first attendance — not absent / missed
+            } elseif (empty($exp_has_entry[$sid][$d]) && ojtend_is_after($exp_ojt_end, $sid, $d)) {
+                $row[] = ''; // NEW (OJT ends at the required hours): the student already completed the OJT
+            } elseif (empty($exp_has_entry[$sid][$d]) && !attsch_is_scheduled($exp_sched, $sid, $d)) {
+                $row[] = 'NOT SCHEDULED'; // NEW (student schedule): not a duty day for this student — never absent
+            } elseif ($d === date('Y-m-d') && empty($exp_has_entry[$sid][$d])) {
+                $row[] = ''; // today with no attendance entry yet: blank until the day has passed
             } else {
                 $raw = $exp_logs[$sid][$d] ?? 'ABSENT';
                 $row[] = $raw;
@@ -451,10 +1384,410 @@ if (isset($_GET['export']) && $_GET['export'] == '1') {
     exit;
 }
 
+/* ════════════════════════════════════════════════════════════════════
+   Attendance schedule e-mail (self-contained: this page no longer depends on
+   attendance_email_handler.php). PHPMailer is loaded only when an e-mail is sent.
+   ════════════════════════════════════════════════════════════════════ */
+function attm_load_phpmailer() {
+    if (class_exists('\\PHPMailer\\PHPMailer\\PHPMailer', false)) return;
+    require_once __DIR__ . '/phpmailer/src/Exception.php';
+    require_once __DIR__ . '/phpmailer/src/PHPMailer.php';
+    require_once __DIR__ . '/phpmailer/src/SMTP.php';
+}
+
+/**
+ * Send attendance schedule notification emails
+ * 
+ * @param mysqli $conn Database connection
+ * @param int $company_id Company ID
+ * @param string $date Date of the schedule
+ * @param string $am_in_range AM sign-in window display text
+ * @param string $am_out_range AM sign-out window display text
+ * @param string $pm_in_range PM sign-in window display text
+ * @param string $pm_out_range PM sign-out window display text
+ * @param bool $skip_am Whether AM duty is skipped
+ * @param bool $skip_pm Whether PM duty is skipped
+ * @return array Returns array with 'email_sent' count, 'total_students', 'admin_notified', 'email_errors'
+ */
+function attm_send_schedule_emails($conn, $company_id, $date, $am_in_range, $am_out_range, $pm_in_range, $pm_out_range, $skip_am = false, $skip_pm = false) {
+    
+    // Fetch company info
+    $co_stmt = $conn->prepare("
+        SELECT u.first_name, u.last_name, u.email, ci.company
+        FROM users u
+        LEFT JOIN company_information ci ON ci.user_id = u.id
+        WHERE u.id = ? LIMIT 1
+    ");
+    $co_stmt->bind_param("i", $company_id);
+    $co_stmt->execute();
+    $co_row = $co_stmt->get_result()->fetch_assoc();
+    $supervisor_name = trim(($co_row['first_name'] ?? '') . ' ' . ($co_row['last_name'] ?? ''));
+    if (!$supervisor_name) $supervisor_name = 'Supervisor';
+    $company_name = !empty($co_row['company']) ? $co_row['company'] : $supervisor_name;
+    $co_stmt->close();
+
+    // Fetch students email
+    $stud_stmt = $conn->prepare("
+        SELECT u.email, u.first_name, u.last_name
+        FROM ojt_assignments oa
+        JOIN users u ON oa.student_id = u.id
+        WHERE oa.company_id = ?
+          AND u.email IS NOT NULL AND u.email != ''
+    ");
+    $stud_stmt->bind_param("i", $company_id);
+    $stud_stmt->execute();
+    $students_email = $stud_stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+    $stud_stmt->close();
+
+    // Fetch admins email
+    $admin_stmt = $conn->prepare("
+        SELECT email, first_name, last_name
+        FROM admins
+        WHERE email IS NOT NULL AND email != ''
+    ");
+    $admin_stmt->execute();
+    $admin_emails = $admin_stmt->get_result()->fetch_all(MYSQLI_ASSOC);
+    $admin_stmt->close();
+
+    $formatted_date = date("l, F j, Y", strtotime($date));
+    
+    // Calculate end date limit for scope display
+    $ojt_start_stmt = $conn->prepare("SELECT MIN(date) as sd FROM attendance_settings WHERE company_id=?");
+    $ojt_start_stmt->bind_param("i", $company_id);
+    $ojt_start_stmt->execute();
+    $ojt_sd_row = $ojt_start_stmt->get_result()->fetch_assoc();
+    $ojt_start = $ojt_sd_row['sd'] ?? $date;
+    $ojt_start_stmt->close();
+    
+    $end_date_limit = date("Y-m-d", strtotime("+4 months", strtotime($ojt_start)));
+    $schedule_scope = "Starting {$formatted_date} — applied to ALL remaining OJT weekdays through " . date("F j, Y", strtotime($end_date_limit)) . ".";
+
+    $email_errors = [];
+    $email_sent = [];
+
+    $sendScheduleEmail = function($to, $name, $isAdmin = false) use (
+        $company_name, $supervisor_name, $formatted_date, $schedule_scope,
+        $am_in_range, $am_out_range, $pm_in_range, $pm_out_range, $skip_am, $skip_pm,
+        &$email_sent, &$email_errors
+    ) {
+        if (!filter_var($to, FILTER_VALIDATE_EMAIL)) {
+            $email_errors[] = ['email' => $to, 'student' => $name, 'reasons' => ['Invalid email address format.']];
+            return;
+        }
+
+        $subject = "[{$company_name}] Attendance Schedule Updated — {$formatted_date}";
+
+        // Build the message (HTML + plain-text fallback). A rendering problem must never stop delivery.
+        try {
+            $built = attm_build_schedule_email(
+                $name, $isAdmin, $company_name, $supervisor_name, $formatted_date, $schedule_scope,
+                $am_in_range, $am_out_range, $pm_in_range, $pm_out_range, $skip_am, $skip_pm
+            );
+        } catch (Throwable $e) {
+            $email_errors[] = ['email' => $to, 'student' => $name, 'reasons' => ['Could not build email content: ' . $e->getMessage()]];
+            return;
+        }
+        $body    = $built['html'];
+        $altBody = $built['text'];
+
+        $mail = null;
+        try {
+            attm_load_phpmailer();
+            $mail = new \PHPMailer\PHPMailer\PHPMailer(true);
+            $mail->isSMTP();
+            $mail->Host       = 'smtp.gmail.com';
+            $mail->SMTPAuth   = true;
+            $mail->Username   = 'salesjohnlhoyd@gmail.com';
+            $mail->Password   = 'qwufanprpmezotly';
+            $mail->SMTPSecure = \PHPMailer\PHPMailer\PHPMailer::ENCRYPTION_STARTTLS;
+            $mail->Port       = 587;
+            $mail->setFrom('salesjohnlhoyd@gmail.com', 'Atate On the Job Training System');
+            $mail->addAddress($to, $name);
+            $mail->CharSet  = 'UTF-8';
+            $mail->Subject  = $subject;
+            $mail->isHTML(true);
+            $mail->Body     = $body;
+            $mail->AltBody  = $altBody;
+            $mail->send();
+            $email_sent[] = $to;
+        } catch (Throwable $e) {
+            $reason = ($mail && $mail->ErrorInfo) ? $mail->ErrorInfo : $e->getMessage();
+            $email_errors[] = ['email' => $to, 'student' => $name, 'reasons' => [$reason]];
+        }
+    };
+
+    foreach ($students_email as $student) {
+        $sendScheduleEmail($student['email'], $student['first_name'] . ' ' . $student['last_name'], false);
+    }
+
+    foreach ($admin_emails as $admin) {
+        $adminName = trim(($admin['first_name'] ?? '') . ' ' . ($admin['last_name'] ?? ''));
+        if (!$adminName) $adminName = 'Admin';
+        $sendScheduleEmail($admin['email'], $adminName, true);
+    }
+
+    return [
+        'email_sent' => count($email_sent),
+        'total_students' => count($students_email),
+        'admin_notified' => count($admin_emails),
+        'email_errors' => $email_errors
+    ];
+}
+/**
+ * Build the schedule-update email (HTML + plain text).
+ * Table-based layout with inline styles so it renders consistently in Gmail, Outlook and mobile clients.
+ * Palette is limited to: navy #07145f (headings/brand), slate #4b5563 (body text), white (on navy).
+ *
+ * @return array ['html' => string, 'text' => string]
+ */
+function attm_build_schedule_email($name, $isAdmin, $company_name, $supervisor_name, $formatted_date, $schedule_scope,
+                                      $am_in_range, $am_out_range, $pm_in_range, $pm_out_range, $skip_am = false, $skip_pm = false) {
+    $e = function ($v) { return htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8'); };
+
+    // A session counts as skipped when flagged, or when both of its windows were left empty.
+    $isSkipped = function ($r) { $r = trim((string)$r); return $r === '' || strcasecmp($r, 'Skipped') === 0; };
+    $am_off = $skip_am || ($isSkipped($am_in_range) && $isSkipped($am_out_range));
+    $pm_off = $skip_pm || ($isSkipped($pm_in_range) && $isSkipped($pm_out_range));
+    $show = function ($r, $off) use ($isSkipped) { return ($off || $isSkipped($r)) ? 'Not required' : $r; };
+
+    $am_in  = $show($am_in_range,  $am_off);  $am_out = $show($am_out_range, $am_off);
+    $pm_in  = $show($pm_in_range,  $pm_off);  $pm_out = $show($pm_out_range, $pm_off);
+
+    $name = trim((string)$name) !== '' ? trim((string)$name) : ($isAdmin ? 'Administrator' : 'Student');
+
+    // Summary sentence adapts to which sessions are active.
+    if ($am_off && $pm_off) {
+        $summary = 'No duty sessions are currently scheduled. Attendance will not be recorded until a new schedule is set.';
+    } elseif ($am_off) {
+        $summary = 'Only the afternoon session is required. Morning attendance will not be recorded.';
+    } elseif ($pm_off) {
+        $summary = 'Only the morning session is required. Afternoon attendance will not be recorded.';
+    } else {
+        $summary = 'Both the morning and afternoon sessions are required each OJT weekday.';
+    }
+
+    if ($isAdmin) {
+        $intro   = $e($company_name) . ' has updated its OJT attendance schedule. The new time windows are shown below for your records. No action is required on your part.';
+        $actions = [
+            'Students assigned to this company have received the same notice.',
+            'Past attendance records are not affected by this change.',
+            'Questions about this schedule can be directed to the supervisor, ' . $supervisor_name . '.',
+        ];
+        $actions_title = 'For your information';
+        $badge = 'Administrator copy';
+    } else {
+        $intro   = 'Your supervisor at ' . $e($company_name) . ' has updated your attendance schedule. Please review the time windows below and plan your daily sign-in and sign-out accordingly.';
+        $actions = [
+            'Sign in and sign out only within the windows listed above. Entries made outside a window may not be accepted.',
+            'Weekends are automatically marked as Day Off, so no attendance is needed on Saturday or Sunday.',
+            'Missing a sign-in or sign-out may result in an Absent or Incomplete status for that session.',
+            'If anything looks incorrect, please contact your supervisor, ' . $supervisor_name . ', as soon as possible.',
+        ];
+        $actions_title = 'What you need to do';
+        $badge = 'Student notice';
+    }
+
+    $navy = '#07145f'; $slate = '#4b5563'; $line = '#e5e7eb'; $tint = '#f4f6fb';
+
+    $row = function ($label, $in, $out) use ($e, $navy, $slate, $line) {
+        $cell = function ($v) use ($e, $navy, $slate) {
+            $off = ($v === 'Not required');
+            return '<td style="padding:14px 16px;font-size:14px;line-height:1.4;' . ($off ? 'color:' . $slate . ';font-style:italic;' : 'color:' . $navy . ';font-weight:700;') . '">' . $e($v) . '</td>';
+        };
+        return '<tr><td style="padding:14px 16px;border-top:1px solid ' . $line . ';font-size:14px;font-weight:700;color:' . $navy . ';">' . $e($label) . '</td>'
+             . str_replace('<td style="', '<td style="border-top:1px solid ' . $line . ';', $cell($in))
+             . str_replace('<td style="', '<td style="border-top:1px solid ' . $line . ';', $cell($out)) . '</tr>';
+    };
+
+    $li = '';
+    foreach ($actions as $a) {
+        $li .= '<tr><td valign="top" style="padding:0 10px 10px 0;font-size:14px;color:' . $navy . ';font-weight:700;width:14px;">&bull;</td>'
+             . '<td style="padding:0 0 10px;font-size:14px;line-height:1.6;color:' . $slate . ';">' . $e($a) . '</td></tr>';
+    }
+
+    $sent_at = date('F j, Y \a\t g:i A');
+
+    $html = '<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Attendance Schedule Update</title>
+</head>
+<body style="margin:0;padding:0;background:' . $tint . ';font-family:\'Segoe UI\',Helvetica,Arial,sans-serif;">
+<span style="display:none;max-height:0;overflow:hidden;opacity:0;">' . $e($company_name) . ' updated the attendance schedule effective ' . $e($formatted_date) . '.</span>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background:' . $tint . ';padding:28px 12px;">
+<tr><td align="center">
+  <table role="presentation" width="600" cellpadding="0" cellspacing="0" border="0" style="width:100%;max-width:600px;background:#ffffff;border:1px solid ' . $line . ';">
+
+    <tr><td style="background:' . $navy . ';padding:28px 32px;">
+      <p style="margin:0 0 6px;font-size:12px;letter-spacing:1.5px;text-transform:uppercase;color:#ffffff;">NEUST On-the-Job Training System</p>
+      <h1 style="margin:0;font-size:24px;line-height:1.3;font-weight:700;color:#ffffff;">Attendance Schedule Updated</h1>
+    </td></tr>
+
+    <tr><td style="padding:28px 32px 8px;">
+      <p style="margin:0 0 12px;font-size:16px;line-height:1.5;color:' . $navy . ';">Dear <strong>' . $e($name) . '</strong>,</p>
+      <p style="margin:0 0 20px;font-size:14px;line-height:1.7;color:' . $slate . ';">' . $intro . '</p>
+    </td></tr>
+
+    <tr><td style="padding:0 32px 24px;">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border:1px solid ' . $line . ';">
+        <tr>
+          <td width="50%" style="padding:14px 16px;background:' . $tint . ';">
+            <p style="margin:0;font-size:11px;letter-spacing:1px;text-transform:uppercase;color:' . $slate . ';">Effective from</p>
+            <p style="margin:4px 0 0;font-size:14px;font-weight:700;color:' . $navy . ';">' . $e($formatted_date) . '</p>
+          </td>
+          <td width="50%" style="padding:14px 16px;background:' . $tint . ';border-left:1px solid ' . $line . ';">
+            <p style="margin:0;font-size:11px;letter-spacing:1px;text-transform:uppercase;color:' . $slate . ';">Company / Supervisor</p>
+            <p style="margin:4px 0 0;font-size:14px;font-weight:700;color:' . $navy . ';">' . $e($company_name) . '</p>
+            <p style="margin:2px 0 0;font-size:13px;color:' . $slate . ';">' . $e($supervisor_name) . '</p>
+          </td>
+        </tr>
+      </table>
+    </td></tr>
+
+    <tr><td style="padding:0 32px 8px;">
+      <h2 style="margin:0 0 6px;font-size:16px;font-weight:700;color:' . $navy . ';">Your daily time windows</h2>
+      <p style="margin:0 0 12px;font-size:14px;line-height:1.6;color:' . $slate . ';">' . $e($summary) . '</p>
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="border:1px solid ' . $line . ';border-collapse:collapse;">
+        <tr style="background:' . $navy . ';">
+          <td style="padding:10px 16px;font-size:12px;letter-spacing:1px;text-transform:uppercase;color:#ffffff;">Session</td>
+          <td style="padding:10px 16px;font-size:12px;letter-spacing:1px;text-transform:uppercase;color:#ffffff;">Sign-in window</td>
+          <td style="padding:10px 16px;font-size:12px;letter-spacing:1px;text-transform:uppercase;color:#ffffff;">Sign-out window</td>
+        </tr>
+        ' . $row('Morning (AM)', $am_in, $am_out) . '
+        ' . $row('Afternoon (PM)', $pm_in, $pm_out) . '
+      </table>
+    </td></tr>
+
+    <tr><td style="padding:20px 32px 8px;">
+      <h2 style="margin:0 0 6px;font-size:16px;font-weight:700;color:' . $navy . ';">Schedule coverage</h2>
+      <p style="margin:0;font-size:14px;line-height:1.7;color:' . $slate . ';">' . $e($schedule_scope) . '</p>
+    </td></tr>
+
+    <tr><td style="padding:20px 32px 12px;">
+      <h2 style="margin:0 0 10px;font-size:16px;font-weight:700;color:' . $navy . ';">' . $e($actions_title) . '</h2>
+      <table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%">' . $li . '</table>
+    </td></tr>
+
+    <tr><td style="padding:8px 32px 28px;">
+      <p style="margin:0;font-size:14px;line-height:1.7;color:' . $slate . ';">Thank you,<br><strong style="color:' . $navy . ';">' . $e($supervisor_name) . '</strong><br>' . $e($company_name) . '</p>
+    </td></tr>
+
+    <tr><td style="background:' . $tint . ';border-top:1px solid ' . $line . ';padding:16px 32px;text-align:center;">
+      <p style="margin:0 0 4px;font-size:12px;font-weight:700;color:' . $navy . ';">NEUST On-the-Job Training System &nbsp;|&nbsp; ' . $e($badge) . '</p>
+      <p style="margin:0;font-size:12px;line-height:1.6;color:' . $slate . ';">This is an automated message sent on ' . $e($sent_at) . '. Please do not reply directly to this email.</p>
+    </td></tr>
+
+  </table>
+</td></tr>
+</table>
+</body>
+</html>';
+
+    // Plain-text version for clients that do not render HTML.
+    $text  = "ATTENDANCE SCHEDULE UPDATED\nNEUST On-the-Job Training System\n\n";
+    $text .= "Dear {$name},\n\n" . html_entity_decode(strip_tags($intro), ENT_QUOTES, 'UTF-8') . "\n\n";
+    $text .= "Effective from: {$formatted_date}\nCompany: {$company_name}\nSupervisor: {$supervisor_name}\n\n";
+    $text .= "DAILY TIME WINDOWS\n{$summary}\n";
+    $text .= "- Morning (AM):   Sign-in {$am_in} | Sign-out {$am_out}\n";
+    $text .= "- Afternoon (PM): Sign-in {$pm_in} | Sign-out {$pm_out}\n\n";
+    $text .= "SCHEDULE COVERAGE\n{$schedule_scope}\n\n" . strtoupper($actions_title) . "\n";
+    foreach ($actions as $a) { $text .= "- {$a}\n"; }
+    $text .= "\nThank you,\n{$supervisor_name}\n{$company_name}\n\nThis is an automated message. Please do not reply directly to this email.\n";
+
+    return ['html' => $html, 'text' => $text];
+}
+
 function timeToMins($time) {
     if (!$time) return -1;
     $parts = explode(':', $time);
     return (int)$parts[0] * 60 + (int)$parts[1];
+}
+
+/* ════════════════════════════════════════════════════════════════════
+   NEW (skip AM / PM duty guard): a duty period can only be skipped when no OJT
+   trainee of this company is scheduled for it (Day schedule = AM duty, Evening
+   schedule = PM duty; a trainee without a usable schedule is scheduled for both).
+   Trainees whose OJT already ended have nothing left to schedule and are ignored.
+   Returns ['ok' => bool, 'error' => string, 'am' => [names], 'pm' => [names]].
+   ════════════════════════════════════════════════════════════════════ */
+function attm_skip_conflicts($conn, $company_id, $skip_am, $skip_pm) {
+    $out = ['ok' => true, 'error' => '', 'am' => [], 'pm' => []];
+    if (!$skip_am && !$skip_pm) return $out;
+    try {
+        $st = $conn->prepare("
+            SELECT u.id, u.first_name, u.middle_name, u.last_name
+            FROM ojt_assignments oa
+            JOIN users u ON oa.student_id = u.id
+            WHERE oa.company_id = ?
+            ORDER BY u.last_name, u.first_name
+        ");
+        if (!$st) throw new Exception('prepare failed');
+        $st->bind_param("i", $company_id);
+        if (!$st->execute()) throw new Exception('execute failed');
+        $rows = [];
+        $res = $st->get_result();
+        while ($r = $res->fetch_assoc()) $rows[(int)$r['id']] = $r;
+        $st->close();
+        if (empty($rows)) return $out;
+
+        $ids    = array_keys($rows);
+        $sched  = attsch_load($conn, $ids);
+        $ended  = ojtend_dates($conn, $ids);
+        $today  = date('Y-m-d');
+        foreach ($rows as $sid => $r) {
+            if (ojtend_is_after($ended, $sid, $today)) continue;
+            $cur = $sched[$sid]['cur'] ?? null;
+            $hasAm = $cur === null || !empty($cur['d']);
+            $hasPm = $cur === null || !empty($cur['e']);
+            $name = trim(($r['last_name'] ?? '') . ', ' . ($r['first_name'] ?? '') . (trim($r['middle_name'] ?? '') !== '' ? ' ' . mb_substr(trim($r['middle_name']), 0, 1) . '.' : ''));
+            $dayNames = [1 => 'Mon', 2 => 'Tue', 3 => 'Wed', 4 => 'Thu', 5 => 'Fri'];
+            $daysText = function($list) use ($cur, $dayNames) {
+                if ($cur === null) return 'Every weekday';
+                return implode(', ', array_map(fn($n) => $dayNames[$n] ?? '', $list));
+            };
+            if ($skip_am && $hasAm) $out['am'][] = ['name' => $name, 'days' => $daysText($cur['d'] ?? [])];
+            if ($skip_pm && $hasPm) $out['pm'][] = ['name' => $name, 'days' => $daysText($cur['e'] ?? [])];
+        }
+    } catch (Throwable $e) {
+        return ['ok' => false, 'error' => 'Could not verify the OJT trainees\' schedules. Please try again.', 'am' => [], 'pm' => []];
+    }
+    return $out;
+}
+
+/* ════════════════════════════════════════════════════════════════════
+   NEW (missing duty time): when the company's current attendance setting has no AM (or no PM)
+   duty times but an OJT trainee is scheduled for that duty — for example a trainee with AM duty
+   was just registered while the setting is PM-only — the company must fill in the missing times.
+   No setting at all (or neither duty set) keeps the original "both duties active" behaviour and
+   is not a gap. Returns ['ok','error','missing' => ['am'?,'pm'?],'am' => [trainees],'pm' => [trainees],'setting' => row|null].
+   ════════════════════════════════════════════════════════════════════ */
+function attm_duty_gap($conn, $company_id) {
+    $out = ['ok' => true, 'error' => '', 'missing' => [], 'am' => [], 'pm' => [], 'setting' => null];
+    try {
+        $today = date('Y-m-d');
+        $st = $conn->prepare("SELECT date, am_time_in_start, am_time_in_end, am_time_out_start, am_time_out_end,
+                                      pm_time_in_start, pm_time_in_end, pm_time_out_start, pm_time_out_end
+                              FROM attendance_settings WHERE company_id = ? AND date <= ? ORDER BY date DESC LIMIT 1");
+        if (!$st) throw new Exception('prepare failed');
+        $st->bind_param("is", $company_id, $today);
+        if (!$st->execute()) throw new Exception('execute failed');
+        $row = $st->get_result()->fetch_assoc();
+        $st->close();
+        if (!$row) return $out;
+        $hasAm = !empty($row['am_time_in_start']) || !empty($row['am_time_out_start']);
+        $hasPm = !empty($row['pm_time_in_start']) || !empty($row['pm_time_out_start']);
+        if ($hasAm === $hasPm) return $out;   // both set = no gap; neither set = original behaviour (both active)
+        $c = attm_skip_conflicts($conn, $company_id, !$hasAm, !$hasPm);
+        if (!$c['ok']) return ['ok' => false, 'error' => $c['error'], 'missing' => [], 'am' => [], 'pm' => [], 'setting' => null];
+        if (!$hasAm && $c['am']) { $out['missing'][] = 'am'; $out['am'] = $c['am']; }
+        if (!$hasPm && $c['pm']) { $out['missing'][] = 'pm'; $out['pm'] = $c['pm']; }
+        if ($out['missing']) $out['setting'] = $row;
+    } catch (Throwable $e) {
+        return ['ok' => false, 'error' => 'Could not check the duty schedule.', 'missing' => [], 'am' => [], 'pm' => [], 'setting' => null];
+    }
+    return $out;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -464,6 +1797,13 @@ function timeToMins($time) {
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_SERVER['HTTP_X_REQUESTED_WITH'])) {
 
     $action = $_POST['action'] ?? '';
+
+    if ($action === 'check_skip_conflicts') {
+        header('Content-Type: application/json');
+        $chk = attm_skip_conflicts($conn, $company_id, ($_POST['skip_am'] ?? '') === '1', ($_POST['skip_pm'] ?? '') === '1');
+        echo json_encode($chk);
+        exit;
+    }
 
     if ($action === 'approve_late_request') {
         header('Content-Type: application/json');
@@ -477,6 +1817,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_SERVER['HTTP_X_REQUESTED_WI
         $lr = $stmt->get_result()->fetch_assoc();
 
         if (!$lr) { echo json_encode(['success'=>false,'message'=>'Request not found or already processed.']); exit; }
+
+        // NEW (late request legitimacy check): a high-risk request is only approved after the supervisor explicitly confirms the warnings
+        $lrEv = attm_lr_evidence($conn, (int)$company_id, $lr);
+        if ($lrEv['level'] === 'risk' && empty($_POST['confirm_risk'])) {
+            echo json_encode(['success'=>false,'needs_confirm'=>true,'message'=>'This request has high-risk warnings. Review them and confirm again to approve it.','evidence'=>$lrEv]);
+            exit;
+        }
 
         $student_id = $lr['student_id'];
         $lr_date    = $lr['date'];
@@ -504,10 +1851,34 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_SERVER['HTTP_X_REQUESTED_WI
             $settingRow = $fallback->get_result()->fetch_assoc();
         }
 
-        $chk = $conn->prepare("SELECT id FROM attendance_logs WHERE user_id=? AND date=? AND company_id=?");
+        $chk = $conn->prepare("SELECT * FROM attendance_logs WHERE user_id=? AND date=? AND company_id=?");
         $chk->bind_param("isi", $student_id, $lr_date, $company_id);
         $chk->execute();
         $existing_log = $chk->get_result()->fetch_assoc();
+
+        /* ── Late request (sign-out entries only) ──
+           Duty time everywhere in the system is (sign out − sign in), so the time recorded for the
+           sign out is what decides the hours credited: only that duty (AM Sign In → AM Sign Out) is counted —
+           the Sign Out is credited at the scheduled sign-out time instead of the (later) submission time. */
+        if (in_array($type, ['am_time_out','pm_time_out'], true)) {
+            $period = ($type === 'am_time_out') ? 'am' : 'pm';
+            $toTs = function($v) use ($lr_date) {
+                if (!$v || $v === 'missed') return null;
+                $v = (strpos($v, ' ') === false) ? ($lr_date . ' ' . $v) : $v;
+                $ts = strtotime($v);
+                return $ts === false ? null : $ts;
+            };
+            $inTs      = $toTs($existing_log[$period . '_time_in'] ?? null);
+            $createdTs = strtotime($approved_time);
+
+            $schedOut = $settingRow[$period . '_time_out_start'] ?? null;
+            $schedTs  = $schedOut ? $toTs($schedOut) : null;
+            if ($schedTs !== null) {
+                if ($createdTs !== false && $schedTs > $createdTs) $schedTs = $createdTs;   // never later than the submission
+                if ($inTs !== null && $schedTs < $inTs)            $schedTs = $inTs;         // never before the sign in (0 min)
+                $approved_time = date('Y-m-d H:i:s', $schedTs);
+            }
+        }
 
         $photoStmt = $conn->prepare("SELECT photo FROM late_requests WHERE id=?");
         $photoStmt->bind_param("i", $req_id);
@@ -556,6 +1927,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_SERVER['HTTP_X_REQUESTED_WI
         echo json_encode([
             'success'       => true,
             'message'       => "Approved. {$sName} time and photo updated recorded.",
+            'recorded_time' => $approved_time,
             'duty_info'     => $dutyInfo,
             'req_id'        => $req_id,
             'pending_count' => $newPendingCount,
@@ -615,7 +1987,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_SERVER['HTTP_X_REQUESTED_WI
             exit;
         }
 
-        if (!$skip_am && (!$am_time_in_start || !$am_time_in_end || !$am_time_out_start || !$am_time_out_end)) {
+        // NEW (skip AM / PM duty guard): never skip a duty period an OJT trainee is scheduled for
+        $skip_chk = attm_skip_conflicts($conn, $company_id, $skip_am, $skip_pm);
+        if (!$skip_chk['ok'] || $skip_chk['am'] || $skip_chk['pm']) {
+            ob_end_clean();
+            echo json_encode([
+                'success' => false,
+                'message' => !$skip_chk['ok']
+                    ? $skip_chk['error']
+                    : 'Skipping the ' . ($skip_chk['am'] ? 'AM' : '') . ($skip_chk['am'] && $skip_chk['pm'] ? ' and ' : '') . ($skip_chk['pm'] ? 'PM' : '') . ' duty cannot be done because it will affect the schedule of OJT trainees assigned to your company.',
+            ]);
+            exit;
+        }
+
+        if (!$skip_am && (!$am_time_in_start ||!$am_time_in_end || !$am_time_out_start || !$am_time_out_end)) {
             ob_end_clean();
             echo json_encode(['success' => false, 'message' => 'Please fill all AM time fields before saving.']);
             exit;
@@ -629,15 +2014,30 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_SERVER['HTTP_X_REQUESTED_WI
             $p = explode(':', (string)$t);
             return ((int)($p[0] ?? 0)) * 60 + (int)($p[1] ?? 0);
         };
-        $dutyMins = function($start, $outStart) use ($toMins) {
+        $dutyMins = function($start, $outStart, $overnight = false) use ($toMins) {
             $s = $toMins($start); $e = $toMins($outStart);
             if ($s === null || $e === null) return 0;
+            if ($overnight && $e < $s) $e += 24 * 60; // NEW: PM sign-out earlier than sign-in = next day
             return max(0, $e - $s);
         };
         $MAX_DUTY_MINS   = 8 * 60;
         $am_duty_mins    = $skip_am ? 0 : $dutyMins($am_time_in_start, $am_time_out_start);
-        $pm_duty_mins    = $skip_pm ? 0 : $dutyMins($pm_time_in_start, $pm_time_out_start);
+        $pm_duty_mins    = $skip_pm ? 0 : $dutyMins($pm_time_in_start, $pm_time_out_start, true);
         $total_duty_mins = $am_duty_mins + $pm_duty_mins;
+        // NEW (4-hour limit per duty): AM and PM may each be at most 4 hours
+        $MAX_PERIOD_MINS = 4 * 60;
+        $fmtDur = function($m) { return intdiv($m, 60) . 'h' . ($m % 60 ? ' ' . ($m % 60) . 'm' : ''); };
+        $over_periods = [];
+        if ($am_duty_mins > $MAX_PERIOD_MINS) $over_periods[] = 'AM duty is ' . $fmtDur($am_duty_mins);
+        if ($pm_duty_mins > $MAX_PERIOD_MINS) $over_periods[] = 'PM duty is ' . $fmtDur($pm_duty_mins);
+        if ($over_periods) {
+            ob_end_clean();
+            echo json_encode([
+                'success' => false,
+                'message' => 'The ' . implode(' and the ', $over_periods) . '. Each duty (AM and PM) can be at most 4 hours, for a maximum of 8 hours a day. Please shorten the time windows.',
+            ]);
+            exit;
+        }
         if ($total_duty_mins > $MAX_DUTY_MINS) {
             $th = intdiv($total_duty_mins, 60); $tm = $total_duty_mins % 60;
             ob_end_clean();
@@ -700,8 +2100,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_SERVER['HTTP_X_REQUESTED_WI
         $pm_in_range  = $pm_time_in_start  ? fmt12($pm_time_in_start)  . ' – ' . fmt12($pm_time_in_end)  : 'Skipped';
         $pm_out_range = $pm_time_out_start ? fmt12($pm_time_out_start) . ' – ' . fmt12($pm_time_out_end) : 'Skipped';
 
-        require_once __DIR__ . '/attendance_email_handler.php';
-        $emailResult = sendAttendanceScheduleEmails(
+        $emailResult = attm_send_schedule_emails(
             $conn, $company_id, $date,
             $am_in_range, $am_out_range, $pm_in_range, $pm_out_range,
             false, false
@@ -729,6 +2128,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_SERVER['HTTP_X_REQUESTED_WI
 // UPDATED (Live updates): lightweight "has anything changed?" check
 if ($_SERVER['REQUEST_METHOD'] === 'GET'
     && isset($_SERVER['HTTP_X_REQUESTED_WITH'])
+    && ($_GET['action'] ?? '') === 'duty_gap') {   // NEW (missing duty time): used by add_ojt_student.php
+    header('Content-Type: application/json');
+    header('Cache-Control: no-store');
+    $g = attm_duty_gap($conn, $company_id);
+    echo json_encode(['success' => $g['ok'], 'missing' => $g['missing'], 'am' => $g['am'], 'pm' => $g['pm']]);
+    exit;
+}
+
+if ($_SERVER['REQUEST_METHOD'] === 'GET'
+    && isset($_SERVER['HTTP_X_REQUESTED_WITH'])
     && ($_GET['action'] ?? '') === 'live_signature') {
     header('Content-Type: application/json');
     header('Cache-Control: no-store');
@@ -742,6 +2151,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET'
 
     header('Content-Type: application/json');
 
+    // NEW (late request legitimacy check): server-recorded evidence; photos sent before this check existed get their fingerprint here
+    $evOk  = ensureLateRequestEvidence($conn);
+    $evSel = $evOk ? ', lr.submit_ip, lr.submit_ua, lr.photo_hash, lr.photo_valid' : '';
+    if ($evOk) {
+        try { $conn->query("UPDATE late_requests SET photo_hash = SHA2(photo, 256) WHERE company_id = " . (int)$company_id . " AND photo IS NOT NULL AND photo_hash IS NULL LIMIT 100"); } catch (\Throwable $e) {}
+    }
     $stmt = $conn->prepare("
         SELECT
             lr.id,
@@ -751,7 +2166,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET'
             lr.reason,
             lr.status,
             lr.created_at,
-            lr.photo IS NOT NULL AS has_photo,
+            lr.photo IS NOT NULL AS has_photo{$evSel},
             u.first_name,
             u.middle_name,
             u.last_name,
@@ -785,6 +2200,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET'
     foreach ($rows as &$row) {
         $row['has_photo'] = (bool)$row['has_photo'];
         $row['photo_url'] = "late_request_photo.php?id={$row['id']}&t=" . time();
+        // NEW (late request legitimacy check): evidence for the requests still waiting for a decision
+        $row['evidence'] = ($row['status'] === 'pending') ? attm_lr_evidence($conn, (int)$company_id, $row) : null;
+        unset($row['submit_ip'], $row['submit_ua'], $row['photo_hash'], $row['photo_valid']);
     }
     unset($row);
 
@@ -824,6 +2242,34 @@ $start_res  = $stmt->get_result()->fetch_assoc();
 $start_date = $start_res['start_date'] ?? date("Y-m-d");
 
 $end_date_limit = date("Y-m-d", strtotime("+4 months", strtotime($start_date)));
+
+// NEW (display start): the Attendance Overview / Monthly Attendance Summary start at the earliest of the first attendance
+// setting and the first attendance log. $start_date (first setting) still drives the schedule window above; without this,
+// attendance recorded before the first (new) setting was dated would be cut off and both panels would look empty.
+$display_start_date = $start_date;
+try {
+    $ds_stmt = $conn->prepare("SELECT MIN(date) AS d FROM attendance_logs WHERE company_id=? AND date<=?");
+    $ds_today = date("Y-m-d");
+    $ds_stmt->bind_param("is", $company_id, $ds_today);
+    $ds_stmt->execute();
+    $ds_first = $ds_stmt->get_result()->fetch_assoc()['d'] ?? null;
+    $ds_stmt->close();
+    if ($ds_first && $ds_first < $display_start_date) $display_start_date = $ds_first;
+} catch (\Throwable $e) {}
+
+// Display range of the Monthly Attendance Summary / Attendance Overview chart.
+// The 4-month OJT window above still governs schedules, but attendance that students keep recording
+// AFTER it is real data and must stay visible: when the company has logs past the window, the
+// display range runs through today (days without an entry are Absent once they have passed).
+$display_end_limit = $end_date_limit;
+try {
+    $dl_stmt = $conn->prepare("SELECT MAX(date) AS d FROM attendance_logs WHERE company_id=? AND date<=?");
+    $dl_today = date("Y-m-d");
+    $dl_stmt->bind_param("is", $company_id, $dl_today);
+    $dl_stmt->execute();
+    $dl_last = $dl_stmt->get_result()->fetch_assoc()['d'] ?? null;
+    if ($dl_last && $dl_last > $end_date_limit) $display_end_limit = $dl_today;
+} catch (\Throwable $e) {}
 
 $date = $_GET['date'] ?? date("Y-m-d");
 if ($date < $start_date)     $date = $start_date;
@@ -874,7 +2320,38 @@ if ($today_dow === 0 || $today_dow === 6) {
     if ($ts_ids_res) { while ($tr = $ts_ids_res->fetch_assoc()) $ts_all_ids[] = (int)$tr['student_id']; }
     $ts_first   = attm_first_attendance_map($conn, $ts_all_ids);
     $ts_started = array_values(array_filter($ts_all_ids, fn($sid) => !attm_before_start($ts_first, $sid, $today_str)));
-    $ts_started_sql = !empty($ts_started) ? implode(',', $ts_started) : '0';
+    // NEW (student schedule): a student who is not scheduled today and has no real entry is neither Absent nor Incomplete
+    $ts_sched = attsch_load($conn, $ts_all_ids);
+    $ts_real_today = [];
+    $ts_rows_today = [];
+    try {
+        $ts_nr = $conn->query("SELECT user_id, am_time_in, am_time_out, pm_time_in, pm_time_out FROM attendance_logs WHERE company_id=$company_id AND date='$today_str'");
+        if ($ts_nr) { while ($tn = $ts_nr->fetch_assoc()) { $ts_rows_today[(int)$tn['user_id']] = $tn; if (attsch_has_real_entry($tn)) $ts_real_today[(int)$tn['user_id']] = true; } }
+    } catch (\Throwable $e) {}
+    $ts_end = ojtend_dates($conn, $ts_all_ids); // NEW (OJT ends at the required hours)
+    $ts_completed_count = 0;
+    $ts_started = array_values(array_filter($ts_started, function($sid) use ($ts_end, $ts_real_today, $today_str, &$ts_completed_count) {
+        if (ojtend_is_after($ts_end, $sid, $today_str) && empty($ts_real_today[(int)$sid])) { $ts_completed_count++; return false; }
+        return true;
+    }));
+    $ts_not_sched_count = 0;
+    $ts_started = array_values(array_filter($ts_started, function($sid) use ($ts_sched, $ts_real_today, $today_str, &$ts_not_sched_count) {
+        if (attsch_is_scheduled($ts_sched, $sid, $today_str) || !empty($ts_real_today[(int)$sid])) return true;
+        $ts_not_sched_count++;
+        return false;
+    }));
+    // NEW (student schedule): a student scheduled for only ONE duty (Day = AM only, Evening = PM only) is judged on that duty
+    // alone — counted here in PHP with the same rules as the Monthly Attendance Summary; everyone else uses the query below.
+    $ts_part = ['present' => 0, 'incomplete' => 0, 'absent' => 0];
+    $ts_full = [];
+    foreach ($ts_started as $ts_sid) {
+        $ts_per = attsch_periods($ts_sched, $ts_sid, $today_str);
+        if ($ts_per['am'] && $ts_per['pm']) { $ts_full[] = $ts_sid; continue; }
+        $ts_duty = attsch_limit_duty(getActiveDutyPeriods($today_str, $all_settings_map), $ts_per, $ts_rows_today[$ts_sid] ?? null);
+        $ts_st   = computeStatusForLog($ts_rows_today[$ts_sid] ?? [], $ts_duty['am'], $ts_duty['pm']);
+        if ($ts_st === 'PRESENT') $ts_part['present']++; elseif ($ts_st === 'INCOMPLETE') $ts_part['incomplete']++; else $ts_part['absent']++;
+    }
+    $ts_started_sql = !empty($ts_full) ? implode(',', $ts_full) : '0';
     $ts_res = $conn->query("
         SELECT
             SUM(CASE WHEN
@@ -901,6 +2378,7 @@ if ($today_dow === 0 || $today_dow === 6) {
         $incomplete = max(0, $partial - $present);
         $total      = (int)($ts_row['total_count'] ?? 0);
         $absent     = max(0, $total - $present - $incomplete);
+        $present += $ts_part['present']; $incomplete += $ts_part['incomplete']; $absent += $ts_part['absent']; // NEW (student schedule)
         $total      = count($ts_all_ids); // UPDATED: header still shows every assigned student
         $today_stats = [
             'present'    => $present,
@@ -908,6 +2386,8 @@ if ($today_dow === 0 || $today_dow === 6) {
             'incomplete' => $incomplete,
             'day_off'    => 0,
             'total'      => $total,
+            'not_scheduled' => $ts_not_sched_count, // NEW (student schedule)
+            'completed'     => $ts_completed_count, // NEW (OJT ends at the required hours)
         ];
     }
 }
@@ -941,21 +2421,22 @@ $stmt->bind_param("sssi", $date, $date, $date, $company_id);
 $stmt->execute();
 $result = $stmt->get_result();
 
-$month = $_GET['month'] ?? date("Y-m", strtotime($start_date));
-$ojt_start_month = date("Y-m", strtotime($start_date));
+$month = $_GET['month'] ?? date("Y-m", strtotime($display_start_date));
+$ojt_start_month = date("Y-m", strtotime($display_start_date));
 $month_min = $ojt_start_month;
 $month_max = date("Y-m", strtotime($end_date_limit));
+$sm_month_max = date("Y-m", strtotime($display_end_limit)); // Monthly Attendance Summary navigation limit
 if ($month < $month_min) $month = $month_min;
-if ($month > $month_max) $month = $month_max;
+if ($month > $sm_month_max) $month = $sm_month_max;
 
-$start = max($start_date, $month . "-01");
-if (date("Y-m", strtotime($start_date)) === $month) {
-    $start = $start_date;
+$start = max($display_start_date, $month . "-01");
+if (date("Y-m", strtotime($display_start_date)) === $month) {
+    $start = $display_start_date;
 } else {
     $start = $month . "-01";
 }
 $end   = date("Y-m-t", strtotime($month . "-01"));
-if ($end > $end_date_limit) $end = $end_date_limit;
+if ($end > $display_end_limit) $end = $display_end_limit;
 
 $students = [];
 $res = $conn->query("
@@ -966,6 +2447,8 @@ $res = $conn->query("
 ");
 while ($row = $res->fetch_assoc()) { $students[$row['id']] = $row; }
 $student_first_attendance = attm_first_attendance_map($conn, array_keys($students)); // UPDATED (Start = first attendance)
+$student_sched = attsch_load($conn, array_keys($students)); // NEW (student schedule)
+$student_ojt_end = ojtend_dates($conn, array_keys($students)); // NEW (OJT ends at the required hours)
 
 /* ════════════════════════════════════════════════════════════════════
    UPDATED (Start / End indicators in the Monthly Attendance Summary):
@@ -1095,18 +2578,23 @@ try {
 // ── Monthly Summary table logs ───────────────────────────────────────────────
 // Now uses getActiveDutyPeriods() + computeStatusForLog() per day
 $logs = [];
+$logs_has_entry = []; // [student_id][date] => true when the day holds at least one REAL time (a "missed"-only row is not an entry)
 $res = $conn->query("
     SELECT user_id, date, am_time_in, am_time_out, pm_time_in, pm_time_out
     FROM attendance_logs
     WHERE company_id = $company_id AND date BETWEEN '$start' AND '$end'
 ");
 while ($row = $res->fetch_assoc()) {
+    foreach (['am_time_in','am_time_out','pm_time_in','pm_time_out'] as $c_) {
+        if ($row[$c_] !== null && $row[$c_] !== '' && $row[$c_] !== 'missed') { $logs_has_entry[$row['user_id']][$row['date']] = true; break; }
+    }
     $dow  = (int)date('w', strtotime($row['date']));
     $wknd = ($dow === 0 || $dow === 6);
     if ($wknd) {
         $status = "DAY OFF";
     } else {
         $duty   = getActiveDutyPeriods($row['date'], $all_settings_map);
+        $duty   = attsch_limit_duty($duty, attsch_periods($student_sched, $row['user_id'], $row['date']), $row); // NEW (student schedule): Day = AM duty, Evening = PM duty
         $status = computeStatusForLog($row, $duty['am'], $duty['pm']);
     }
     $logs[$row['user_id']][$row['date']] = $status;
@@ -1119,8 +2607,8 @@ for ($d = strtotime($start); $d <= strtotime($end); $d = strtotime("+1 day", $d)
 }
 
 $all_chart_months = [];
-$cm = strtotime(date("Y-m-01", strtotime($start_date)));
-$cm_end = strtotime(date("Y-m-01", strtotime($end_date_limit)));
+$cm = strtotime(date("Y-m-01", strtotime($display_start_date)));
+$cm_end = strtotime(date("Y-m-01", strtotime($display_end_limit)));
 while ($cm <= $cm_end) {
     $all_chart_months[] = date("Y-m", $cm);
     $cm = strtotime("+1 month", $cm);
@@ -1132,7 +2620,7 @@ $all_logs_res = $conn->query("
     SELECT user_id, date, am_time_in, am_time_out, pm_time_in, pm_time_out
     FROM attendance_logs
     WHERE company_id = $company_id
-      AND date BETWEEN '$start_date' AND '$today_str'
+      AND date BETWEEN '$display_start_date' AND '$today_str'
 ");
 $all_logs = [];
 while ($r = $all_logs_res->fetch_assoc()) {
@@ -1144,9 +2632,9 @@ while ($r = $all_logs_res->fetch_assoc()) {
 $monthly_stats = [];
 
 foreach ($all_chart_months as $ym) {
-    $ym_start = (date('Y-m', strtotime($start_date)) === $ym) ? $start_date : $ym . '-01';
+    $ym_start = (date('Y-m', strtotime($display_start_date)) === $ym) ? $display_start_date : $ym . '-01';
     $ym_end   = date('Y-m-t', strtotime($ym . '-01'));
-    if ($ym_end > $end_date_limit) $ym_end = $end_date_limit;
+    if ($ym_end > $display_end_limit) $ym_end = $display_end_limit;
 
     if ($ym_start > $today_str) continue;
     if ($ym_end > $today_str) $ym_end = $today_str;
@@ -1162,9 +2650,14 @@ foreach ($all_chart_months as $ym) {
 
         foreach ($students as $sid => $s) {
             if (attm_before_start($student_first_attendance, $sid, $day_str)) continue; // UPDATED: not started yet
+            // NEW (OJT ends at the required hours): after the student's OJT end date nothing is counted unless something was recorded
+            if (ojtend_is_after($student_ojt_end, $sid, $day_str) && !attsch_has_real_entry($all_logs[$sid][$day_str] ?? null)) continue;
+            // NEW (student schedule): not a duty day for this student and nothing recorded → not counted at all
+            if (!attsch_has_real_entry($all_logs[$sid][$day_str] ?? null) && !attsch_is_scheduled($student_sched, $sid, $day_str)) continue;
             if (isset($all_logs[$sid][$day_str])) {
                 $lr2    = $all_logs[$sid][$day_str];
-                $status = computeStatusForLog($lr2, $duty['am'], $duty['pm']);
+                $duty_s = attsch_limit_duty($duty, attsch_periods($student_sched, $sid, $day_str), $lr2); // NEW (student schedule)
+                $status = computeStatusForLog($lr2, $duty_s['am'], $duty_s['pm']);
                 if      ($status === 'PRESENT')    $p++;
                 elseif  ($status === 'INCOMPLETE')  $inc++;
                 else                                $a++;
@@ -1218,8 +2711,10 @@ function fmtTime($t) {
 
 ?>
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Attendance Management</title>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
 <style>
@@ -1283,7 +2778,7 @@ body { margin: 0; display: flex; min-height: 100vh; font-family: 'Segoe UI', Tah
 .sidebar-badge { background: #dc2626; color: white; border-radius: 50%; width: 18px; height: 18px; font-size: 10px; font-weight: 700; display: inline-flex; align-items: center; justify-content: center; position: absolute; right: 18px; top: 50%; transform: translateY(-50%); }
 .sidebar-badge-late { background: #d97706; color: white; border-radius: 50%; width: 18px; height: 18px; font-size: 10px; font-weight: 700; display: inline-flex; align-items: center; justify-content: center; position: absolute; right: 18px; top: 50%; transform: translateY(-50%); animation: badge-pulse-late 2s ease-in-out infinite; }
 @keyframes badge-pulse-late { 0%,100%{box-shadow:0 0 0 0 rgba(217,119,6,0.55);}50%{box-shadow:0 0 0 6px rgba(217,119,6,0);} }
-.sidebar-badge-ungraded { background: #d97706; color: white; border-radius: 50%; width: 18px; height: 18px; font-size: 10px; font-weight: 700; display: inline-flex; align-items: center; justify-content: center; position: absolute; right: 18px; top: 50%; transform: translateY(-50%); }
+.sidebar-badge-ungraded { background: #dc2626; color: white; border-radius: 50%; width: 18px; height: 18px; font-size: 10px; font-weight: 700; display: inline-flex; align-items: center; justify-content: center; position: absolute; right: 18px; top: 50%; transform: translateY(-50%); }
 
 .toggle-btn { background: transparent; border: none; color: white; cursor: pointer; font-size: 20px; outline: none; flex-shrink: 0; }
 
@@ -1399,6 +2894,7 @@ body { margin: 0; display: flex; min-height: 100vh; font-family: 'Segoe UI', Tah
     vertical-align: super;
     margin-left: 2px;
 }
+.dtw-live-dot.is-off { background: #A02A2A; animation: none; }
 .dtw-live-dot {
     width: 7px; height: 7px;
     border-radius: 50%;
@@ -1596,26 +3092,21 @@ body { margin: 0; display: flex; min-height: 100vh; font-family: 'Segoe UI', Tah
 .sm-mark-start { color:#2C5A2C; }
 .sm-mark-end   { color:#A02A2A; }
 .sm-mark-est   { opacity:.55; }
+.sm-table td.sm-nosched { background:#eff6ff; color:#2563eb; font-style:italic; } /* NEW (student schedule): not scheduled that day */
+.sm-table td.sm-ended { background:#f1f5f9; } /* NEW (OJT ends at the required hours) */
 .sm-table td.sm-before-start { background:#f8fafc; color:#cbd5e1; } /* UPDATED: before first attendance */
 .sm-table td.sm-has-mark { box-shadow:inset 0 0 0 1px rgba(21,101,192,.25); }
 .sm-table tbody tr:hover td { filter:brightness(0.97); }
 .sm-table tbody tr:last-child td { border-bottom:none; }
 .sm-table-empty { text-align:center; padding:30px; color:#aaa; font-size:12px; }
 
-#toastContainer { position:fixed; bottom:20px; right:20px; z-index:9999; display:flex; flex-direction:column; gap:8px; }
-.toast { background:#323232; color:#fff; padding:12px 20px; border-radius:8px; font-size:13px; max-width:320px;
-    opacity:0; transform:translateY(10px); transition:opacity .3s,transform .3s; box-shadow:0 3px 12px rgba(0,0,0,.2); }
-.toast.show    { opacity:1; transform:translateY(0); }
-.toast.success { background:#2e7d32; }
-.toast.error   { background:#c62828; }
-.toast.warning { background:#e65100; }
-.toast.info    { background:#1565c0; }
 
 td.day-off   { background:#ede7f6 !important; color:#512da8; font-weight:700; text-align:center; }
 td.present   { color:#2e7d32; font-weight:700; text-align:center; }
 td.absent    { color:#c62828; font-weight:700; text-align:center; }
 td.incomplete{ color:#e65100; font-weight:700; text-align:center; }
 td.pending   { color:#888;    font-weight:600; text-align:center; }
+td.nosched   { color:#2563eb; background:#eff6ff; font-weight:700; text-align:center; } /* NEW (student schedule) */
 td.missed    { color:#e65100; font-weight:700; text-align:center; }
 tr.day-off-row td { background:#ede7f6; color:#512da8; font-style:italic; }
 .weekend-notice { background:#ede7f6; color:#512da8; padding:10px 16px; border-radius:8px; margin-bottom:12px; font-size:13px; font-weight:500; display:flex; align-items:center; gap:8px; }
@@ -1752,6 +3243,51 @@ tr.day-off-row td { background:#ede7f6; color:#512da8; font-style:italic; }
 .hp-footer { padding:0 26px 22px; display:flex; justify-content:space-between; gap:10px; }
 .hp-btn-ok { padding:11px 22px; background:#f5f5f5; color:#555; border:none; border-radius:9px; font-size:14px; font-weight:700; cursor:pointer; transition:background .2s; }
 .hp-btn-ok:hover { background:#e8e8e8; }
+/* NEW: "cannot skip duty" popup (reuses the hp-* look) */
+/* Missing duty times form — same layout as the manual Add Student form of admin_student_list.php (compact grid, flat navy look) */
+#dutyGapOverlay { display:none; position:fixed; inset:0; background:rgba(27,42,74,.55); z-index:20000; align-items:center; justify-content:center; padding:20px 0; box-sizing:border-box; }
+#dutyGapOverlay.open { display:flex; }
+#dutyGapBox { background:#fff; border:1px solid var(--grid-border, #C3CADA); border-top:3px solid var(--grid-navy, #1B2A4A); border-radius:0; width:640px; max-width:94%; max-height:calc(100vh - 40px); overflow-y:auto; padding:16px 24px 0 24px; box-sizing:border-box; box-shadow:0 20px 60px rgba(0,0,0,.25); animation:wiz-in .3s cubic-bezier(.34,1.56,.64,1); }
+#dutyGapBox .dg-head { display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; padding-bottom:8px; border-bottom:1px solid var(--grid-border, #C3CADA); gap:12px; }
+#dutyGapBox .dg-head h3 { margin:0; color:var(--grid-navy, #1B2A4A); font-size:15px; text-transform:uppercase; letter-spacing:.4px; }
+#dutyGapBox .dg-head h3 i { margin-right:6px; }
+#dutyGapBox .dg-badge { font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.3px; color:#A0850A; background:#FAF3DC; border:1px solid #E6D69A; padding:4px 10px; white-space:nowrap; }
+#dutyGapBox .dg-msg { margin:0 0 10px; font-size:13px; color:#1e293b; line-height:1.55; }
+#dutyGapBox .sb-list { margin:0 0 12px; border:1px solid var(--grid-border, #C3CADA); background:var(--surface-soft, #F3F5F9); border-radius:0; max-height:130px; }
+#dutyGapBox .sb-list li { border-color:var(--grid-border-soft, #DCE1EC); padding:7px 12px; }
+#dutyGapBox .sb-list .sb-days { color:#A0850A; }
+#dutyGapBox .dg-grid { display:grid; grid-template-columns:repeat(2, 1fr); column-gap:14px; row-gap:0; align-items:start; }
+#dutyGapBox .dg-group { margin-bottom:9px; }
+#dutyGapBox .dg-group label { display:block; font-weight:600; color:#1e293b; margin-bottom:4px; font-size:12px; }
+#dutyGapBox .dg-group label .required { color:var(--grid-red, #A02A2A); }
+#dutyGapBox .dg-group input[type="time"] { width:100%; padding:7px 10px; border:1px solid var(--grid-border, #C3CADA); border-radius:0; font-size:13px; transition:all .2s; box-sizing:border-box; background:#fff; }
+#dutyGapBox .dg-group input[type="time"]:focus { outline:none; border-color:var(--grid-navy, #1B2A4A); box-shadow:0 0 0 3px rgba(27,42,74,.08); }
+#dutyGapBox .dg-group input.input-error { border-color:var(--grid-red, #A02A2A) !important; background:var(--grid-red-bg, #F7E9E9); }
+#dutyGapBox .help-text { font-size:10.5px; color:var(--grid-muted, #5A6272); margin-top:3px; line-height:1.35; }
+#dutyGapBox .dg-error { display:none; background:var(--grid-red-bg, #F7E9E9); border:1px solid #E3BCBC; color:var(--grid-red, #A02A2A); padding:8px 12px; font-size:12px; margin:0 0 8px; border-radius:0; }
+#dutyGapBox .dg-note { margin:0 0 4px; font-size:11px; color:var(--grid-muted, #5A6272); line-height:1.45; }
+#dutyGapBox .dg-actions { display:flex; justify-content:flex-end; position:sticky; bottom:0; background:#fff; margin-top:4px; padding:10px 0 12px 0; border-top:1px solid var(--grid-border, #C3CADA); z-index:2; }
+#dutyGapBox .dg-submit { background:var(--grid-navy, #1B2A4A); color:#fff; border:none; padding:10px 24px; border-radius:0; font-weight:600; cursor:pointer; transition:opacity .2s; text-transform:uppercase; letter-spacing:.3px; font-size:12px; }
+#dutyGapBox .dg-submit:hover:not(:disabled) { opacity:.9; }
+#dutyGapBox .dg-submit:disabled { opacity:.6; cursor:not-allowed; }
+@media (max-width:640px) { #dutyGapBox { padding:14px 14px 0 14px; } #dutyGapBox .dg-grid { grid-template-columns:1fr; } #dutyGapBox .dg-badge { display:none; } }
+#skipBlockOverlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,.55); z-index:20000; align-items:center; justify-content:center; backdrop-filter:blur(4px); }
+#skipBlockOverlay.open { display:flex; }
+#skipBlockBox { background:#fff; border-radius:18px; width:460px; max-width:94vw; box-shadow:0 24px 60px rgba(0,0,0,.25); animation:wiz-in .3s cubic-bezier(.34,1.56,.64,1); overflow:hidden; }
+#skipBlockBox .sb-header { display:flex; align-items:center; gap:16px; }
+#skipBlockBox .sb-header .sb-icon { flex:0 0 auto; display:flex; align-items:center; justify-content:center; width:48px; height:48px; margin:0; font-size:26px; background:rgba(255,255,255,.16); border-radius:0; }
+#skipBlockBox .sb-head-text { min-width:0; }
+#skipBlockBox .hp-btn-continue { background:#1976d2; color:#fff; }
+#skipBlockBox .hp-btn-continue:hover, #skipBlockBox .hp-btn-continue:focus-visible { background:#1565c0; }
+#skipBlockBox .sb-sub { margin:4px 0 0; font-size:13px; opacity:.9; }
+.sb-list { list-style:none; margin:0 0 14px; padding:0; max-height:200px; overflow-y:auto; border:1px solid #fecaca; border-radius:10px; background:#fef2f2; }
+.sb-list li { display:flex; justify-content:space-between; align-items:center; gap:10px; padding:9px 14px; font-size:13px; border-bottom:1px solid #fecaca; }
+.sb-list li:last-child { border-bottom:none; }
+.sb-list .sb-name { font-weight:700; color:#333; }
+.sb-list .sb-days { color:#c62828; font-size:12px; white-space:nowrap; }
+.sb-more { padding:9px 14px; font-size:12px; color:#666; font-style:italic; }
+.sb-tip { background:#f5f8ff; border-left:4px solid #1976d2; padding:10px 14px; font-size:12.5px; color:#444; line-height:1.55; margin:0 !important; }
+.sb-retry { display:none; }
 .hp-btn-continue { padding:11px 22px; background:#e65100; color:#fff; border:none; border-radius:9px; font-size:14px; font-weight:700; cursor:pointer; transition:background .2s; }
 .hp-btn-continue:hover { background:#bf360c; }
 
@@ -1827,6 +3363,24 @@ tr.day-off-row td { background:#ede7f6; color:#512da8; font-style:italic; }
 .req-type-badge.am_time_out { background:#c62828; }
 .req-type-badge.pm_time_in  { background:#1565c0; }
 .req-type-badge.pm_time_out { background:#2e7d32; }
+.req-kind-note { margin-top:8px; font-size:12px; color:#5A6272; line-height:1.5; }
+.req-kind-note strong { color:#1B2A4A; }
+.req-evidence { border:1px solid #e0e4ef; border-radius:8px; margin-bottom:10px; overflow:hidden; font-size:12.5px; }
+.req-evidence-head { display:flex; align-items:center; gap:8px; padding:8px 12px; font-weight:700; }
+.req-evidence.ok .req-evidence-head { background:#ecfdf3; color:#166534; }
+.req-evidence.review .req-evidence-head { background:#fffbeb; color:#92400e; }
+.req-evidence.risk .req-evidence-head { background:#fef2f2; color:#991b1b; }
+.req-evidence-list { list-style:none; margin:0; padding:8px 12px 10px; background:#fff; }
+.req-evidence-list li { display:flex; gap:8px; padding:3px 0; color:#444; line-height:1.45; }
+.req-evidence-list li i { margin-top:3px; font-size:11px; flex-shrink:0; }
+.req-evidence-list li.ok i { color:#16a34a; } .req-evidence-list li.info i { color:#64748b; }
+.req-evidence-list li.review i { color:#d97706; } .req-evidence-list li.risk i { color:#dc2626; }
+.req-evidence-detail { display:grid; grid-template-columns:1fr 1fr; gap:1px; background:#e8ebf3; border-top:1px solid #e8ebf3; }
+.req-evidence-detail div { background:#f8f9fd; padding:7px 12px; display:flex; flex-direction:column; gap:1px; }
+.req-evidence-detail span { font-size:10.5px; text-transform:uppercase; letter-spacing:.3px; color:#64748b; }
+.req-evidence-detail strong { font-size:12.5px; color:#1B2A4A; }
+@media (max-width:520px){ .req-evidence-detail { grid-template-columns:1fr; } }
+.req-evidence-device { padding:0 12px 9px; background:#fff; color:#64748b; font-size:11.5px; }
 .req-reason-box { background:#f8f9ff; border:1px solid #e8eaf6; border-radius:8px; padding:10px 13px; font-size:13px; color:#444; line-height:1.55; margin-bottom:10px; }
 .req-reason-label { font-size:10px; font-weight:700; color:#9fa8da; text-transform:uppercase; margin-bottom:4px; }
 .req-photo-section { margin-bottom:12px; }
@@ -1905,153 +3459,566 @@ tr.day-off-row td { background:#ede7f6; color:#512da8; font-style:italic; }
     animation: badge-pulse-late 2s ease-in-out infinite;
 }
 
-#emailSendingOverlay {
-    display: none;
-    position: fixed;
-    inset: 0;
-    background: rgba(0,0,0,0.65);
-    z-index: 50000;
-    align-items: center;
-    justify-content: center;
-    backdrop-filter: blur(6px);
+
+/* ══════════════════════════════════════════════════════════════════════
+   ADJUSTMENT: "Field Ops Grid" restyle — the same design language as
+   company_list.php (flat square corners, no drop shadows, navy #1B2A4A
+   with gold accents, slate grid borders, green / amber / red status
+   tones). This layer only changes colours, radii, shadows and spacing;
+   no markup hooks, ids, classes or behaviour used by the scripts changed.
+   ══════════════════════════════════════════════════════════════════════ */
+:root {
+    --grid-bg: #EEF1F6; --grid-navy: #1B2A4A; --grid-border: #C3CADA; --grid-border-soft: #DCE1EC;
+    --grid-green: #2C5A2C; --grid-green-bg: #EAF3EA; --grid-red: #A02A2A; --grid-red-bg: #F7E9E9;
+    --grid-amber: #A0850A; --grid-amber-bg: #FAF3DC; --grid-muted: #5A6272;
+    --ink: #2d3748; --ink-faint: #8A93A6; --surface-soft: #F3F5F9; --blue-light: #E7ECF7;
+    --panel-radius: 0; --panel-shadow: none;
 }
-#emailSendingOverlay.open {
-    display: flex;
+* { box-sizing: border-box; }
+body { background: var(--grid-bg); color: var(--ink); line-height: 1.6; }
+button, input, select { font-family: inherit; }
+button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid #F7C600; outline-offset: 2px; }
+
+/* sidebar / navbar — same as company_list.php */
+.sidebar { transition: width 0.3s ease; box-shadow: 4px 0 10px rgba(0,0,0,0.1); top: 0; left: 0; }
+.sidebar-header { padding: 20px; }
+.sidebar-user-info { min-width: 0; }
+.sidebar-user-name { font-size: 18px; font-weight: bold; }
+.sidebar-user-role { font-size: 11px; font-weight: 700; letter-spacing: 0.8px; margin-top: 3px; overflow: hidden; text-overflow: ellipsis; }
+.sidebar-links { display: flex; flex-direction: column; overflow: hidden; }
+.sidebar a { transition: background 0.2s, color 0.2s; white-space: nowrap; }
+.sidebar a:hover:not(.active) { color: #fff; }
+.logout-link a { font-size: 14px; }
+.main-content { transition: margin-left 0.3s, width 0.3s; display: flex; flex-direction: column; min-height: 100vh; min-width: 0; }
+.navbar { box-shadow: none; position: relative; z-index: 99; }
+.page-inner { flex: 1; padding: 30px; width: 100%; }
+
+/* date / live-time widget — square */
+.datetime-widget, .datetime-widget.dtw-in-navbar { border-radius: 0; box-shadow: none; border: 1px solid rgba(255,255,255,0.22); }
+.dtw-date-block { background: var(--grid-navy); }
+.dtw-date-icon, .dtw-time-icon { border-radius: 0; }
+.dtw-time-icon { background: var(--blue-light); border-color: var(--grid-border); color: var(--grid-navy); }
+.dtw-ampm { color: var(--grid-navy); }
+
+/* panels */
+.split-layout { gap: 24px; }
+.split-left { gap: 20px; }
+.panel-card { background: #fff; border: 1px solid var(--grid-border); border-radius: 0; box-shadow: none; }
+.panel-card-header { background: var(--surface-soft); border-bottom: 1px solid var(--grid-border-soft); }
+.panel-card-header h3 { color: var(--grid-navy); font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px; }
+.panel-card-header h3 i { color: var(--grid-navy) !important; }
+
+/* quick actions */
+.quick-action-btn { border-radius: 0; border: 1px solid var(--grid-border); font-family: inherit; }
+.quick-action-btn:hover { transform: none !important; box-shadow: none !important; }
+.quick-action-btn .qa-badge { border-radius: 0; }
+.qa-btn-blue  { background: var(--blue-light); color: var(--grid-navy); border-color: var(--grid-border); }
+.qa-btn-blue:hover  { background: var(--grid-navy); color: #fff; border-color: var(--grid-navy); }
+.qa-btn-amber { background: var(--grid-amber-bg); color: var(--grid-amber); border-color: #E6D9A8; }
+.qa-btn-amber:hover { background: var(--grid-amber); color: #fff; border-color: var(--grid-amber); }
+.qa-btn-green { background: var(--grid-green-bg); color: var(--grid-green); border-color: #BBD3BB; }
+.qa-btn-green:hover { background: var(--grid-green); color: #fff; border-color: var(--grid-green); }
+
+/* today's stats */
+.kpi-card { border-radius: 0; }
+.kpi-card .kpi-icon i { color: inherit !important; }
+.kpi-present    { background: var(--grid-green-bg); border-color: #BBD3BB; color: var(--grid-green); }
+.kpi-present .kpi-label, .kpi-present .kpi-value { color: var(--grid-green); }
+.kpi-absent     { background: var(--grid-red-bg); border-color: #E3BCBC; color: var(--grid-red); }
+.kpi-absent .kpi-label, .kpi-absent .kpi-value { color: var(--grid-red); }
+.kpi-incomplete { background: var(--grid-amber-bg); border-color: #E6D9A8; color: var(--grid-amber); }
+.kpi-incomplete .kpi-label, .kpi-incomplete .kpi-value { color: var(--grid-amber); }
+[data-live-section="today"] [onclick="openLateInbox()"] { background: var(--grid-red-bg) !important; border-color: #E3BCBC !important; border-radius: 0 !important; color: var(--grid-red) !important; }
+
+/* chart + month navigation + pagination */
+.chart-nav-btn, .sm-month-label, .sm-month-input, .att-page-btn { border-radius: 0; border-color: var(--grid-border); }
+.chart-nav-btn { background: #fff; color: var(--grid-navy); }
+.chart-nav-btn:hover:not([aria-disabled="true"]) { background: var(--blue-light); border-color: var(--grid-navy); color: var(--grid-navy); }
+.sm-month-label { color: var(--grid-navy); }
+.sm-month-input:focus { border-color: var(--grid-navy); }
+.chart-legend-dot, .sm-legend-dot { border-radius: 0; }
+.chart-nav-title, .chart-legend-item { color: var(--grid-muted); }
+.att-pagination-info { color: var(--grid-muted); }
+.att-page-btn:hover:not(:disabled):not(.active) { background: var(--blue-light); border-color: var(--grid-navy); color: var(--grid-navy); }
+.att-page-btn.active { background: var(--grid-navy); border-color: var(--grid-navy); }
+.sm-action-btn { border-radius: 0; border: 1px solid var(--grid-border); text-decoration: none; }
+.sm-action-btn.print { background: #fff; color: var(--grid-navy); }
+.sm-action-btn.print:hover { background: var(--blue-light); }
+.sm-action-btn.export { background: var(--grid-green); border-color: var(--grid-green); color: #fff; }
+.sm-action-btn.export:hover { background: #234823; }
+
+/* monthly summary table */
+.sm-table-wrap { border-radius: 0; box-shadow: none; border: 1px solid var(--grid-border-soft); }
+.sm-table th { background: var(--surface-soft); color: var(--grid-navy); border-bottom: 2px solid var(--grid-border); }
+.sm-table td { border-bottom: 1px solid var(--grid-border-soft); }
+.sm-table td.sm-name-td { color: var(--ink); }
+.sm-table td.sm-present    { color: var(--grid-green); background: var(--grid-green-bg); }
+.sm-table td.sm-absent     { color: var(--grid-red);   background: var(--grid-red-bg); }
+.sm-table td.sm-incomplete { color: var(--grid-amber); background: var(--grid-amber-bg); }
+.sm-table td.sm-has-mark { box-shadow: inset 0 0 0 1px rgba(27,42,74,.25); }
+.sm-table-empty, .chart-empty { color: var(--ink-faint); }
+.weekend-notice { border-radius: 0; }
+
+/* attendance-log table (also covers the inline styles the script writes) */
+#attendanceTable { border: 1px solid var(--grid-border-soft); }
+#attendanceTable th { border-bottom: 1px solid var(--grid-border-soft); color: var(--grid-navy); }
+#attLogThead th { background: var(--surface-soft) !important; }
+#attLogThead th[style*="#fff8e1"] { background: var(--grid-amber-bg) !important; }
+#attLogThead th[style*="#e8f5e9"] { background: var(--grid-green-bg) !important; }
+#attendanceTable tbody td { border-bottom: 1px solid var(--grid-border-soft); }
+#attendanceTable tbody tr:hover td { background: #F8F9FC; }
+#attendanceTable img { border-radius: 0 !important; border: 1px solid var(--grid-border-soft); }
+td.day-off, tr.day-off-row td { background: #ede7f6; }
+td.present    { color: var(--grid-green); }
+td.absent     { color: var(--grid-red); }
+td.incomplete, td.missed { color: var(--grid-amber); }
+#searchInput { border: 1px solid var(--grid-border); border-radius: 0; }
+#searchInput:focus, #modalMonthFilter:focus, #modalDayFilter:focus { outline: none; border-color: var(--grid-navy); }
+
+/* modal shell: square, flat, navy header with a gold rule (company_list.php's popup look) */
+#attSettingsOverlay, #wizardOverlay, #hoursPopupOverlay, #continueAnywayOverlay, #lateInboxOverlay,
+#customConfirmOverlay, #attLogModal, #skipBlockOverlay, #dutyGapOverlay { background: rgba(27,42,74,.55); }
+#attSettingsBox, #wizardBox, #hoursPopupBox, #continueAnywayBox, #lateInboxBox, #customConfirmBox, #skipBlockBox, #dutyGapBox,
+.alm-box { border-radius: 0; box-shadow: 0 20px 60px rgba(0,0,0,.25); border-top: 3px solid var(--grid-navy); }
+.alm-box { background: #fff; width: 1100px; max-width: 100%; margin: auto; overflow: hidden; animation: as-in .3s cubic-bezier(.34,1.56,.64,1); }
+.as-header, .li-header, .alm-head { background: var(--grid-navy); border-bottom: 3px solid #F7C600; }
+.alm-head { color: #fff; padding: 18px 24px; display: flex; align-items: center; justify-content: space-between; }
+.alm-head h3 { margin: 0; font-size: 18px; font-weight: 700; display: flex; align-items: center; gap: 8px; }
+.alm-body { padding: 20px 24px; }
+.alm-toolbar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
+.alm-group { display: flex; align-items: center; gap: 8px; background: var(--surface-soft); padding: 8px 12px; border: 1px solid var(--grid-border-soft); }
+.alm-group.tight { gap: 6px; padding: 6px 10px; }
+.alm-group label { font-size: 13px; font-weight: 600; color: var(--grid-muted); white-space: nowrap; }
+.alm-group select { padding: 6px 10px; border: 1px solid var(--grid-border); border-radius: 0; font-size: 13px; background: #fff; }
+#modalDayFilter { width: 72px; }
+.alm-nav-btn { background: var(--grid-navy); color: #fff; border: 1px solid var(--grid-navy); border-radius: 0; padding: 5px 11px; font-size: 13px; font-weight: 700; cursor: pointer; transition: opacity .15s; }
+.alm-nav-btn:hover { opacity: .85; }
+.alm-spinner { display: none; text-align: center; padding: 40px; color: var(--grid-muted); font-size: 14px; }
+.alm-spinner i { display: inline-block; width: 28px; height: 28px; border: 3px solid var(--grid-border-soft); border-top-color: var(--grid-navy); border-radius: 50%; animation: spin .7s linear infinite; vertical-align: middle; margin-right: 10px; }
+#attLogDateHeading { margin: 0 0 12px; font-size: 16px; color: var(--grid-navy); }
+.as-close-btn, .li-close-btn, .alm-close-btn { background: rgba(255,255,255,.10); border: 1px solid rgba(255,255,255,.25); color: #fff; border-radius: 0; padding: 6px 12px; font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .4px; cursor: pointer; transition: background .2s; }
+.as-close-btn:hover, .li-close-btn:hover, .alm-close-btn:hover { background: rgba(255,255,255,.22); }
+.as-today-only-notice { background: var(--grid-amber-bg); border-color: #E6D9A8; color: var(--grid-amber); border-radius: 0; }
+.as-current-settings { background: var(--surface-soft); border-radius: 0; border-left: 4px solid var(--grid-navy); }
+.as-current-settings strong.as-title { color: var(--grid-navy); }
+.as-open-wizard { display: inline-flex; align-items: center; gap: 8px; padding: 10px 20px; background: var(--grid-navy); color: #fff; border: 1px solid var(--grid-navy); border-radius: 0; font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .4px; cursor: pointer; transition: opacity .2s; margin-bottom: 4px; }
+.as-open-wizard:hover { opacity: .88; }
+
+/* wizard */
+#wizardProgress { background: var(--grid-border-soft); }
+#wizardProgressBar { background: var(--grid-navy); }
+.wiz-header, .wiz-footer { border-color: var(--grid-border-soft); }
+.wiz-step-label { color: var(--grid-amber); }
+.wiz-header h2 { color: var(--grid-navy); }
+.field-group label { color: var(--grid-muted); }
+.field-group input[type="time"], .field-group input[type="number"] { border: 1px solid var(--grid-border); border-radius: 0; }
+.field-group input:focus { border-color: var(--grid-navy); box-shadow: none; }
+.field-group input.input-error { border-color: var(--grid-red) !important; background: var(--grid-red-bg); }
+.field-hint.am-hint { color: var(--grid-amber); }
+.field-hint.pm-hint { color: var(--grid-navy); }
+.sg-card { background: var(--surface-soft); border: 1px solid var(--grid-border-soft); border-radius: 0; }
+.sg-scope { background: var(--grid-green-bg); color: var(--grid-green); border-radius: 0; }
+.sg-scope.scope-all { background: var(--blue-light); color: var(--grid-navy); }
+.wiz-dot { background: var(--grid-border); }
+.wiz-dot.active { background: var(--grid-navy); }
+.wiz-btn, .hp-btn-ok, .hp-btn-continue, .ca-btn-cancel, .ca-btn-confirm, .cc-btn { border-radius: 0; font-size: 12px; text-transform: uppercase; letter-spacing: .4px; border: 1px solid transparent; }
+.wiz-btn-back, .hp-btn-ok, .ca-btn-cancel, .cc-btn-cancel { background: #fff; color: var(--grid-navy); border-color: var(--grid-border); }
+.wiz-btn-back:hover, .hp-btn-ok:hover, .ca-btn-cancel:hover, .cc-btn-cancel:hover { background: var(--blue-light); color: var(--grid-navy); }
+.wiz-btn-next { background: var(--grid-navy); }
+.wiz-btn-next:hover { background: #24375E; }
+.wiz-btn-save, .cc-btn-confirm-approve { background: var(--grid-green); box-shadow: none; }
+.wiz-btn-save:hover, .cc-btn-confirm-approve:hover { background: #234823; }
+.skip-row, .skip-warning, .field-group.disabled-field input { border-radius: 0; }
+.skip-row { background: var(--surface-soft); border-color: var(--grid-border-soft); }
+.skip-checkbox:hover span { color: var(--grid-navy); }
+.skip-warning, .ca-warning-box { background: var(--grid-red-bg); border-color: #E3BCBC; color: var(--grid-red); border-radius: 0; }
+#amErrorMsg, #pmErrorMsg { background: var(--grid-red-bg) !important; border-color: #E3BCBC !important; color: var(--grid-red) !important; border-radius: 0 !important; }
+.wiz-body > div[style*="#e8f5e9"] { background: var(--grid-green-bg) !important; color: var(--grid-green) !important; border-radius: 0 !important; }
+.wiz-body > div[style*="#fff8e1"] { background: var(--grid-amber-bg) !important; color: var(--grid-amber) !important; border-radius: 0 !important; }
+
+/* 8-hour / continue-anyway / confirm dialogs */
+.hp-header { background: var(--grid-red); }
+.sb-list { background: var(--grid-red-bg); border-color: #E3BCBC; border-radius: 0; }
+.sb-list li { border-color: #E3BCBC; }
+.sb-list .sb-days { color: var(--grid-red); }
+.sb-tip { border-radius: 0; background: var(--surface-soft); border-left-color: var(--grid-navy); }
+.hp-breakdown { background: var(--grid-red-bg); border-color: #E3BCBC; border-radius: 0; }
+.hp-breakdown .hpb-row .hpb-val { color: var(--grid-red); }
+.hp-breakdown .hpb-row.total { border-color: #E3BCBC; }
+.hp-btn-continue, .ca-btn-confirm { background: var(--grid-amber); color: #fff; }
+.hp-btn-continue:hover, .ca-btn-confirm:hover { background: #7F6808; }
+.ca-header { background: var(--grid-amber); }
+.ca-summary-label { color: var(--grid-amber); }
+.ca-summary-box { background: var(--grid-amber-bg); border-color: #E6D9A8; border-radius: 0; }
+.ca-sg-card, .ca-total-row { border-radius: 0; }
+.ca-total-row { background: var(--grid-red-bg); }
+.cc-icon-wrap { border-radius: 0; }
+.cc-icon-wrap.approve { background: var(--grid-green-bg); }
+.cc-icon-wrap.reject { background: var(--grid-red-bg); }
+.cc-title { color: var(--grid-navy); }
+.cc-student-badge { background: var(--blue-light); border-color: var(--grid-border); color: var(--grid-navy); border-radius: 0; }
+.cc-btn-confirm-reject { background: var(--grid-red); box-shadow: none; }
+.cc-btn-confirm-reject:hover { background: #7F2020; }
+
+/* late-request inbox */
+.li-tabs { background: var(--surface-soft); border-bottom: 1px solid var(--grid-border); }
+.li-tab.active { color: var(--grid-navy); border-bottom-color: #F7C600; }
+.li-spinner, .req-photo-frame .rp-spinner { border-top-color: var(--grid-navy); }
+.req-card:hover { background: #F8F9FC; }
+.req-type-badge, .req-status-badge { border-radius: 0; }
+.req-type-badge.am_time_in { background: var(--grid-amber); }
+.req-type-badge.am_time_out { background: var(--grid-red); }
+.req-type-badge.pm_time_in { background: var(--grid-navy); }
+.req-type-badge.pm_time_out { background: var(--grid-green); }
+.req-status-badge.approved { background: var(--grid-green-bg); color: var(--grid-green); }
+.req-status-badge.rejected { background: var(--grid-red-bg); color: var(--grid-red); }
+.req-evidence, .req-reason-box, .req-photo-frame, .req-photo-no-photo, .req-duty-info { border-radius: 0; }
+.req-evidence.ok .req-evidence-head { background: var(--grid-green-bg); color: var(--grid-green); }
+.req-evidence.review .req-evidence-head { background: var(--grid-amber-bg); color: var(--grid-amber); }
+.req-evidence.risk .req-evidence-head { background: var(--grid-red-bg); color: var(--grid-red); }
+.req-duty-info { background: var(--grid-green-bg); border-color: #BBD3BB; color: var(--grid-green); }
+.req-duty-info.has-late { background: var(--grid-amber-bg); border-color: #E6D9A8; color: var(--grid-amber); }
+.req-photo-frame:hover { border-color: var(--grid-navy); }
+.req-photo-frame .rp-expand-hint { border-radius: 0; }
+.req-btn-allow { border-radius: 0; background: var(--grid-green); font-family: inherit; text-transform: uppercase; letter-spacing: .4px; font-size: 12px; }
+.req-btn-allow:hover { background: #234823; }
+.req-btn-reject { border-radius: 0; border-color: var(--grid-border); font-family: inherit; text-transform: uppercase; letter-spacing: .4px; font-size: 12px; }
+.req-btn-reject:hover { background: var(--grid-red-bg); border-color: var(--grid-red); color: var(--grid-red); }
+#reqPhotoLightbox img, #modalImg { border-radius: 0 !important; box-shadow: none !important; }
+
+/* in-page notification (builtin-notif) — the navy toast used by company_list.php */
+.builtin-notif { background: var(--grid-navy); border: 1px solid #55668C; border-radius: 0; box-shadow: 0 8px 24px rgba(27,42,74,.30); }
+.bn-header { background: transparent; }
+.bn-title { color: #fff; }
+.bn-close { border-radius: 0; }
+.bn-body { color: #E3E8F1; }
+.bn-body strong { color: #fff; }
+.bn-action { background: transparent; border-top-color: rgba(255,255,255,.18); color: #F7C600; }
+.bn-action:hover { background: #24375E; }
+.bn-progress { background: rgba(255,255,255,.12); }
+.bn-progress-bar { background: #F7C600; }
+
+/* narrow screens: stack the two columns so nothing is cut off */
+@media (max-width: 1100px) {
+    .split-layout { flex-direction: column; }
+    .split-left, .split-right { width: 100%; flex: none; position: static; }
 }
-#emailSendingBox {
-    background: #fff;
-    border-radius: 20px;
-    width: 360px;
-    max-width: 92vw;
-    box-shadow: 0 28px 70px rgba(0,0,0,0.30);
-    overflow: hidden;
-    animation: wiz-in .3s cubic-bezier(.34,1.56,.64,1);
-    text-align: center;
-}
-.esb-header {
-    background: linear-gradient(135deg, #1565c0, #1976d2);
-    padding: 28px 24px 22px;
-}
-.esb-spinner-wrap {
-    width: 64px;
-    height: 64px;
-    border-radius: 50%;
-    background: rgba(255,255,255,0.15);
-    border: 2px solid rgba(255,255,255,0.3);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    margin: 0 auto 16px;
-}
-.esb-spinner {
-    width: 36px;
-    height: 36px;
-    border: 4px solid rgba(255,255,255,0.3);
-    border-top-color: #fff;
-    border-radius: 50%;
-    animation: spin 0.8s linear infinite;
-}
-.esb-header h3 {
-    margin: 0 0 6px;
-    font-size: 18px;
-    font-weight: 800;
-    color: #fff;
-    line-height: 1.2;
-}
-.esb-header p {
-    margin: 0;
-    font-size: 13px;
-    color: rgba(255,255,255,0.75);
-    line-height: 1.5;
-}
-.esb-body {
-    padding: 20px 24px 24px;
-}
-.esb-steps {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    text-align: left;
-}
-.esb-step {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    font-size: 13px;
-    color: #555;
-    padding: 8px 12px;
-    border-radius: 8px;
-    background: #f8fafc;
-    border: 1px solid #e9ecef;
-    transition: all 0.3s;
-}
-.esb-step.active {
-    background: #e8f5e9;
-    border-color: #a5d6a7;
-    color: #1b5e20;
-    font-weight: 600;
-}
-.esb-step.done {
-    background: #f0fdf4;
-    border-color: #bbf7d0;
-    color: #15803d;
-}
-.esb-step-icon {
-    width: 22px;
-    height: 22px;
-    border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 11px;
-    flex-shrink: 0;
-    background: #e0e0e0;
-    color: #888;
-    transition: all 0.3s;
-}
-.esb-step.active .esb-step-icon {
-    background: #1976d2;
-    color: #fff;
-    animation: esb-pulse 1.2s ease-in-out infinite;
-}
-.esb-step.done .esb-step-icon {
-    background: #16a34a;
-    color: #fff;
-}
-@keyframes esb-pulse {
-    0%,100% { box-shadow: 0 0 0 0 rgba(25,118,210,0.5); }
-    50%      { box-shadow: 0 0 0 5px rgba(25,118,210,0); }
-}
-.esb-note {
-    margin-top: 16px;
-    font-size: 11px;
-    color: #9ca3af;
-    line-height: 1.5;
-    text-align: center;
+@media (max-width: 768px) {
+    .page-inner { padding: 16px; }
+    .field-row, .summary-grid, .ca-summary-grid { grid-template-columns: 1fr; }
 }
 </style>
 </head>
 <body>
+<style id="cvCompanyShellCss">
+/* side-menu header: full name + role (same as admin_student_list.php's header) */
+#sidebar .sidebar-header { padding: 20px; min-height: 72px; }
+#sidebar .sidebar-user-info { display: flex; flex-direction: column; gap: 1px; overflow: hidden; min-width: 0; max-width: 180px; transition: opacity .2s, width .3s; }
+#sidebar .sidebar-user-name { color: #FFD700; font-size: 18px; font-weight: bold; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.3; }
+#sidebar .sidebar-user-role { color: rgba(255,255,255,.55); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .8px; margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#sidebar.collapsed .sidebar-user-info { opacity: 0; width: 0; overflow: hidden; }
+
+/* loading page: never fades in while a page is being left */
+#globalLoadingOverlay.gl-instant { transition: none; }
+
+/* logout confirmation popup (same square navy look as the admin pages') */
+.cv-logout-overlay { position: fixed; inset: 0; z-index: 300000; display: flex; align-items: center; justify-content: center; padding: 20px;
+    background: rgba(27,42,74,.45); opacity: 0; visibility: hidden; transition: opacity .2s ease, visibility .2s ease; }
+.cv-logout-overlay.show { opacity: 1; visibility: visible; }
+.cv-logout-box { background: #fff; width: 420px; max-width: 100%; border-top: 3px solid #1B2A4A; box-shadow: 0 20px 60px rgba(0,0,0,.25);
+    padding: 26px 24px 22px; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; transform: translateY(8px); transition: transform .2s ease; }
+.cv-logout-overlay.show .cv-logout-box { transform: translateY(0); }
+.cv-logout-box h3 { margin: 0 0 10px; font-size: 16px; color: #1B2A4A; display: flex; align-items: center; gap: 10px; }
+.cv-logout-box h3 i { color: #1B2A4A; }
+.cv-logout-box p { margin: 0 0 22px; font-size: 13.5px; color: #4A5568; line-height: 1.6; }
+.cv-logout-actions { display: flex; justify-content: flex-end; gap: 8px; }
+.cv-logout-btn { display: inline-flex; align-items: center; gap: 8px; border: 1px solid #1B2A4A; cursor: pointer; font-family: inherit; font-size: 12px; font-weight: 600;
+    letter-spacing: .4px; text-transform: uppercase; padding: 11px 18px; border-radius: 0; background: #1B2A4A; color: #fff; transition: opacity .2s ease; }
+.cv-logout-btn:hover { opacity: .88; }
+.cv-logout-btn:focus-visible { outline: 2px solid #F7C600; outline-offset: 2px; }
+.cv-logout-btn.ghost { background: #fff; color: #1B2A4A; border-color: #D5DBE6; }
+@media (prefers-reduced-motion: reduce) { .cv-logout-overlay, .cv-logout-box { transition: none; } }
+</style><style id="cvCompanyShellOverlayCss">
+#globalLoadingOverlay { position: fixed; inset: 0; z-index: 200000; display: flex; align-items: center; justify-content: center; background: rgba(238,241,246,.92); opacity: 1; visibility: visible; transition: opacity .35s ease, visibility .35s ease; }
+#globalLoadingOverlay.hidden { opacity: 0; visibility: hidden; pointer-events: none; }
+.global-loading-box { display: flex; flex-direction: column; align-items: center; gap: 16px; animation: cvShellPop .35s ease; }
+.global-loading-spinner { width: 64px; height: 64px; border: 0; border-radius: 50%; box-sizing: border-box; background: conic-gradient(from 0deg, rgba(27,42,74,.12) 0deg, rgba(27,42,74,.35) 120deg, rgba(27,42,74,.7) 240deg, #1B2A4A 330deg, #1B2A4A 360deg);
+    -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 9px), #000 calc(100% - 8px)), repeating-conic-gradient(from 5deg, #000 0deg 20deg, transparent 20deg 30deg); -webkit-mask-composite: source-in;
+            mask: radial-gradient(farthest-side, transparent calc(100% - 9px), #000 calc(100% - 8px)), repeating-conic-gradient(from 5deg, #000 0deg 20deg, transparent 20deg 30deg); mask-composite: intersect;
+    will-change: transform; animation: cvShellRing 1s steps(12, end) infinite; }
+@keyframes cvShellRing { to { transform: rotate(360deg); } }
+.global-loading-text { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; font-size: 13px; font-weight: 700; color: #1B2A4A; text-transform: uppercase; letter-spacing: .6px; display: flex; align-items: center; gap: 8px; }
+.global-loading-dots span { animation: cvShellDots 1.2s infinite; opacity: 0; }
+.global-loading-dots span:nth-child(2) { animation-delay: .2s; }
+.global-loading-dots span:nth-child(3) { animation-delay: .4s; }
+@keyframes cvShellPop { from { transform: scale(.9); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+@keyframes cvShellDots { 0%, 20% { opacity: 0; } 50% { opacity: 1; } 100% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .global-loading-spinner { animation-duration: 2s; } #globalLoadingOverlay { transition-duration: .01s; } }
+</style>
+<div id="globalLoadingOverlay">
+    <div class="global-loading-box">
+        <div class="global-loading-spinner"></div>
+        <div class="global-loading-text"><span id="globalLoadingLabel">Loading</span><span class="global-loading-dots"><span>.</span><span>.</span><span>.</span></span></div>
+    </div>
+</div>
+<noscript><style>#globalLoadingOverlay { display: none !important; }</style></noscript><script>
+(function () {
+    var FULL = true;
+    var ov = document.getElementById('globalLoadingOverlay');
+    if (!ov) { if (FULL) window.showActionLoading = window.hideActionLoading = function () {}; return; }
+    if (window._cvCompanyShellNav) return;
+    window._cvCompanyShellNav = true;
+
+    var MIN_MS = 350, SAFETY_MS = 4000, NAV_STUCK_MS = 15000, started = Date.now();
+    var ACTION_MIN_MS = 350, ACTION_SAFETY_MS = 180000;      // saving + e-mailing can take a while; never stay up forever
+    var done = !FULL, actions = 0, actionShownAt = 0, actionHideTimer = null, actionSafetyTimer = null;
+    var navigating = false, navTimer = null;
+    function labelEl() { return document.getElementById('globalLoadingLabel'); }
+
+    /* ── 1) page load: the loading page is up from the first paint and closes once the page has loaded ── */
+    function hide() {
+        if (done) return; done = true;
+        setTimeout(function () {
+            if (actions > 0 || navigating) return;           // something else is using the loading page — it closes it itself
+            ov.classList.remove('gl-instant'); ov.classList.add('hidden');
+        }, Math.max(0, MIN_MS - (Date.now() - started)));
+    }
+    if (FULL) {
+        if (document.readyState === 'complete') hide(); else window.addEventListener('load', hide);
+        setTimeout(hide, SAFETY_MS);
+    }
+
+    /* ── 2) ACTION LOADING PAGE (full mode): showActionLoading('Saving') … hideActionLoading() around any action the
+          user starts. Overlapping actions share one loading page, it stays up at least ACTION_MIN_MS, and a safety
+          timer closes it if a request never answers. ── */
+    if (FULL) {
+        var finishAction = function () {
+            if (actions > 0 || navigating) return;
+            clearTimeout(actionSafetyTimer);
+            ov.classList.remove('gl-instant'); ov.classList.add('hidden');
+            var l = labelEl(); if (l) l.textContent = 'Loading';
+        };
+        window.showActionLoading = function (label) {
+            actions++;
+            clearTimeout(actionHideTimer);
+            if (actions === 1) actionShownAt = Date.now();
+            var l = labelEl(); if (l) l.textContent = label || 'Processing';
+            ov.classList.remove('gl-instant', 'hidden');
+            clearTimeout(actionSafetyTimer);
+            actionSafetyTimer = setTimeout(function () { actions = 0; finishAction(); }, ACTION_SAFETY_MS);
+        };
+        window.hideActionLoading = function () {
+            if (actions === 0) return;                       // unbalanced call: ignore
+            actions--;
+            if (actions > 0) return;
+            clearTimeout(actionHideTimer);
+            actionHideTimer = setTimeout(finishAction, Math.max(0, ACTION_MIN_MS - (Date.now() - actionShownAt)));
+        };
+    }
+
+    /* ── 3) NAVIGATION LOADING PAGE: shown the moment a same-tab link (side menu, buttons) is clicked ── */
+    var FILE_RE  = /\.(pdf|xlsx?|csv|docx?|pptx?|zip|png|jpe?g|gif|webp|txt)$/i;
+    var PARAM_RE = /[?&][^=&]*(export|download|print|stream|pdf|preview|blob|file)[^=&]*=/i;
+    function isPageUrl(u) {
+        if (u.origin !== window.location.origin || !/^https?:$/.test(u.protocol)) return false;
+        return !(FILE_RE.test(u.pathname) || PARAM_RE.test(u.search));
+    }
+    var navObserver = null;
+    function navShow() {
+        if (navigating) return;
+        navigating = true;
+        var l = labelEl(); if (l && !(window.globalLoadingNavigating)) l.textContent = 'Loading';
+        ov.classList.add('gl-instant'); ov.classList.remove('hidden');
+        // a page that has its own loader may close it meanwhile — keep it up while we are leaving
+        if (window.MutationObserver) {
+            navObserver = new MutationObserver(function () { if (navigating && ov.classList.contains('hidden')) ov.classList.remove('hidden'); });
+            navObserver.observe(ov, { attributes: true, attributeFilter: ['class'] });
+        }
+        clearTimeout(navTimer);
+        navTimer = setTimeout(navReset, NAV_STUCK_MS);       // safety: still here → it was not a real page change
+    }
+    function navReset() {
+        clearTimeout(navTimer);
+        if (!navigating) return;
+        navigating = false;
+        if (navObserver) { navObserver.disconnect(); navObserver = null; }
+        if (actions === 0) { ov.classList.remove('gl-instant'); ov.classList.add('hidden'); var l = labelEl(); if (l) l.textContent = 'Loading'; }
+    }
+    document.addEventListener('click', function (e) {
+        if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+        var a = e.target && e.target.closest ? e.target.closest('a[href]') : null;
+        if (!a || a.hasAttribute('download')) return;
+        var raw = (a.getAttribute('href') || '').trim();
+        if (!raw || raw.charAt(0) === '#' || /^(javascript|mailto|tel|blob|data):/i.test(raw)) return;
+        var t = (a.getAttribute('target') || '').toLowerCase();
+        if (t && t !== '_self') return;
+        var u; try { u = new URL(a.href, window.location.href); } catch (x) { return; }
+        if (!isPageUrl(u)) return;
+        if (u.pathname === window.location.pathname && u.search === window.location.search && u.hash) return;   // same-page anchor
+        // decided after every other click handler has run, so links the page handles itself (popups, the logout confirm) are left alone
+        setTimeout(function () { if (!e.defaultPrevented) navShow(); }, 0);
+    });
+    // Back / Forward cache restore: the page did not reload, so clear what leaving it left behind
+    window.addEventListener('pageshow', function (e) {
+        if (!e.persisted) return;
+        done = true; actions = 0;
+        navReset();
+        if (FULL) ov.classList.add('hidden');
+    });
+})();
+</script>
+<!-- Export result screen ("Export Successful" / "Export Failed") — same markup, look and behaviour as admin_reports.php -->
+<style>
+    #globalResultOverlay { position: fixed; inset: 0; z-index: 200001; display: flex; align-items: center; justify-content: center; padding: 20px; background: rgba(238,241,246,.92); opacity: 1; visibility: visible; transition: opacity .35s ease, visibility .35s ease; }
+    #globalResultOverlay.hidden { opacity: 0; visibility: hidden; pointer-events: none; }
+    .global-result-box { display: flex; flex-direction: column; align-items: center; gap: 14px; max-width: 460px; width: 100%; text-align: center; animation: globalLoadingPop .35s ease; }
+    .global-result-icon { width: 64px; height: 64px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 28px; color: #fff; }
+    #globalResultOverlay.is-success .global-result-icon { background: var(--grid-green, #2C5A2C); }
+    #globalResultOverlay.is-error .global-result-icon { background: var(--grid-red, #A02A2A); }
+    .global-result-title { font-size: 14px; font-weight: 700; text-transform: uppercase; letter-spacing: .6px; margin: 0; }
+    #globalResultOverlay.is-success .global-result-title { color: var(--grid-green, #2C5A2C); }
+    #globalResultOverlay.is-error .global-result-title { color: var(--grid-red, #A02A2A); }
+    .global-result-message { font-size: 13px; line-height: 1.5; color: var(--grid-navy, #1B2A4A); margin: 0; white-space: pre-line; max-height: 40vh; overflow-y: auto; word-break: break-word; }
+    .global-result-ok { padding: 10px 28px; border-radius: 0; font-weight: 600; cursor: pointer; border: 1px solid var(--grid-navy, #1B2A4A); background: var(--grid-navy, #1B2A4A); color: #fff; text-transform: uppercase; letter-spacing: .4px; font-size: 12px; transition: opacity .2s; }
+    .global-result-ok:hover { opacity: .88; }
+    .sm-action-btn.export[data-exporting="1"] { opacity: .7; pointer-events: none; }
+</style>
+<div id="globalResultOverlay" class="hidden" role="alertdialog" aria-live="assertive" aria-labelledby="globalResultTitle" aria-describedby="globalResultMessage">
+    <div class="global-result-box">
+        <div class="global-result-icon"><i id="globalResultIcon" class="fas fa-check"></i></div>
+        <p class="global-result-title" id="globalResultTitle"></p>
+        <p class="global-result-message" id="globalResultMessage"></p>
+        <button type="button" class="global-result-ok" id="globalResultOkBtn">OK</button>
+    </div>
+</div>
+<script>
+/* Result screen helpers (same as admin_reports.php): success closes itself after a few seconds, failure stays until OK / Esc. */
+var globalResultHideTimer = null;
+function hideGlobalResult() {
+    if (globalResultHideTimer) { clearTimeout(globalResultHideTimer); globalResultHideTimer = null; }
+    var ov = document.getElementById('globalResultOverlay'); if (ov) ov.classList.add('hidden');
+}
+function showGlobalResult(type, title, message, autoHideMs) {
+    var ov = document.getElementById('globalResultOverlay');
+    if (!ov) { alert((title ? title + '\n\n' : '') + (message || '')); return; }
+    var isSuccess = type === 'success';
+    if (globalResultHideTimer) { clearTimeout(globalResultHideTimer); globalResultHideTimer = null; }
+    ov.classList.toggle('is-success', isSuccess);
+    ov.classList.toggle('is-error', !isSuccess);
+    var icon = document.getElementById('globalResultIcon'); if (icon) icon.className = isSuccess ? 'fas fa-check' : 'fas fa-times';
+    document.getElementById('globalResultTitle').textContent = title || '';
+    document.getElementById('globalResultMessage').textContent = message || '';
+    ov.classList.remove('hidden');
+    var ok = document.getElementById('globalResultOkBtn'); if (ok) { try { ok.focus(); } catch (e) {} }
+    if (autoHideMs && autoHideMs > 0) globalResultHideTimer = setTimeout(hideGlobalResult, autoHideMs);
+}
+document.getElementById('globalResultOkBtn').addEventListener('click', hideGlobalResult);
+document.addEventListener('keydown', function (e) {
+    var ov = document.getElementById('globalResultOverlay');
+    if (e.key === 'Escape' && ov && !ov.classList.contains('hidden')) hideGlobalResult();
+});
+
+/* Export XLSX — the export loading flow of admin_reports.php: the button shows "Preparing...", the loading page shows
+   "Preparing export", the file is fetched in the background so the page knows whether it really worked, then it is
+   downloaded and "Export Successful" / "Export Failed" is shown. Without JavaScript the link still downloads the file
+   directly (it keeps its href). Returning false cancels that default; returning true (script problem) lets the link work. */
+var _attExporting = false;
+var ATT_EXPORT_TIMEOUT_MS = 120000;
+function doAttExport(link) {
+    try {
+        var href = link && link.getAttribute ? link.getAttribute('href') : '';
+        if (!href || !window.fetch) return true;                 // old browser: fall back to the plain link
+        if (_attExporting) return false;                         // already exporting
+        _attExporting = true;
+        var btnId = link.id, origHtml = link.innerHTML;
+        link.setAttribute('data-exporting', '1');
+        link.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Preparing...';
+        if (window.showActionLoading) showActionLoading('Preparing export');
+        var ctrl = (window.AbortController ? new AbortController() : null);
+        var timer = ctrl ? setTimeout(function () { ctrl.abort(); }, ATT_EXPORT_TIMEOUT_MS) : null;
+        var finish = function () {
+            _attExporting = false;
+            if (timer) clearTimeout(timer);
+            // the summary panel may have been swapped by live updates meanwhile — find the button again
+            var b = (btnId && document.getElementById(btnId)) || link;
+            if (b) { b.innerHTML = origHtml; b.removeAttribute('data-exporting'); }
+            if (window.hideActionLoading) hideActionLoading();
+        };
+        fetch(href, { method: 'GET', headers: { 'X-Requested-With': 'XMLHttpRequest' }, credentials: 'same-origin', cache: 'no-store', signal: ctrl ? ctrl.signal : undefined })
+            .then(function (response) {
+                var type = (response.headers.get('Content-Type') || '').toLowerCase();
+                if (response.ok && type.indexOf('spreadsheetml') !== -1) {
+                    var disp = response.headers.get('Content-Disposition') || '';
+                    var m = disp.match(/filename\*?=(?:UTF-8'')?"?([^";]+)"?/i), name = 'attendance_export.xlsx';
+                    if (m) { try { name = decodeURIComponent(m[1]); } catch (e) { name = m[1]; } }
+                    return response.blob().then(function (blob) {
+                        if (!blob || blob.size === 0) throw new Error('The server returned an empty file.');
+                        return { blob: blob, fileName: name };
+                    });
+                }
+                return response.text().then(function (text) {
+                    var msg = '';
+                    try { var d = JSON.parse(text); if (d && d.message) msg = d.message; } catch (e) {}
+                    // this page reports export problems as short plain text (never HTML)
+                    if (!msg && type.indexOf('text/plain') !== -1 && text && text.length < 300) msg = text.trim();
+                    if (!msg) msg = response.ok
+                        ? 'The server did not return an Excel file. Your session may have expired — please refresh the page and try again.'
+                        : 'The server responded with an error (' + response.status + '). Please try again.';
+                    throw new Error(msg);
+                });
+            })
+            .then(function (file) {
+                var url = URL.createObjectURL(file.blob), a = document.createElement('a');
+                a.href = url; a.download = file.fileName; a.style.display = 'none';
+                document.body.appendChild(a); a.click();
+                setTimeout(function () { URL.revokeObjectURL(url); a.remove(); }, 1000);
+                finish();
+                showGlobalResult('success', 'Export Successful', 'Your Excel file "' + file.fileName + '" has been downloaded.', 3000);
+            })
+            .catch(function (err) {
+                finish();
+                var detail = (err && err.name === 'AbortError') ? 'The export took too long and was stopped. Please try again.'
+                    : (err && err.message && err.message !== 'Failed to fetch') ? err.message
+                    : 'Could not reach the server. Please check your connection and try again.';
+                showGlobalResult('error', 'Export Failed', detail, 0);
+            });
+        return false;
+    } catch (e) {
+        _attExporting = false;
+        return true; // anything unexpected: let the normal link download the file
+    }
+}
+</script>
 
 <div id="sidebar" class="sidebar">
-    <div class="sidebar-header">
-        <div class="sidebar-user-info">
-            <span class="sidebar-user-name"><?= htmlspecialchars($supervisor_name_display) ?></span>
-            <span class="sidebar-user-role">Supervisor</span>
-        </div>
+<script>
+(function () {
+    var sb = document.getElementById('sidebar');
+    if (!sb) return;
+    var KEY = 'neustSidebarCollapsed';
+    function isDesktop() { return !(window.matchMedia && window.matchMedia('(max-width: 768px)').matches); }
+    try { if (isDesktop() && localStorage.getItem(KEY) === '1') sb.classList.add('collapsed'); } catch (e) { /* storage unavailable: default state */ }
+    if (window.MutationObserver) {
+        new MutationObserver(function () {
+            if (!isDesktop()) return;
+            try { localStorage.setItem(KEY, sb.classList.contains('collapsed') ? '1' : '0'); } catch (e) { /* state just won't persist */ }
+        }).observe(sb, { attributes: true, attributeFilter: ['class'] });
+    }
+})();
+</script>    <div class="sidebar-header">
+<?php $cvSupNameSafe = htmlspecialchars(trim((string)($supervisor_name_display)) !== '' ? trim((string)($supervisor_name_display)) : 'Supervisor', ENT_QUOTES, 'UTF-8'); ?>
+        <div class="sidebar-user-info" title="<?= $cvSupNameSafe ?>"><span class="sidebar-user-name" id="sidebarTitle"><?= $cvSupNameSafe ?></span><span class="sidebar-user-role">Supervisor</span></div>
         <button id="toggleBtn" class="toggle-btn"><i class="fas fa-bars"></i></button>
     </div>
     <div class="sidebar-links">
-        <a href="Profile.php">
+        <a href="Profile.php" style="position:relative;">
             <i class="fas fa-user-circle"></i>
-            <span class="link-text">My Profile</span>
+            <span class="link-text">My Profile</span><!-- NEW (company chat notification): unread messages from the administrator / OJT trainees --><span class="sidebar-badge-chat" id="sidebarChatBadge" style="display:none"></span>
         </a>
         <a href="add_ojt_student.php">
             <i class="fas fa-user-graduate"></i>
             <span class="link-text">OJT Student List</span>
-            <?php if ($inbox_count > 0): ?>
-                <span class="sidebar-badge"><?= $inbox_count ?></span>
-            <?php endif; ?>
+            <span class="sidebar-badge" id="sidebarInboxBadge"<?= $inbox_count > 0 ? '' : ' style="display:none;"' ?>><?= (int)$inbox_count ?></span>
         </a>
         <a href="CompanyForm.php">
             <i class="fas fa-file-contract"></i>
@@ -2069,13 +4036,11 @@ tr.day-off-row td { background:#ede7f6; color:#512da8; font-style:italic; }
         <a href="company_reports.php">
             <i class="fas fa-chart-bar"></i>
             <span class="link-text">Company Reports</span>
-            <?php if ($ungraded_count > 0): ?>
-                <span class="sidebar-badge-ungraded"><?= $ungraded_count ?></span>
-            <?php endif; ?>
+            <span class="sidebar-badge-ungraded" id="sidebarReportBadge"<?= $ungraded_count > 0 ? '' : ' style="display:none;"' ?>><?= (int)$ungraded_count ?></span>
         </a>
     </div>
     <div class="logout-link">
-        <a href="login.php">
+        <a href="company_login.php?logout=1">
             <i class="fas fa-sign-out-alt"></i>
             <span class="link-text" style="margin-left:10px;">Logout</span>
         </a>
@@ -2142,7 +4107,7 @@ tr.day-off-row td { background:#ede7f6; color:#512da8; font-style:italic; }
                     return $base_url . '?' . http_build_query($p);
                 }
                 ?>
-                <h3><i class="fas fa-chart-bar" style="color:#1565c0;font-size:13px;"></i> Attendance Overview</h3>
+                <h3><i class="fas fa-chart-bar" style="font-size:13px;"></i> Attendance Overview</h3>
                 <div class="chart-nav" style="margin:0; gap:6px;">
                     <?php if ($chart_page > 0): ?>
                         <a class="chart-nav-btn" href="<?= htmlspecialchars(chartPageUrl($chart_page - 1, $base_url, $existing_params)) ?>">&#8592;</a>
@@ -2161,9 +4126,9 @@ tr.day-off-row td { background:#ede7f6; color:#512da8; font-style:italic; }
                 <p style="font-size:11px; color:#aaa; margin:0 0 10px;">Monthly totals — Present, Incomplete, Absent (weekdays only, up to today)</p>
                 <?php if (count($chart_slice) > 0): ?>
                 <div class="chart-legend">
-                    <span class="chart-legend-item"><span class="chart-legend-dot" style="background:#2e7d32;"></span>Present</span>
-                    <span class="chart-legend-item"><span class="chart-legend-dot" style="background:#e65100;"></span>Incomplete</span>
-                    <span class="chart-legend-item"><span class="chart-legend-dot" style="background:#c62828;"></span>Absent</span>
+                    <span class="chart-legend-item"><span class="chart-legend-dot" style="background:#2C5A2C;"></span>Present</span>
+                    <span class="chart-legend-item"><span class="chart-legend-dot" style="background:#A0850A;"></span>Incomplete</span>
+                    <span class="chart-legend-item"><span class="chart-legend-dot" style="background:#A02A2A;"></span>Absent</span>
                 </div>
                 <div class="chart-canvas-wrap">
                     <canvas id="attendanceBarChart"></canvas>
@@ -2180,9 +4145,9 @@ tr.day-off-row td { background:#ede7f6; color:#512da8; font-style:italic; }
                         data: {
                             labels: labels,
                             datasets: [
-                                { label: 'Present', data: present, backgroundColor: '#2e7d32', borderRadius: 6, borderSkipped: false },
-                                { label: 'Incomplete', data: incomplete, backgroundColor: '#e65100', borderRadius: 6, borderSkipped: false },
-                                { label: 'Absent', data: absent, backgroundColor: '#c62828', borderRadius: 6, borderSkipped: false }
+                                { label: 'Present', data: present, backgroundColor: '#2C5A2C', borderRadius: 0, borderSkipped: false },
+                                { label: 'Incomplete', data: incomplete, backgroundColor: '#A0850A', borderRadius: 0, borderSkipped: false },
+                                { label: 'Absent', data: absent, backgroundColor: '#A02A2A', borderRadius: 0, borderSkipped: false }
                             ]
                         },
                         options: {
@@ -2213,7 +4178,7 @@ tr.day-off-row td { background:#ede7f6; color:#512da8; font-style:italic; }
 
         <div class="panel-card" data-live-section="summary">
             <div class="panel-card-header">
-                <h3><i class="fas fa-table" style="color:#1565c0;font-size:13px;"></i> Monthly Attendance Summary</h3>
+                <h3><i class="fas fa-table" style="font-size:13px;"></i> Monthly Attendance Summary</h3>
             </div>
             <div class="panel-card-body">
                 <div class="sm-month-nav">
@@ -2241,7 +4206,7 @@ tr.day-off-row td { background:#ede7f6; color:#512da8; font-style:italic; }
                                 <span class="chart-nav-btn" aria-disabled="true">&#8592;</span>
                             <?php endif; ?>
                             <span class="sm-month-label" id="smMonthLabel"><?= date("F Y", strtotime($month . "-01")) ?></span>
-                            <?php if ($sm_next_month <= $month_max): ?>
+                            <?php if ($sm_next_month <= $sm_month_max): ?>
                                 <a class="chart-nav-btn" href="<?= htmlspecialchars($sm_month_url($sm_next_month)) ?>" title="Next month (<?= date("F Y", strtotime($sm_next_month . "-01")) ?>)">&#8594;</a>
                             <?php else: ?>
                                 <span class="chart-nav-btn" aria-disabled="true">&#8594;</span>
@@ -2252,21 +4217,22 @@ tr.day-off-row td { background:#ede7f6; color:#512da8; font-style:italic; }
                         <button class="sm-action-btn print" onclick="printSummary()">
                             <i class="fas fa-print"></i> Print
                         </button>
-                        <a class="sm-action-btn export" href="export_attendance_xlsx.php?month=<?= htmlspecialchars($month) ?>" target="_blank">
+                        <a class="sm-action-btn export" id="attExportBtn" href="attendance_management.php?export=xlsx&month=<?= htmlspecialchars($month) ?>" target="_blank" onclick="return doAttExport(this)">
                             <i class="fas fa-file-excel"></i> Export XLSX
                         </a>
                     </div>
                 </div>
 
                 <div class="sm-legend">
-                    <span class="sm-legend-item"><span class="sm-legend-dot" style="background:#d1fae5;border:1px solid #6ee7b7;"></span><span style="color:#03543f;">P — Present</span></span>
-                    <span class="sm-legend-item"><span class="sm-legend-dot" style="background:#fffbeb;border:1px solid #fcd34d;"></span><span style="color:#92400e;">I — Incomplete</span></span>
-                    <span class="sm-legend-item"><span class="sm-legend-dot" style="background:#fef2f2;border:1px solid #fca5a5;"></span><span style="color:#9b1c1c;">A — Absent</span></span>
+                    <span class="sm-legend-item"><span class="sm-legend-dot" style="background:#EAF3EA;border:1px solid #2C5A2C;"></span><span style="color:#2C5A2C;">P — Present</span></span>
+                    <span class="sm-legend-item"><span class="sm-legend-dot" style="background:#FAF3DC;border:1px solid #A0850A;"></span><span style="color:#A0850A;">I — Incomplete</span></span>
+                    <span class="sm-legend-item"><span class="sm-legend-dot" style="background:#F7E9E9;border:1px solid #A02A2A;"></span><span style="color:#A02A2A;">A — Absent</span></span>
                     <span class="sm-legend-item"><span class="sm-legend-dot" style="background:#f3f0ff;border:1px solid #c4b5fd;"></span><span style="color:#7c3aed;">O — Day Off</span></span>
+                    <span class="sm-legend-item"><span class="sm-legend-dot" style="background:#eff6ff;border:1px solid #93c5fd;"></span><span style="color:#2563eb;">N — Not scheduled</span></span>
                     <span class="sm-legend-item"><i class="fas fa-play-circle sm-mark-start" style="font-size:10px;"></i><span style="color:#2C5A2C;">OJT Start</span></span>
                     <span class="sm-legend-item"><i class="fas fa-stop-circle sm-mark-end" style="font-size:10px;"></i><span style="color:#A02A2A;">OJT End</span></span>
                     <span class="sm-legend-item"><i class="fas fa-stop-circle sm-mark-end sm-mark-est" style="font-size:10px;"></i><span style="color:#A02A2A;">OJT End (est.)</span></span>
-                    <span class="sm-legend-item"><span class="sm-legend-dot" style="background:#f8fafc;border:1px solid #e2e8f0;"></span><span style="color:#64748b;">Blank — Before first attendance</span></span>
+                    <span class="sm-legend-item"><span class="sm-legend-dot" style="background:#f8fafc;border:1px solid #e2e8f0;"></span><span style="color:#64748b;">Blank — Before first attendance / after OJT completion</span></span>
                 </div>
 
                 <div id="summaryTableWrapper">
@@ -2308,9 +4274,18 @@ tr.day-off-row td { background:#ede7f6; color:#512da8; font-style:italic; }
                                 if ($is_wkd) {
                                     $val = 'O'; $cls = 'sm-off';
                                 } elseif ($d > date("Y-m-d")) {
-                                    $val = ''; $cls = '';
+                                    // NEW (OJT ends at the required hours): nothing is shown for upcoming days after the OJT end date
+                                    // NEW (student schedule): upcoming days the student is not scheduled on carry the marker too
+                                    if (!attm_before_start($student_first_attendance, $id, $d) && !ojtend_is_after($student_ojt_end, $id, $d) && !attsch_is_scheduled($student_sched, $id, $d)) { $val = 'N'; $cls = 'sm-nosched'; }
+                                    else { $val = ''; $cls = ''; }
                                 } elseif (attm_before_start($student_first_attendance, $id, $d)) {
                                     $val = ''; $cls = 'sm-before-start'; // UPDATED: before first attendance — not absent / missed
+                                } elseif (empty($logs_has_entry[$id][$d]) && ojtend_is_after($student_ojt_end, $id, $d)) {
+                                    $val = ''; $cls = 'sm-before-start sm-ended'; // NEW (OJT ends at the required hours): OJT already completed
+                                } elseif (empty($logs_has_entry[$id][$d]) && !attsch_is_scheduled($student_sched, $id, $d)) {
+                                    $val = 'N'; $cls = 'sm-nosched'; // NEW (student schedule): not scheduled on this day → not absent
+                                } elseif ($d === date("Y-m-d") && empty($logs_has_entry[$id][$d])) {
+                                    $val = ''; $cls = ''; // today and no attendance entry yet: stay blank, it becomes Absent once the day has passed
                                 } else {
                                     $raw = $logs[$id][$d] ?? 'ABSENT';
                                     $first = substr($raw, 0, 1);
@@ -2331,8 +4306,14 @@ tr.day-off-row td { background:#ede7f6; color:#512da8; font-style:italic; }
                                     $mark_html .= '<i class="fas fa-stop-circle sm-mark sm-mark-end' . ($is_est ? ' sm-mark-est' : '') . '" title="OJT End' . ($is_est ? ' (estimated)' : '') . ': ' . date('M j, Y', strtotime($d)) . '"></i>';
                                 }
                                 $td_cls = trim($cls . ($mark_html !== '' ? ' sm-has-mark' : ''));
+                                // NEW (student schedule): hint when the student is scheduled for only one duty that day
+                                $td_title = '';
+                                if (!$is_wkd && $val !== 'N') {
+                                    $per_t = attsch_periods($student_sched, $id, $d);
+                                    if ($per_t['am'] xor $per_t['pm']) $td_title = $per_t['am'] ? 'Scheduled: Day (AM duty) only' : 'Scheduled: Evening (PM duty) only';
+                                }
                             ?>
-                            <td class="<?= $td_cls ?>"><?= $mark_html ?><?= $val ?></td>
+                            <td class="<?= $td_cls ?>"<?= $td_title !== '' ? ' title="' . htmlspecialchars($td_title) . '"' : '' ?>><?= $mark_html ?><?= $val ?></td>
                             <?php endforeach; ?>
                         </tr>
                         <?php endforeach; ?>
@@ -2411,7 +4392,7 @@ tr.day-off-row td { background:#ede7f6; color:#512da8; font-style:italic; }
 
         <div class="panel-card" data-live-section="quick">
             <div class="panel-card-header">
-                <h3><i class="fas fa-bolt" style="color:#f59e0b;font-size:13px;"></i> Quick Actions</h3>
+                <h3><i class="fas fa-bolt" style="font-size:13px;"></i> Quick Actions</h3>
             </div>
             <div class="panel-card-body" style="padding:14px 16px;">
                 <button class="quick-action-btn qa-btn-blue" onclick="openAttLogModal()">
@@ -2436,11 +4417,11 @@ tr.day-off-row td { background:#ede7f6; color:#512da8; font-style:italic; }
 
         <div class="panel-card" data-live-section="today">
             <div class="panel-card-header">
-                <h3><i class="fas fa-calendar-check" style="color:#1565c0;font-size:13px;"></i> Today's Stats</h3>
+                <h3><i class="fas fa-calendar-check" style="font-size:13px;"></i> Today's Stats</h3>
             </div>
             <div class="panel-card-body" style="padding:14px 16px;">
                 <div style="font-size:11px; color:#9ca3af; margin-bottom:10px; font-weight:600;">
-                    <?= date("l, F j") ?> &middot; <?= $today_stats['total'] ?> student<?= $today_stats['total'] !== 1 ? 's' : '' ?>
+                    <?= date("l, F j") ?> &middot; <?= $today_stats['total'] ?> student<?= $today_stats['total'] !== 1 ? 's' : '' ?><?php if (!empty($today_stats['not_scheduled'])): ?> &middot; <?= (int)$today_stats['not_scheduled'] ?> not scheduled today<?php endif; ?><?php if (!empty($today_stats['completed'])): ?> &middot; <?= (int)$today_stats['completed'] ?> completed OJT<?php endif; ?>
                 </div>
                 <div class="kpi-card kpi-present">
                     <span class="kpi-icon"><i class="fas fa-check-circle" style="color:#15803d;font-size:20px;"></i></span>
@@ -2464,7 +4445,7 @@ tr.day-off-row td { background:#ede7f6; color:#512da8; font-style:italic; }
                     </div>
                 </div>
                 <?php if ($pending_count > 0): ?>
-                <div style="margin-top:10px; background:#fef2f2; border:1px solid #fecaca; border-radius:9px; padding:9px 12px; font-size:12px; color:#c62828; font-weight:600; display:flex; align-items:center; gap:7px; cursor:pointer;" onclick="openLateInbox()">
+                <div style="margin-top:10px; background:#fef2f2; border:1px solid #fecaca; padding:9px 12px; font-size:12px; color:#c62828; font-weight:600; display:flex; align-items:center; gap:7px; cursor:pointer;" onclick="openLateInbox()">
                     <i class="fas fa-inbox" style="font-size:14px;"></i>
                     <span><?= $pending_count ?> pending late request<?= $pending_count !== 1 ? 's' : '' ?></span>
                 </div>
@@ -2483,27 +4464,24 @@ tr.day-off-row td { background:#ede7f6; color:#512da8; font-style:italic; }
     <img id="modalImg">
 </div>
 
-<div id="toastContainer"></div>
-
 <!-- ══ ATTENDANCE LOG MODAL ══ -->
 <div id="attLogModal">
-    <div style="background:#fff; border-radius:18px; width:1100px; max-width:100%; box-shadow:0 28px 70px rgba(0,0,0,.25); animation:sm-in .3s cubic-bezier(.34,1.56,.64,1); margin:auto; overflow:hidden;">
-        <div style="background:linear-gradient(135deg,#1565c0,#1976d2); color:#fff; padding:18px 24px; display:flex; align-items:center; justify-content:space-between;">
-            <h3 style="margin:0; font-size:18px; font-weight:700; display:flex; align-items:center; gap:8px;">
+    <div class="alm-box">
+        <div class="alm-head">
+            <h3>
                 <i class="fas fa-clipboard-list"></i> Attendance Log
                 <span id="attLogTitle" style="font-weight:400; font-size:16px; opacity:0.9;"></span>
             </h3>
-            <button onclick="closeAttLogModal()" style="background:rgba(255,255,255,.15); border:none; color:#fff; border-radius:8px; padding:6px 12px; font-size:13px; font-weight:600; cursor:pointer;">
+            <button class="alm-close-btn" onclick="closeAttLogModal()">
                 <i class="fas fa-times"></i> Close
             </button>
         </div>
-        <div style="padding:20px 24px;">
-            <div style="display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:16px;">
+        <div class="alm-body">
+            <div class="alm-toolbar">
                 <input type="text" id="searchInput" placeholder="Search student...">
-                <div style="display:flex; align-items:center; gap:8px; background:#f5f5f5; padding:8px 12px; border-radius:8px;">
-                    <label style="font-size:13px; font-weight:600; color:#555; white-space:nowrap;">Month:</label>
-                    <select id="modalMonthFilter" onchange="onModalMonthChange()"
-                            style="padding:6px 10px; border:1px solid #ddd; border-radius:6px; font-size:13px;">
+                <div class="alm-group">
+                    <label>Month:</label>
+                    <select id="modalMonthFilter" onchange="onModalMonthChange()">
                         <?php
                         for ($m = strtotime($ojt_start_month); $m <= strtotime($month_max); $m = strtotime('+1 month', $m)) {
                             $month_val = date('Y-m', $m);
@@ -2513,25 +4491,20 @@ tr.day-off-row td { background:#ede7f6; color:#512da8; font-style:italic; }
                         ?>
                     </select>
                 </div>
-                <div style="display:flex; align-items:center; gap:6px; background:#f5f5f5; padding:6px 10px; border-radius:8px;">
-                    <button id="modalPrevDay" onclick="modalShiftDay(-1)"
-                        style="background:#1565c0; color:#fff; border:none; border-radius:6px; padding:5px 11px; font-size:13px; font-weight:700; cursor:pointer; transition:background .15s;"
-                        onmouseover="this.style.background='#0d47a1'" onmouseout="this.style.background='#1565c0'">&#8592;</button>
-                    <select id="modalDayFilter" onchange="modalGoToDay()"
-                            style="width:72px; padding:6px 8px; border:1px solid #ddd; border-radius:6px; font-size:13px;"></select>
-                    <button id="modalNextDay" onclick="modalShiftDay(1)"
-                        style="background:#1565c0; color:#fff; border:none; border-radius:6px; padding:5px 11px; font-size:13px; font-weight:700; cursor:pointer; transition:background .15s;"
-                        onmouseover="this.style.background='#0d47a1'" onmouseout="this.style.background='#1565c0'">&#8594;</button>
+                <div class="alm-group tight">
+                    <button id="modalPrevDay" class="alm-nav-btn" onclick="modalShiftDay(-1)">&#8592;</button>
+                    <select id="modalDayFilter" onchange="modalGoToDay()"></select>
+                    <button id="modalNextDay" class="alm-nav-btn" onclick="modalShiftDay(1)">&#8594;</button>
                 </div>
             </div>
 
-            <div id="attLogSpinner" style="display:none; text-align:center; padding:40px; color:#888; font-size:14px;">
-                <div style="display:inline-block; width:28px; height:28px; border:3px solid #e0e0e0; border-top-color:#1565c0; border-radius:50%; animation:spin .7s linear infinite; vertical-align:middle; margin-right:10px;"></div>
+            <div id="attLogSpinner" class="alm-spinner">
+                <i></i>
                 Loading attendance…
             </div>
 
             <div class="table-box" id="attLogTableBox">
-                <h2 id="attLogDateHeading" style="margin:0 0 12px; font-size:16px; color:#333;"></h2>
+                <h2 id="attLogDateHeading"></h2>
                 <div id="attLogWeekendNotice" style="display:none;" class="weekend-notice">
                     <i class="fas fa-umbrella-beach"></i>
                     <strong id="attLogWeekendDay"></strong> — Weekend. All students are <strong>Day Off</strong>.
@@ -2567,7 +4540,7 @@ tr.day-off-row td { background:#ede7f6; color:#512da8; font-style:italic; }
         <div class="as-body">
             <?php if ($isToday): ?>
             <p style="font-size:13px;color:#555;margin:0 0 16px;">Configure the attendance time windows for today. The wizard will guide you through AM duty, PM duty, and auto-scheduling.</p>
-            <button id="openWizardBtn" onclick="openWizardFromSettings()" style="display:inline-flex;align-items:center;gap:8px;padding:10px 20px;background:#1976d2;color:#fff;border:none;border-radius:9px;font-size:14px;font-weight:600;cursor:pointer;transition:background .2s;margin-bottom:4px;">
+            <button id="openWizardBtn" class="as-open-wizard" onclick="openWizardFromSettings()">
                 <i class="fas fa-magic"></i> Setup Attendance Schedule
             </button>
             <?php if ($current_settings): ?>
@@ -2586,6 +4559,67 @@ tr.day-off-row td { background:#ede7f6; color:#512da8; font-style:italic; }
         </div>
         <div class="as-footer">
             <button class="sm-action-btn print" onclick="closeAttSettings()">Close</button>
+        </div>
+    </div>
+</div>
+
+<!-- ══ MISSING DUTY TIMES FORM (required) ══ -->
+<div id="dutyGapOverlay" role="dialog" aria-modal="true" aria-labelledby="dgTitle">
+    <div id="dutyGapBox">
+        <div class="dg-head">
+            <h3><i class="fas fa-calendar-plus"></i><span id="dgTitle">Duty Times Required</span></h3>
+            <span class="dg-badge" id="dgSub"></span>
+        </div>
+        <p class="dg-msg" id="dgMessage"></p>
+        <ul class="sb-list" id="dgList"></ul>
+        <div class="dg-grid">
+            <div class="dg-group">
+                <label>Sign-In Opens <span class="required">*</span></label>
+                <input type="time" id="dg_ti_s">
+                <div class="help-text" id="dg_hint_in"></div>
+            </div>
+            <div class="dg-group">
+                <label>Sign-In Closes <span class="required">*</span></label>
+                <input type="time" id="dg_ti_e">
+                <div class="help-text" id="dg_hint_in2"></div>
+            </div>
+            <div class="dg-group">
+                <label>Sign-Out Opens <span class="required">*</span></label>
+                <input type="time" id="dg_to_s">
+                <div class="help-text"><i class="fas fa-info-circle"></i> Duty is counted up to this time (max 4 hours)</div>
+            </div>
+            <div class="dg-group">
+                <label>Sign-Out Closes <span class="required">*</span> <small style="font-weight:400;color:#8A93A6;">(grace only)</small></label>
+                <input type="time" id="dg_to_e">
+                <div class="help-text"><i class="fas fa-info-circle"></i> Grace period end</div>
+            </div>
+        </div>
+        <div class="dg-error" id="dgError"></div>
+        <p class="dg-note" id="dgTip"><i class="fas fa-envelope"></i> When you save, the schedule is applied to today and all remaining OJT weekdays, and an email about the updated attendance schedule is sent automatically to the administrators and your OJT trainees.</p>
+        <div class="dg-actions">
+            <button class="dg-submit" id="dgSaveBtn" type="button"><i class="fas fa-save"></i> Save &amp; Notify</button>
+        </div>
+    </div>
+</div>
+
+<!-- ══ CANNOT SKIP AM / PM DUTY POPUP ══ -->
+<div id="skipBlockOverlay" role="dialog" aria-modal="true" aria-labelledby="sbTitle">
+    <div id="skipBlockBox">
+        <div class="hp-header sb-header">
+            <span class="hp-icon sb-icon"><i class="fas fa-user-clock" id="sbIcon"></i></span>
+            <div class="sb-head-text">
+                <h3 id="sbTitle">Cannot Skip Duty</h3>
+                <p class="sb-sub" id="sbSub"></p>
+            </div>
+        </div>
+        <div class="hp-body">
+            <p id="sbMessage"></p>
+            <ul class="sb-list" id="sbList"></ul>
+            <p class="sb-tip" id="sbTip"></p>
+        </div>
+        <div class="hp-footer">
+            <button class="hp-btn-ok sb-retry" id="sbRetryBtn" type="button">Try Again</button>
+            <button class="hp-btn-continue" id="sbOkBtn" type="button" style="margin-left:auto;">Got it</button>
         </div>
     </div>
 </div>
@@ -2627,7 +4661,7 @@ tr.day-off-row td { background:#ede7f6; color:#512da8; font-style:italic; }
       <div class="wiz-body">
         <div class="skip-row">
           <label class="skip-checkbox">
-            <input type="checkbox" id="skipAmCheckbox" onchange="toggleAmFields()">
+            <input type="checkbox" id="skipAmCheckbox" onchange="guardSkipDuty('am')">
             <span><i class="fas fa-ban" style="color:#e65100;"></i> Skip AM Duty (No morning attendance required)</span>
           </label>
         </div>
@@ -2635,7 +4669,7 @@ tr.day-off-row td { background:#ede7f6; color:#512da8; font-style:italic; }
           <div class="field-row">
             <div class="field-group">
               <label>Sign-In Opens</label>
-              <input type="time" id="w_am_ti_s" onchange="validateAmInField(this)">
+              <input type="time" id="w_am_ti_s" onchange="validateAmInField(this); checkAmDutyLimit()">
               <div class="field-hint am-hint">Must be before 12:00 PM</div>
             </div>
             <div class="field-group">
@@ -2647,7 +4681,7 @@ tr.day-off-row td { background:#ede7f6; color:#512da8; font-style:italic; }
           <div class="field-row">
             <div class="field-group">
               <label>Sign-Out Opens</label>
-              <input type="time" id="w_am_to_s" onchange="clearAmError()">
+              <input type="time" id="w_am_to_s" onchange="clearAmError(); checkAmDutyLimit()">
               <div class="field-hint" style="color:#888;">Any time (AM or PM)</div>
             </div>
             <div class="field-group">
@@ -2678,7 +4712,7 @@ tr.day-off-row td { background:#ede7f6; color:#512da8; font-style:italic; }
       <div class="wiz-body">
         <div class="skip-row">
           <label class="skip-checkbox">
-            <input type="checkbox" id="skipPmCheckbox" onchange="togglePmFields()">
+            <input type="checkbox" id="skipPmCheckbox" onchange="guardSkipDuty('pm')">
             <span><i class="fas fa-ban" style="color:#1565c0;"></i> Skip PM Duty (No afternoon attendance required)</span>
           </label>
         </div>
@@ -2756,36 +4790,6 @@ tr.day-off-row td { background:#ede7f6; color:#512da8; font-style:italic; }
     </div>
   </div>
   <div class="edbg-body" id="emailDebugBody"></div>
-</div>
-
-<!-- ══ EMAIL SENDING LOADING OVERLAY ══ -->
-<div id="emailSendingOverlay">
-    <div id="emailSendingBox">
-        <div class="esb-header">
-            <div class="esb-spinner-wrap">
-                <div class="esb-spinner"></div>
-            </div>
-            <h3>Saving &amp; Notifying…</h3>
-            <p>Please wait while we save your schedule and send email notifications to all students and admins.</p>
-        </div>
-        <div class="esb-body">
-            <div class="esb-steps">
-                <div class="esb-step" id="esb-step-1">
-                    <div class="esb-step-icon" id="esb-icon-1"><i class="fas fa-save"></i></div>
-                    <span>Saving attendance settings…</span>
-                </div>
-                <div class="esb-step" id="esb-step-2">
-                    <div class="esb-step-icon" id="esb-icon-2"><i class="fas fa-user-graduate"></i></div>
-                    <span>Notifying students by email…</span>
-                </div>
-                <div class="esb-step" id="esb-step-3">
-                    <div class="esb-step-icon" id="esb-icon-3"><i class="fas fa-user-shield"></i></div>
-                    <span>Notifying administrators…</span>
-                </div>
-            </div>
-            <p class="esb-note">This may take a few moments depending on the number of recipients. Do not close this page.</p>
-        </div>
-    </div>
 </div>
 
 <!-- ══ LATE REQUEST INBOX MODAL ══ -->
@@ -2939,6 +4943,192 @@ function togglePmFields() {
     }
 }
 
+/* ── NEW (missing duty time): required form when trainees have a duty the current setting does not cover ── */
+const _dutyGap = <?= json_encode(attm_duty_gap($conn, $company_id), JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_PARTIAL_OUTPUT_ON_ERROR) ?>;
+let _dutyGapPeriod = null;
+function dgShowError(msg) { const el = document.getElementById('dgError'); el.textContent = msg; el.style.display = msg ? 'block' : 'none'; }
+function openDutyGap(gap) {
+    try {
+        if (!gap || !gap.ok || !gap.missing || !gap.missing.length || !gap.setting) return;
+        const per = gap.missing[0]; // 'am' | 'pm'
+        const L = per === 'am' ? 'AM' : 'PM';
+        const list = gap[per] || [];
+        _dutyGapPeriod = per;
+        const n = list.length;
+        document.getElementById('dgTitle').textContent = L + ' Duty Times Required';
+        document.getElementById('dgSub').textContent = n + ' OJT trainee' + (n > 1 ? 's' : '') + ' scheduled for ' + L + ' duty';
+        document.getElementById('dgMessage').textContent = 'Your current attendance setting has no ' + L + ' duty times, but the OJT trainee' + (n > 1 ? 's' : '') + ' below ' + (n > 1 ? 'are' : 'is') + ' scheduled for ' + L + ' duty. Please set the ' + L + ' duty times to continue.';
+        const ul = document.getElementById('dgList'); ul.innerHTML = '';
+        list.slice(0, 50).forEach(it => {
+            const li = document.createElement('li');
+            const a = document.createElement('span'); a.className = 'sb-name'; a.textContent = it.name;
+            const b = document.createElement('span'); b.className = 'sb-days'; b.textContent = it.days || '';
+            li.appendChild(a); li.appendChild(b); ul.appendChild(li);
+        });
+        ul.style.display = n ? '' : 'none';
+        const hint = per === 'am' ? 'Must be before 12:00 PM' : 'Must be 12:00 PM or later';
+        document.getElementById('dg_hint_in').textContent = hint;
+        document.getElementById('dg_hint_in2').textContent = hint;
+        ['dg_ti_s','dg_ti_e','dg_to_s','dg_to_e'].forEach(id => { const el = document.getElementById(id); el.value = ''; el.classList.remove('input-error'); });
+        dgShowError('');
+        document.getElementById('dutyGapOverlay').classList.add('open');
+    } catch (e) { console.warn('Duty gap form could not be opened.', e); }
+}
+function dgSave() {
+    const per = _dutyGapPeriod, st = _dutyGap && _dutyGap.setting;
+    if (!per || !st) return;
+    const g = id => document.getElementById(id).value;
+    const ids = ['dg_ti_s','dg_ti_e','dg_to_s','dg_to_e'];
+    ids.forEach(id => document.getElementById(id).classList.remove('input-error'));
+    if (ids.some(id => !g(id))) { ids.forEach(id => { if (!g(id)) document.getElementById(id).classList.add('input-error'); }); dgShowError('Please fill in all four ' + per.toUpperCase() + ' time fields.'); return; }
+    const t = timeToMins;
+    if (per === 'am' && (t(g('dg_ti_s')) >= 720 || t(g('dg_ti_e')) >= 720)) { ['dg_ti_s','dg_ti_e'].forEach(id => document.getElementById(id).classList.add('input-error')); dgShowError('AM Sign-In times must be before 12:00 PM.'); return; }
+    if (per === 'pm' && ids.some(id => t(g(id)) < 720)) { ids.forEach(id => { if (t(g(id)) < 720) document.getElementById(id).classList.add('input-error'); }); dgShowError('All PM times must be 12:00 PM or later.'); return; }
+    let mins = t(g('dg_to_s')) - t(g('dg_ti_s'));
+    if (per === 'pm' && mins < 0) mins += 1440; // PM sign-out earlier than sign-in = next day
+    if (mins <= 0) { document.getElementById('dg_to_s').classList.add('input-error'); dgShowError('Sign-Out Opens must be after Sign-In Opens.'); return; }
+    if (mins > MAX_PERIOD_MINS) { document.getElementById('dg_to_s').classList.add('input-error'); dgShowError('The ' + per.toUpperCase() + ' duty is ' + Math.floor(mins / 60) + 'h' + (mins % 60 ? ' ' + (mins % 60) + 'm' : '') + ' — the maximum is 4 hours (AM 4h + PM 4h = 8 hours a day). Please shorten the Sign-In Opens → Sign-Out Opens window.'); return; }
+    dgShowError('');
+
+    const fd = new FormData();
+    fd.append('date', '<?= date('Y-m-d') ?>');
+    fd.append('skip_am', '0'); fd.append('skip_pm', '0');
+    const cut = v => v ? String(v).substring(0, 5) : '';
+    const keep = (name, v) => fd.append(name, cut(v));
+    if (per === 'am') {
+        fd.append('am_time_in_start', g('dg_ti_s')); fd.append('am_time_in_end', g('dg_ti_e'));
+        fd.append('am_time_out_start', g('dg_to_s')); fd.append('am_time_out_end', g('dg_to_e'));
+        keep('pm_time_in_start', st.pm_time_in_start); keep('pm_time_in_end', st.pm_time_in_end);
+        keep('pm_time_out_start', st.pm_time_out_start); keep('pm_time_out_end', st.pm_time_out_end);
+    } else {
+        keep('am_time_in_start', st.am_time_in_start); keep('am_time_in_end', st.am_time_in_end);
+        keep('am_time_out_start', st.am_time_out_start); keep('am_time_out_end', st.am_time_out_end);
+        fd.append('pm_time_in_start', g('dg_ti_s')); fd.append('pm_time_in_end', g('dg_ti_e'));
+        fd.append('pm_time_out_start', g('dg_to_s')); fd.append('pm_time_out_end', g('dg_to_e'));
+    }
+    fd.append('is_auto', '1'); fd.append('auto_type', 'all_remaining');
+
+    const btn = document.getElementById('dgSaveBtn');
+    btn.disabled = true;
+    showActionLoading('Saving & notifying');
+    let done = false;
+    const fin = () => { if (done) return; done = true; btn.disabled = false; hideActionLoading(); };
+    fetch(window.location.pathname, { method: 'POST', headers: { 'X-Requested-With': 'XMLHttpRequest' }, body: fd, credentials: 'same-origin', cache: 'no-store' })
+    .then(r => r.text())
+    .then(raw => {
+        fin();
+        let data = null; try { data = JSON.parse(raw); } catch (e) { data = null; }
+        if (!data) { dgShowError('The server sent an unexpected reply, so it is not certain the schedule was saved. Please reload the page and check the Attendance Settings.'); return; }
+        if (data.success) {
+            document.getElementById('dutyGapOverlay').classList.remove('open');
+            _dutyGapPeriod = null;
+            if (data.email_errors && data.email_errors.length > 0) setTimeout(() => renderEmailDebug(data.email_errors), 600);
+            showGlobalResult('success', 'Attendance Schedule Updated', 'The ' + per.toUpperCase() + ' duty times were saved and the administrators and OJT trainees are being notified by email.', 5000);
+            liveRefreshNow(true);
+        } else {
+            dgShowError(data.message || 'The attendance schedule could not be saved. Please try again.');
+        }
+    })
+    .catch(() => { fin(); dgShowError('Could not reach the server. Please check your connection and try again.'); });
+}
+document.getElementById('dgSaveBtn').addEventListener('click', dgSave);
+openDutyGap(_dutyGap); // required: shown on every visit until the missing duty times are saved
+
+/* ── NEW: skipping AM / PM duty is only allowed when no OJT trainee is scheduled for it ── */
+let _skipBlockRetry = null;
+function closeSkipBlock() { document.getElementById('skipBlockOverlay').classList.remove('open'); _skipBlockRetry = null; }
+function showSkipBlock(opts) {
+    // opts: {title, sub, message, items:[{name,days}], total, tip, icon, retry}
+    const $ = id => document.getElementById(id);
+    $('sbTitle').textContent   = opts.title;
+    $('sbSub').textContent     = opts.sub || '';
+    $('sbSub').style.display   = opts.sub ? '' : 'none';
+    $('sbMessage').textContent = opts.message;
+    $('sbIcon').className      = 'fas ' + (opts.icon || 'fa-user-clock');
+    const list = $('sbList');
+    list.innerHTML = '';
+    const items = opts.items || [];
+    items.slice(0, 50).forEach(it => {
+        const li = document.createElement('li');
+        const n = document.createElement('span'); n.className = 'sb-name'; n.textContent = it.name;
+        const d = document.createElement('span'); d.className = 'sb-days'; d.textContent = it.days || '';
+        li.appendChild(n); li.appendChild(d); list.appendChild(li);
+    });
+    if (items.length > 50) {
+        const li = document.createElement('li'); li.className = 'sb-more';
+        li.textContent = '…and ' + (items.length - 50) + ' more trainee(s)';
+        list.appendChild(li);
+    }
+    list.style.display = items.length ? '' : 'none';
+    $('sbTip').textContent = opts.tip || '';
+    $('sbTip').style.display = opts.tip ? '' : 'none';
+    const retry = $('sbRetryBtn');
+    _skipBlockRetry = opts.retry || null;
+    retry.style.display = opts.retry ? 'inline-block' : 'none';
+    $('skipBlockOverlay').classList.add('open');
+    try { $('sbOkBtn').focus(); } catch (e) {}
+}
+(function () {
+    const ov = document.getElementById('skipBlockOverlay');
+    document.getElementById('sbOkBtn').addEventListener('click', closeSkipBlock);
+    document.getElementById('sbRetryBtn').addEventListener('click', function () { const fn = _skipBlockRetry; closeSkipBlock(); if (fn) fn(); });
+    ov.addEventListener('click', function (e) { if (e.target === this) closeSkipBlock(); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && ov.classList.contains('open')) closeSkipBlock(); });
+})();
+
+function guardSkipDuty(which) {
+    const cb = document.getElementById(which === 'am' ? 'skipAmCheckbox' : 'skipPmCheckbox');
+    const apply = () => (which === 'am' ? toggleAmFields() : togglePmFields());
+    if (!cb.checked) { apply(); return; }          // un-skipping needs no check
+
+    const label = which === 'am' ? 'AM' : 'PM';
+    const period = which === 'am' ? 'morning (Day schedule)' : 'afternoon/evening (Evening schedule)';
+    const fd = new FormData();
+    fd.append('action', 'check_skip_conflicts');
+    fd.append('skip_am', which === 'am' ? '1' : '0');
+    fd.append('skip_pm', which === 'pm' ? '1' : '0');
+    cb.disabled = true;
+    showActionLoading('Checking OJT trainee schedules');
+    const done = () => { cb.disabled = false; hideActionLoading(); };
+    const fail = (title, msg, sub) => {
+        cb.checked = false; apply();
+        showSkipBlock({ title: title, sub: sub, message: msg, icon: 'fa-exclamation-triangle',
+            tip: 'Your attendance settings were not changed. You can try again in a moment.',
+            retry: () => { cb.checked = true; guardSkipDuty(which); } });
+    };
+
+    fetch(window.location.pathname, { method: 'POST', headers: { 'X-Requested-With': 'XMLHttpRequest' }, body: fd, credentials: 'same-origin', cache: 'no-store' })
+    .then(r => r.text())
+    .then(raw => {
+        done();
+        let data = null;
+        try { data = JSON.parse(raw); } catch (e) { data = null; }
+        if (!data || !data.ok) {
+            fail('Schedule Check Failed', (data && data.error) || 'We could not verify the OJT trainees\' schedules, so the skip was cancelled to keep their schedules safe.', 'Unable to verify');
+            return;
+        }
+        const list = (which === 'am' ? data.am : data.pm) || [];
+        if (list.length) {
+            cb.checked = false; apply();
+            const n = list.length;
+            showSkipBlock({
+                title: 'Cannot Skip ' + label + ' Duty',
+                sub: n + ' OJT trainee' + (n > 1 ? 's' : '') + ' scheduled for ' + label + ' duty',
+                message: 'The ' + label + ' duty cannot be skipped because it would affect the schedule of the OJT trainee' + (n > 1 ? 's' : '') + ' listed below, who ' + (n > 1 ? 'are' : 'is') + ' registered to your company and required to report in the ' + period + '.',
+                items: list,
+                tip: 'Tip: keep the ' + label + ' duty and adjust its time windows instead. To skip it, the trainee\'s schedule must first be changed so that nobody is assigned to ' + label + ' duty.',
+                icon: 'fa-user-clock'
+            });
+            return;
+        }
+        apply();
+    })
+    .catch(() => {
+        done();
+        fail('Connection Problem', 'We could not reach the server to verify the OJT trainees\' schedules, so the skip was cancelled. Please check your internet connection and try again.', 'Unable to verify');
+    });
+}
+
 /* ── ATT LOG MODAL ── */
 function openAttLogModal() {
     const today = new Date();
@@ -3000,13 +5190,6 @@ function printSummary() {
 }
 
 /* ── TOAST ── */
-function showToast(message, type="info") {
-    let t = document.createElement("div"); t.className="toast " + type; t.innerText=message;
-    document.getElementById("toastContainer").appendChild(t);
-    setTimeout(()=>t.classList.add("show"),100);
-    setTimeout(()=>{ t.classList.remove("show"); setTimeout(()=>t.remove(),300); },4500);
-}
-
 /* ── LIVE UPDATES (UPDATED: replaces the old 45-second automatic page reload) ──
    Every few seconds the page asks the server for a tiny fingerprint of its
    data. Only when the fingerprint changes (new attendance, late request,
@@ -3016,7 +5199,6 @@ function showToast(message, type="info") {
    modals are kept, and the user never has to reload manually. */
 let _liveSignature  = '<?= attm_live_signature($conn, $company_id) ?>';
 let _liveBusy       = false;
-const LIVE_POLL_MS  = 10000;
 
 function liveRunScripts(container, scriptTexts) {
     scriptTexts.forEach(code => {
@@ -3036,12 +5218,33 @@ function liveSwapSection(name, newDoc) {
         if (!sc.src) inlineScripts.push(sc.textContent);
         sc.remove();
     });
+    let oldChart = null;
     if (name === 'chart' && window.Chart && typeof Chart.getChart === 'function') {
         const oldCanvas = document.getElementById('attendanceBarChart');
-        const oldChart  = oldCanvas ? Chart.getChart(oldCanvas) : null;
-        if (oldChart) oldChart.destroy();
+        oldChart = oldCanvas ? Chart.getChart(oldCanvas) : null;
     }
     const fresh = document.importNode(nxt, true);
+    // NEW (real-time graph): keep the existing chart and animate it to the new numbers instead of rebuilding it
+    // (no flicker, bars move as attendance is recorded). Falls back to rebuilding when the data cannot be read.
+    if (oldChart) {
+        try {
+            const txt = inlineScripts.join(' ');
+            const pick = k => { const i = txt.indexOf('const ' + k + ' '); if (i < 0) return null; const a = txt.indexOf('[', i), b = txt.indexOf(']', a); return (a < 0 || b < 0) ? null : JSON.parse(txt.slice(a, b + 1)); };
+            const labels = pick('labels'), present = pick('present'), incomplete = pick('incomplete'), absent = pick('absent');
+            const oldWrap = cur.querySelector('.chart-canvas-wrap'), newWrap = fresh.querySelector('.chart-canvas-wrap');
+            if (labels && present && incomplete && absent && oldWrap && newWrap && oldChart.data.datasets.length >= 3) {
+                newWrap.replaceWith(oldWrap);
+                cur.replaceWith(fresh);
+                oldChart.data.labels = labels;
+                oldChart.data.datasets[0].data = present;
+                oldChart.data.datasets[1].data = incomplete;
+                oldChart.data.datasets[2].data = absent;
+                oldChart.update();
+                return true;
+            }
+        } catch (e) { /* fall through to the rebuild below */ }
+    }
+    if (oldChart) oldChart.destroy();
     cur.replaceWith(fresh);
     liveRunScripts(fresh, inlineScripts);
     return true;
@@ -3058,6 +5261,14 @@ function liveApplyPage(html) {
     if (setOverlay && !setOverlay.classList.contains('open') && newSetBox && curSetBox && curSetBox.innerHTML !== newSetBox.innerHTML) {
         curSetBox.innerHTML = newSetBox.innerHTML;
     }
+    // Sidebar badges that are not inside a swapped panel (OJT Student List / Company Reports)
+    ['sidebarInboxBadge', 'sidebarReportBadge'].forEach(id => {
+        const cur = document.getElementById(id), nxt = newDoc.getElementById(id);
+        if (!cur || !nxt) return;
+        const hide = nxt.style.display === 'none';
+        if (cur.textContent !== nxt.textContent) { cur.textContent = nxt.textContent; changed = true; }
+        if ((cur.style.display === 'none') !== hide) { cur.style.display = hide ? 'none' : ''; changed = true; }
+    });
     // Wizard scope line ("Applies to today + N remaining OJT weekday(s)…")
     const newScope = newDoc.getElementById('sumScope'), curScope = document.getElementById('sumScope');
     if (newScope && curScope) curScope.innerHTML = newScope.innerHTML;
@@ -3065,9 +5276,13 @@ function liveApplyPage(html) {
     // First-attendance maps used by the Attendance Log popup (NOT STARTED rows)
     const byId   = html.match(/const _firstAttendanceById\s*=\s*(\{[\s\S]*?\});/);
     const byName = html.match(/const _firstAttendanceByName\s*=\s*(\{[\s\S]*?\});/);
+    const byEnd = html.match(/const _ojtEndById\s*=\s*(\{[\s\S]*?\});\s*\n/); // NEW (OJT ends at the required hours)
+    const bySched = html.match(/const _schedById\s*=\s*(\{[\s\S]*?\});\s*\n/); // NEW (student schedule)
     try {
         if (byId)   { const o = JSON.parse(byId[1]);   Object.keys(_firstAttendanceById).forEach(k => delete _firstAttendanceById[k]);   Object.assign(_firstAttendanceById, o); }
         if (byName) { const o = JSON.parse(byName[1]); Object.keys(_firstAttendanceByName).forEach(k => delete _firstAttendanceByName[k]); Object.assign(_firstAttendanceByName, o); }
+        if (byEnd) { const o = JSON.parse(byEnd[1]); Object.keys(_ojtEndById).forEach(k => delete _ojtEndById[k]); Object.assign(_ojtEndById, o); }
+        if (bySched) { const o = JSON.parse(bySched[1]); Object.keys(_schedById).forEach(k => delete _schedById[k]); Object.assign(_schedById, o); }
     } catch (e) {}
 
     // Refresh open popups that show live data
@@ -3079,26 +5294,62 @@ function liveApplyPage(html) {
 function liveRefreshNow(force) {
     if (_liveBusy) return Promise.resolve(false);
     _liveBusy = true;
-    return fetch(window.location.pathname + '?action=live_signature', { headers: { 'X-Requested-With': 'XMLHttpRequest' }, cache: 'no-store' })
-        .then(r => r.json())
+    return fetch(window.location.pathname + '?action=live_signature', { headers: { 'X-Requested-With': 'XMLHttpRequest' }, cache: 'no-store', credentials: 'same-origin' })
+        .then(r => {
+            if (!r.ok) throw new Error('http ' + r.status);
+            return r.json(); // a plain-text reply (session ended / access denied) is not JSON → counted as a failure below
+        })
         .then(data => {
-            if (!data || !data.success) return false;
+            if (!data || !data.success) throw new Error('bad signature reply');
+            _liveFails = 0; liveSetStatus(true);
             if (!force && data.signature === _liveSignature) return false;
             return fetch(window.location.href, { cache: 'no-store', credentials: 'same-origin' })
-                .then(r => r.text())
+                .then(r => { if (!r.ok) throw new Error('http ' + r.status); return r.text(); })
                 .then(html => {
-                    _liveSignature = data.signature;
                     const changed = liveApplyPage(html);
-                    if (changed && !force) showToast('Attendance data updated.', 'info');
+                    _liveSignature = data.signature; // remembered only after the new data was applied, so a failed apply is retried
                     return changed;
                 });
         })
-        .catch(() => false)
+        .catch(() => {
+            _liveFails++;
+            if (_liveFails >= LIVE_FAIL_LIMIT * 2) _liveStopped = true; // persistent failure (e.g. logged out): stop hammering the server
+            liveSetStatus(false);
+            return false;
+        })
         .finally(() => { _liveBusy = false; });
 }
-setInterval(() => { if (!document.hidden) liveRefreshNow(false); }, LIVE_POLL_MS);
-document.addEventListener('visibilitychange', () => { if (!document.hidden) liveRefreshNow(false); });
-window.addEventListener('focus', () => liveRefreshNow(false));
+/* Automatic live detection (no page reload): every LIVE_POLL_MS the page asks for the data fingerprint (attm_live_signature);
+   only when it differs from the last one seen is the fresh page fetched in the background and the changed panels swapped in place
+   (liveApplyPage). Paused while the tab is hidden, checked again at once when it becomes visible, and backed off while the server
+   cannot be reached or the session has ended — the green "live" dot turns red meanwhile. */
+const LIVE_POLL_MS = 3000, LIVE_POLL_MAX_MS = 60000, LIVE_FAIL_LIMIT = 5; // UPDATED (real-time graph): check every 3 s (was 10 s); failures still back off up to 60 s
+let _liveFails = 0, _liveTimer = null, _liveStopped = false;
+function liveSetStatus(ok) {
+    const dot = document.querySelector('.dtw-live-dot');
+    if (!dot) return;
+    dot.classList.toggle('is-off', !ok);
+    dot.title = ok ? 'Live updates on' : (_liveStopped ? 'Live updates stopped — reload the page' : 'Live updates paused — connection problem');
+}
+function liveSchedule() {
+    clearTimeout(_liveTimer);
+    if (_liveStopped) return;
+    const wait = Math.min(LIVE_POLL_MAX_MS, LIVE_POLL_MS * Math.pow(2, Math.min(_liveFails, 3)));
+    _liveTimer = setTimeout(liveTick, wait);
+}
+function liveTick() {
+    if (document.hidden) { liveSchedule(); return; }
+    liveRefreshNow(false).finally(liveSchedule);
+}
+function liveKick() { // tab shown / window focused: check right away, then carry on
+    if (_liveStopped || document.hidden) return;
+    clearTimeout(_liveTimer);
+    liveTick();
+}
+document.addEventListener('visibilitychange', liveKick);
+window.addEventListener('focus', liveKick);
+window.addEventListener('online', () => { _liveFails = 0; liveKick(); });
+liveSchedule();
 
 /* ── EMAIL DEBUG ── */
 function renderEmailDebug(emailErrors) {
@@ -3116,41 +5367,8 @@ function renderEmailDebug(emailErrors) {
     panel.classList.add('open');
 }
 function closeEmailDebug() { document.getElementById('emailDebugPanel').classList.remove('open'); }
-function copyEmailDebug() { navigator.clipboard.writeText(document.getElementById('emailDebugBody').innerText).then(()=>showToast('Copied','info')); }
+function copyEmailDebug() { navigator.clipboard.writeText(document.getElementById('emailDebugBody').innerText).then(()=>{}); }
 function escHtml(str) { return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
-
-/* ── EMAIL SENDING LOADING OVERLAY ── */
-let _esbStepTimer = null;
-function showEmailSendingOverlay() {
-    [1,2,3].forEach(n => {
-        document.getElementById('esb-step-'+n).classList.remove('active','done');
-        document.getElementById('esb-icon-'+n).innerHTML = ['<i class="fas fa-save"></i>','<i class="fas fa-user-graduate"></i>','<i class="fas fa-user-shield"></i>'][n-1];
-    });
-    document.getElementById('esb-step-1').classList.add('active');
-    document.getElementById('emailSendingOverlay').classList.add('open');
-    _esbStepTimer = setTimeout(() => {
-        document.getElementById('esb-step-1').classList.remove('active');
-        document.getElementById('esb-step-1').classList.add('done');
-        document.getElementById('esb-icon-1').innerHTML = '<i class="fas fa-check"></i>';
-        document.getElementById('esb-step-2').classList.add('active');
-    }, 800);
-}
-function advanceEmailSendingOverlay() {
-    clearTimeout(_esbStepTimer);
-    document.getElementById('esb-step-1').classList.remove('active');
-    document.getElementById('esb-step-1').classList.add('done');
-    document.getElementById('esb-icon-1').innerHTML = '<i class="fas fa-check"></i>';
-    document.getElementById('esb-step-2').classList.remove('active');
-    document.getElementById('esb-step-2').classList.add('done');
-    document.getElementById('esb-icon-2').innerHTML = '<i class="fas fa-check"></i>';
-    document.getElementById('esb-step-3').classList.remove('active');
-    document.getElementById('esb-step-3').classList.add('done');
-    document.getElementById('esb-icon-3').innerHTML = '<i class="fas fa-check"></i>';
-}
-function hideEmailSendingOverlay() {
-    clearTimeout(_esbStepTimer);
-    document.getElementById('emailSendingOverlay').classList.remove('open');
-}
 
 /* ── 8-HOUR POPUP ── */
 function showHoursPopup(amMins, pmMins) {
@@ -3166,7 +5384,20 @@ function showHoursPopup(amMins, pmMins) {
     const hpMsg   = document.getElementById('hpMessage');
     const hpCont  = document.getElementById('hpContinueBtn');
     if (!hpTitle.dataset.orig) { hpTitle.dataset.orig = hpTitle.innerHTML; hpMsg.dataset.orig = hpMsg.innerHTML; }
-    if (total > MAX_DUTY_MINS) {
+    const amOver = amMins > MAX_PERIOD_MINS, pmOver = pmMins > MAX_PERIOD_MINS;
+    document.getElementById('hp_am_hrs').textContent = fmtMins(amMins) + (amOver ? ' — over the 4h limit' : '');
+    document.getElementById('hp_pm_hrs').textContent = fmtMins(pmMins) + (pmOver ? ' — over the 4h limit' : '');
+    if (amOver || pmOver) {
+        // NEW (4-hour limit per duty): each of AM / PM may be at most 4 hours
+        const which = amOver && pmOver ? 'AM and PM Duty Exceed' : (amOver ? 'AM Duty Exceeds' : 'PM Duty Exceeds');
+        const over  = amOver ? amMins : pmMins;
+        const lbl   = amOver && pmOver ? 'Each duty period' : (amOver ? 'The AM duty' : 'The PM duty');
+        hpTitle.innerHTML = which + ' 4 Hours';
+        hpMsg.innerHTML   = 'Almost there! ' + lbl + ' can be at most <strong>4 hours</strong> (AM 4h + PM 4h = <strong>8 hours</strong> a day). ' +
+            (amOver && pmOver ? 'Both are currently over the limit' : 'It is currently <strong>' + fmtMins(over) + '</strong>') +
+            ', so this schedule cannot be saved. Please shorten the Sign-In Opens → Sign-Out Opens window to 4 hours or less.';
+        hpCont.style.display = 'none';
+    } else if (total > MAX_DUTY_MINS) {
         hpTitle.innerHTML = 'Schedule Exceeds 8 Hours';
         hpMsg.innerHTML   = 'The combined AM and PM duty time is <strong>' + fmtMins(total) + '</strong>. The maximum allowed is <strong>8 hours</strong> per day, so this schedule cannot be saved. Please shorten the time windows.';
         hpCont.style.display = 'none';
@@ -3178,6 +5409,16 @@ function showHoursPopup(amMins, pmMins) {
     document.getElementById('hoursPopupOverlay').classList.add('open');
 }
 const MAX_DUTY_MINS = 480; // UPDATED (8-hour maximum)
+const MAX_PERIOD_MINS = 240; // NEW (4-hour limit per duty)
+function wizardPeriodMins() {
+    const g = id => document.getElementById(id).value;
+    const skipAm = document.getElementById('skipAmCheckbox').checked;
+    const skipPm = document.getElementById('skipPmCheckbox').checked;
+    return {
+        am: skipAm ? 0 : calcDutyMins('w_am_ti_s','w_am_to_s'),
+        pm: skipPm ? 0 : ((g('w_pm_ti_s')&&g('w_pm_to_s'))?calcDutyMins('w_pm_ti_s','w_pm_to_s'):0)
+    };
+}
 function wizardDutyTotalMins() {
     const g = id => document.getElementById(id).value;
     const skipAm = document.getElementById('skipAmCheckbox').checked;
@@ -3188,9 +5429,8 @@ function wizardDutyTotalMins() {
 }
 function blockIfOverMax() {
     const total = wizardDutyTotalMins();
-    if (total > MAX_DUTY_MINS) {
-        const h=Math.floor(total/60), m=total%60;
-        showToast('Schedule is '+h+'h'+(m?' '+m+'m':'')+' — the maximum allowed is 8 hours per day.','warning');
+    const per = wizardPeriodMins();
+    if (total > MAX_DUTY_MINS || per.am > MAX_PERIOD_MINS || per.pm > MAX_PERIOD_MINS) { // NEW (4-hour limit per duty)
         return true;
     }
     return false;
@@ -3200,7 +5440,10 @@ function calcDutyMins(startId, outStartId) {
     const s=document.getElementById(startId).value, e=document.getElementById(outStartId).value;
     if (!s || !e) return 0;
     const [sh,sm]=s.split(':').map(Number), [eh,em]=e.split(':').map(Number);
-    return Math.max(0,(eh*60+em)-(sh*60+sm));
+    let diff=(eh*60+em)-(sh*60+sm);
+    // NEW: a PM sign-out earlier than its sign-in (e.g. 11:00 PM → 12:00 PM) means the NEXT day
+    if (diff<0 && startId.indexOf('w_pm')===0) diff+=24*60;
+    return Math.max(0,diff);
 }
 
 /* ── CONTINUE ANYWAY ── */
@@ -3260,6 +5503,24 @@ function validateAmInField(input) {
     }
 }
 
+/* NEW (4-hour limit per duty): as soon as the AM Sign-In Opens and Sign-Out Opens are both filled, warn right away */
+function checkAmDutyLimit() {
+    try {
+        if (document.getElementById('skipAmCheckbox').checked) return;
+        const s = document.getElementById('w_am_ti_s').value, e = document.getElementById('w_am_to_s').value;
+        if (!s || !e || timeToMins(s) >= 12 * 60) return; // wait until both are filled; noon error is handled by validateAmInField
+        const amMins = calcDutyMins('w_am_ti_s', 'w_am_to_s');
+        if (amMins > MAX_PERIOD_MINS) {
+            const h = Math.floor(amMins / 60), m = amMins % 60;
+            showAmError('The AM duty is ' + h + 'h' + (m ? ' ' + m + 'm' : '') + ' — the maximum is 4 hours. Please shorten the Sign-In Opens → Sign-Out Opens window.');
+            document.getElementById('w_am_to_s').classList.add('input-error');
+            showHoursPopup(amMins, 0);
+        } else {
+            document.getElementById('w_am_to_s').classList.remove('input-error');
+        }
+    } catch (err) { /* never block the wizard because of this helper */ }
+}
+
 function validatePmField(input) {
     if (document.getElementById('skipPmCheckbox').checked) return;
     const mins = timeToMins(input.value);
@@ -3270,7 +5531,26 @@ function validatePmField(input) {
     } else {
         input.classList.remove('input-error');
         clearPmError();
+        if (input.id === 'w_pm_ti_s' || input.id === 'w_pm_to_s') checkPmDutyLimit();
     }
+}
+/* NEW (4-hour limit per duty): same instant check for the PM Sign-In Opens → Sign-Out Opens window */
+function checkPmDutyLimit() {
+    try {
+        if (document.getElementById('skipPmCheckbox').checked) return;
+        const s = document.getElementById('w_pm_ti_s').value, e = document.getElementById('w_pm_to_s').value;
+        if (!s || !e || timeToMins(s) < 12 * 60 || timeToMins(e) < 12 * 60) return;
+        const pmMins = calcDutyMins('w_pm_ti_s', 'w_pm_to_s');
+        if (pmMins > MAX_PERIOD_MINS) {
+            const h = Math.floor(pmMins / 60), m = pmMins % 60;
+            const next = timeToMins(e) < timeToMins(s) ? ' (the Sign-Out time is read as the next day)' : '';
+            showPmError('The PM duty is ' + h + 'h' + (m ? ' ' + m + 'm' : '') + next + ' — the maximum is 4 hours. Please shorten the Sign-In Opens → Sign-Out Opens window.');
+            document.getElementById('w_pm_to_s').classList.add('input-error');
+            showHoursPopup(0, pmMins);
+        } else {
+            document.getElementById('w_pm_to_s').classList.remove('input-error');
+        }
+    } catch (err) { /* never block the wizard because of this helper */ }
 }
 
 function showAmError(msg){const el=document.getElementById('amErrorMsg');el.textContent=msg;el.style.display='block';}
@@ -3312,14 +5592,13 @@ function wizNext(step){
     const skipPm = document.getElementById('skipPmCheckbox').checked;
 
     if (skipAm && skipPm) {
-        showToast('You cannot skip both AM and PM duty times.','warning');
         return;
     }
 
     if(step===1){
         if (!skipAm) {
             if(!g('w_am_ti_s')||!g('w_am_ti_e')||!g('w_am_to_s')||!g('w_am_to_e')){
-                showToast('Please fill all AM time fields.','warning'); return;
+                return;
             }
             let hasError = false;
             ['w_am_ti_s','w_am_ti_e'].forEach(id=>{
@@ -3333,13 +5612,17 @@ function wizNext(step){
             }
         }
         clearAmError();
+        if (!skipAm) { // NEW (4-hour limit per duty): stop right at the AM step
+            const amNow = calcDutyMins('w_am_ti_s','w_am_to_s');
+            if (amNow > MAX_PERIOD_MINS) { showHoursPopup(amNow, 0); return; }
+        }
         showWizStep(2);
 
     } else if(step===2){
         if (!skipPm) {
             const pmAny=g('w_pm_ti_s')||g('w_pm_ti_e')||g('w_pm_to_s')||g('w_pm_to_e');
             const pmAll=g('w_pm_ti_s')&&g('w_pm_ti_e')&&g('w_pm_to_s')&&g('w_pm_to_e');
-            if(pmAny&&!pmAll){showToast('Fill all PM fields or leave all blank to skip.','warning');return;}
+            if(pmAny&&!pmAll){return;}
             if(pmAll){
                 let hasPmError=false;
                 ['w_pm_ti_s','w_pm_ti_e','w_pm_to_s','w_pm_to_e'].forEach(id=>{
@@ -3353,6 +5636,11 @@ function wizNext(step){
         const amMins = skipAm ? 0 : calcDutyMins('w_am_ti_s','w_am_to_s');
         const pmMins = skipPm ? 0 : (g('w_pm_ti_s')&&g('w_pm_to_s') ? calcDutyMins('w_pm_ti_s','w_pm_to_s') : 0);
         const total  = amMins + pmMins;
+
+        if (amMins > MAX_PERIOD_MINS || pmMins > MAX_PERIOD_MINS) { // NEW (4-hour limit per duty)
+            showHoursPopup(amMins, pmMins);
+            return;
+        }
 
         const amHasValues = !skipAm && g('w_am_ti_s') && g('w_am_to_s');
         const pmHasValues = !skipPm && g('w_pm_ti_s') && g('w_pm_to_s');
@@ -3392,12 +5680,11 @@ function wizSave(){
 
     if (skipAm && skipPm) {
         btn.classList.remove('loading'); btn.innerHTML='<i class="fas fa-save"></i> Save & Notify';
-        showToast('You cannot skip both AM and PM duty times.','warning');
         return;
     }
 
     closeWizard();
-    showEmailSendingOverlay();
+    showActionLoading('Saving & notifying');
 
     const g=id=>document.getElementById(id).value;
     const fd=new FormData();
@@ -3415,33 +5702,31 @@ function wizSave(){
     fd.append('is_auto','1');
     fd.append('auto_type','all_remaining');
 
+    let _saveDone = false;
+    const finishSave = () => { if (_saveDone) return; _saveDone = true; btn.classList.remove('loading'); btn.innerHTML='<i class="fas fa-save"></i> Save & Notify'; hideActionLoading(); };
     fetch(window.location.pathname,{method:'POST',headers:{'X-Requested-With':'XMLHttpRequest'},body:fd})
     .then(r=>r.text())
     .then(rawText=>{
-        btn.classList.remove('loading'); btn.innerHTML='<i class="fas fa-save"></i> Save & Notify';
-        advanceEmailSendingOverlay();
-        setTimeout(() => {
-            hideEmailSendingOverlay();
-            let data=null;
-            try{data=JSON.parse(rawText);}catch(e){showToast('Unexpected server response.','error');console.error(e,rawText);return;}
-            if(data.success){
-                showToast(''+data.message,'success');
-                if(data.total_students>0){
-                    if(data.notified===data.total_students) setTimeout(()=>showToast(`${data.notified} student(s) notified.`,'info'),700);
-                    else if(data.notified>0) setTimeout(()=>showToast(`${data.notified}/${data.total_students} notified — see details.`,'warning'),700);
-                    else setTimeout(()=>showToast('Email delivery failed — see details.','error'),700);
-                }
-                if(data.admin_notified&&data.admin_notified>0) setTimeout(()=>showToast(`${data.admin_notified} admin(s) also notified.`,'info'),1200);
-                if(data.email_errors&&data.email_errors.length>0) setTimeout(()=>renderEmailDebug(data.email_errors),1400);
-                if(data.db_errors&&data.db_errors.length>0){setTimeout(()=>showToast(`${data.db_errors.length} DB error(s).`,'warning'),1800);console.warn('DB errors:',data.db_errors);}
-                setTimeout(()=>liveRefreshNow(true),1500); // UPDATED: show the new schedule in place (no page reload)
-            }else{showToast(''+(data.message||'Save failed.'),'error');}
-        }, 900);
+        finishSave();
+        let data=null;
+        try{data=JSON.parse(rawText);}catch(e){
+            console.error(e,rawText);
+            showGlobalResult('error','Save Failed','The server sent an unexpected reply, so it is not certain the schedule was saved. Please reload the page and check the Attendance Settings.',0);
+            return;
+        }
+        if(data.success){
+            if(data.email_errors&&data.email_errors.length>0) setTimeout(()=>renderEmailDebug(data.email_errors),600);
+            if(data.db_errors&&data.db_errors.length>0){console.warn('DB errors:',data.db_errors);}
+            liveRefreshNow(true); // show the new schedule in place (no page reload)
+        }else{
+            console.warn('Save failed:',data.message||'');
+            showGlobalResult('error','Save Failed',data.message||'The attendance schedule could not be saved. Please try again.',0);
+        }
     })
     .catch(err=>{
-        btn.classList.remove('loading');btn.innerHTML='<i class="fas fa-save"></i> Save & Notify';
-        hideEmailSendingOverlay();
-        showToast('Network error.','error');
+        finishSave();
+        console.warn('Network error.',err);
+        showGlobalResult('error','Save Failed','Could not reach the server. Please check your connection and try again.',0);
     });
 }
 document.getElementById('wizardOverlay').addEventListener('click',function(e){if(e.target===this)closeWizard();});
@@ -3451,7 +5736,7 @@ document.getElementById('hoursPopupOverlay').addEventListener('click',function(e
 function requestNotifPermission() { /* no-op */ }
 function sendSystemNotification(title, body, onClick) {
     const container=document.getElementById('builtInNotifContainer');
-    if(!container){showToast(title+' — '+body,'info');return;}
+    if(!container){return;}
     const AUTO_CLOSE_MS=7000;
     const notif=document.createElement('div');
     notif.className='builtin-notif';
@@ -3491,8 +5776,14 @@ let _lastKnownPendingIds=new Set(<?php
     $id_arr=[];while($idr=$init_ids->fetch_assoc())$id_arr[]=$idr['id'];echo json_encode($id_arr);
 ?>);
 const TYPE_LABELS_CO={am_time_in:'AM Sign In',am_time_out:'AM Sign Out',pm_time_in:'PM Sign In',pm_time_out:'PM Sign Out'};
+function reqKindNote(req){
+    const isOut=(req.type==='am_time_out'||req.type==='pm_time_out');
+    if(!isOut) return '';
+    const P=req.type==='am_time_out'?'AM':'PM';
+    return `<div class="req-kind-note"><strong>Late Request:</strong> only the ${P} duty is counted &mdash; ${P} Sign In to the scheduled ${P} Sign Out.</div>`;
+}
 
-function openLateInbox(){document.getElementById('lateInboxOverlay').classList.add('open');if(!liLoaded)fetchLateRequests();}
+function openLateInbox(){document.getElementById('lateInboxOverlay').classList.add('open');fetchLateRequests();} // always load fresh data on open (the automatic polling is gone)
 function closeLateInbox(){document.getElementById('lateInboxOverlay').classList.remove('open');}
 document.getElementById('lateInboxOverlay').addEventListener('click',function(e){if(e.target===this)closeLateInbox();});
 
@@ -3517,7 +5808,6 @@ function fetchLateRequests(isPolling){
                 const studentName=req?(req.first_name+(req.middle_name?' '+req.middle_name:'')+' '+req.last_name):'A student';
                 const typeLabel=req?(TYPE_LABELS_CO[req.type]||req.type):'';
                 sendSystemNotification('New Late Request',`${studentName} submitted a late request for ${typeLabel}.`,()=>{window.focus();openLateInbox();switchTab('pending');});
-                showToast(`New late request from ${studentName}`,'info');
             }
             newPendingIds.forEach(id=>_lastKnownPendingIds.add(id));
             const currentPendingSet=new Set(newPendingIds);
@@ -3552,7 +5842,9 @@ function renderLiBody(){
             const fmt=v=>{if(!v||v==='missed')return'—';const t=v.includes(' ')?v.split(' ')[1]:v;const [h,m]=t.split(':').map(Number);const ampm=h>=12?'PM':'AM';const h12=h%12||12;return`${h12}:${String(m).padStart(2,'0')} ${ampm}`;};
             dutyHtml=`<div class="req-duty-info has-late"><div class="req-duty-stat"><strong>AM In</strong>${fmt(req.am_time_in)}</div><div class="req-duty-stat"><strong>AM Out</strong>${fmt(req.am_time_out)}</div><div class="req-duty-stat"><strong>PM In</strong>${fmt(req.pm_time_in)}</div><div class="req-duty-stat"><strong>PM Out</strong>${fmt(req.pm_time_out)}</div></div>`;
         }
-        html+=`<div class="req-card" id="req-card-${req.id}"><div class="req-card-top"><div class="req-student-info"><div class="req-student-name">${escH(req.first_name)}${req.middle_name?' '+escH(req.middle_name):''} ${escH(req.last_name)}</div><div class="req-meta">${typeBadge}<span>${escH(dateLabel)}</span><span>Submitted ${escH(submitted)}</span></div></div></div>${photoHtml}<div class="req-reason-box"><div class="req-reason-label">Reason</div>${escH(req.reason)}</div>${dutyHtml}${statusSection}</div>`;
+        let evidenceHtml='';
+        if(req.evidence){const ev=req.evidence,ico={ok:'fa-circle-check',info:'fa-circle-info',review:'fa-triangle-exclamation',risk:'fa-circle-xmark'};evidenceHtml=`<div class="req-evidence ${escH(ev.level)}"><div class="req-evidence-head"><i class="fas ${ev.level==='ok'?'fa-shield-halved':(ev.level==='review'?'fa-triangle-exclamation':'fa-circle-exclamation')}"></i>Legitimacy check — ${escH(ev.label)}</div><ul class="req-evidence-list">${(ev.signals||[]).map(sg=>`<li class="${escH(sg.level)}"><i class="fas ${ico[sg.level]||'fa-circle-info'}"></i><span>${escH(sg.text)}</span></li>`).join('')}</ul>${ev.detail?`<div class="req-evidence-detail"><div><span>${ev.detail.period} Sign In recorded</span><strong>${ev.detail.in?escH(ev.detail.in):'none'}</strong></div><div><span>Scheduled ${ev.detail.period} Sign Out</span><strong>${ev.detail.sched_out?escH(ev.detail.sched_out):'—'}</strong></div><div><span>Request sent at</span><strong>${ev.detail.sent?escH(ev.detail.sent):'—'}</strong></div><div><span>Credited if allowed</span><strong>${ev.detail.late_credit?escH(ev.detail.late_credit):'—'}</strong></div></div>`:''}${ev.device?`<div class="req-evidence-device">Sent from: ${escH(ev.device)}</div>`:''}</div>`;}
+        html+=`<div class="req-card" id="req-card-${req.id}"><div class="req-card-top"><div class="req-student-info"><div class="req-student-name">${escH(req.first_name)}${req.middle_name?' '+escH(req.middle_name):''} ${escH(req.last_name)}</div><div class="req-meta">${typeBadge}<span>${escH(dateLabel)}</span><span>Submitted ${escH(submitted)}</span></div>${reqKindNote(req)}</div></div>${photoHtml}<div class="req-reason-box"><div class="req-reason-label">Reason</div>${escH(req.reason)}</div>${evidenceHtml}${dutyHtml}${statusSection}</div>`;
     });
     body.innerHTML=html;
     filtered.forEach(req=>{if(req.has_photo)loadPhotoIntoFrame(req.id);});
@@ -3583,23 +5875,26 @@ function openPhotoLightbox(reqId,studentName){
 function approveRequest(reqId,btn){
     const req=liRequests.find(r=>r.id===reqId);
     const studentName=req?(req.first_name+(req.middle_name?' '+req.middle_name:'')+' '+req.last_name):null;
-    showCustomConfirm({title:'Allow Late Request?',message:"The student's time and photo will be recorded.",studentName,type:'approve',onConfirm:()=>{
+    const isRisk=!!(req&&req.evidence&&req.evidence.level==='risk');
+    const baseMsg="The student's time and photo will be recorded.";
+    showCustomConfirm({title:'Allow Late Request?',message:isRisk?"High-risk warnings were found in the legitimacy check. Allow only if you have confirmed this with the student. "+baseMsg:baseMsg,studentName,type:'approve',onConfirm:()=>{
         btn.classList.add('loading'); btn.textContent='Processing…';
-        const fd=new FormData(); fd.append('action','approve_late_request'); fd.append('req_id',reqId);
+        showActionLoading('Allowing request');
+        const fd=new FormData(); fd.append('action','approve_late_request'); fd.append('req_id',reqId); if(isRisk) fd.append('confirm_risk','1');
         fetch(window.location.pathname,{method:'POST',headers:{'X-Requested-With':'XMLHttpRequest'},body:fd})
         .then(r=>r.json())
         .then(data=>{
+            hideActionLoading();
             if(data.success){
-                showToast(''+data.message,'success');
                 const idx=liRequests.findIndex(r=>r.id===reqId);
                 if(idx!==-1)liRequests[idx].status='approved';
                 const pending=liRequests.filter(r=>r.status==='pending').length;
                 updateBadges(pending);
                 if(data.pending_count!==undefined)updateBadges(data.pending_count);
                 renderLiBody();
-            }else{btn.classList.remove('loading');btn.textContent='Allow';showToast(''+(data.message||'Failed.'),'error');}
+            }else{btn.classList.remove('loading');btn.textContent='Allow';showGlobalResult('error','Request Not Allowed',data.message||'The late request could not be approved. Please try again.',0);}
         })
-        .catch(()=>{btn.classList.remove('loading');btn.textContent='Allow';showToast('Network error.','error');});
+        .catch(()=>{hideActionLoading();btn.classList.remove('loading');btn.textContent='Allow';showGlobalResult('error','Request Not Allowed','Could not reach the server. Please check your connection and try again.',0);});
     }});
 }
 
@@ -3607,21 +5902,22 @@ function rejectRequest(reqId,btn){
     const req=liRequests.find(r=>r.id===reqId);
     const studentName=req?(req.first_name+' '+req.last_name):null;
     showCustomConfirm({title:'Reject This Request?',message:"The student's late request will be rejected. This cannot be undone.",studentName,type:'reject',onConfirm:()=>{
+        showActionLoading('Rejecting request');
         const fd=new FormData(); fd.append('action','reject_late_request'); fd.append('req_id',reqId);
         fetch(window.location.pathname,{method:'POST',headers:{'X-Requested-With':'XMLHttpRequest'},body:fd})
         .then(r=>r.json())
         .then(data=>{
+            hideActionLoading();
             if(data.success){
-                showToast('Request rejected.','warning');
                 const idx=liRequests.findIndex(r=>r.id===reqId);
                 if(idx!==-1)liRequests[idx].status='rejected';
                 const pending=liRequests.filter(r=>r.status==='pending').length;
                 updateBadges(pending);
                 if(data.pending_count!==undefined)updateBadges(data.pending_count);
                 renderLiBody();
-            }else{showToast(''+(data.message||'Failed.'),'error');}
+            }else{showGlobalResult('error','Request Not Rejected',data.message||'The late request could not be rejected. Please try again.',0);}
         })
-        .catch(()=>showToast('Network error.','error'));
+        .catch(()=>{hideActionLoading();showGlobalResult('error','Request Not Rejected','Could not reach the server. Please check your connection and try again.',0);});
     }});
 }
 
@@ -3654,6 +5950,41 @@ const _firstAttendanceByName = <?php
     }
     echo json_encode((object)$fa_by_name);
 ?>;
+/* NEW (student schedule): each student's Day (AM duty) / Evening (PM duty) training days (0=Sun…6=Sat numbers, null = both
+   duties every weekday) and dated schedule changes, so the Attendance Log judges a student only on the duties they are scheduled for. */
+const _schedById = <?= json_encode(attsch_js_map($student_sched)) ?>;
+/* NEW (OJT ends at the required hours): the day each student reached the course's required hours; later days are never ABSENT / INCOMPLETE. */
+const _ojtEndById = <?= json_encode((object)array_map('strval', $student_ojt_end)) ?>;
+function schedPeriods(row, dateStr){
+    const both = {am:true, pm:true};
+    const id = row.student_id ?? row.user_id ?? row.id;
+    if (id === undefined || id === null || !Object.prototype.hasOwnProperty.call(_schedById, String(id))) return both; // unknown student: keep server status
+    const s = _schedById[String(id)];
+    let sc = s.c;
+    for (const h of (s.h || [])) { if (h[0] > dateStr) { sc = h[1]; break; } }
+    if (sc === null || sc === undefined) return both;
+    const dow = new Date(dateStr + 'T00:00:00').getDay();
+    return {am: (sc.d||[]).indexOf(dow) !== -1, pm: (sc.e||[]).indexOf(dow) !== -1};
+}
+/* Day schedule = AM duty, Evening schedule = PM duty. Returns the corrected status (or null = keep the server's):
+   NOT SCHEDULED when neither duty is scheduled and nothing was recorded; otherwise the status is re-judged on the
+   duty periods the student is scheduled for (a period holding a real entry always counts). */
+function schedStatus(row, dateStr){
+    const sp = schedPeriods(row, dateStr);
+    if (sp.am && sp.pm) return null;
+    const realAm = attHasReal(row.am_time_in) || attHasReal(row.am_time_out);
+    const realPm = attHasReal(row.pm_time_in) || attHasReal(row.pm_time_out);
+    if (!sp.am && !sp.pm && !realAm && !realPm) return 'NOT SCHEDULED';
+    const cols = [];
+    if (sp.am || realAm) cols.push(row.am_time_in, row.am_time_out);
+    if (sp.pm || realPm) cols.push(row.pm_time_in, row.pm_time_out);
+    const isMissed = v => String(v||'').trim().toLowerCase() === 'missed';
+    const anyReal = cols.some(attHasReal), allReal = cols.every(attHasReal), anyMissed = cols.some(isMissed);
+    if (!anyReal && !anyMissed) return 'ABSENT';
+    if (allReal && !anyMissed) return 'PRESENT';
+    return 'INCOMPLETE';
+}
+function attHasReal(v){ if (v === null || v === undefined) return false; const t = String(v).trim().toLowerCase(); return t !== '' && t !== '-' && t !== 'missed'; } // the log popup shows '-' for empty and 'MISSED' for missed
 function isBeforeFirstAttendance(row, dateStr){
     const id = row.student_id ?? row.user_id ?? row.id;
     let first;
@@ -3734,13 +6065,12 @@ function loadAttLogForDate(dateStr){
     .then(data=>{
         document.getElementById('attLogSpinner').style.display='none';
         document.getElementById('attLogTableBox').style.opacity='1';
-        if(!data.success){showToast('Failed to load attendance.','error');return;}
+        if(!data.success){return;}
         renderAttLogTable(data);
     })
     .catch(()=>{
         document.getElementById('attLogSpinner').style.display='none';
         document.getElementById('attLogTableBox').style.opacity='1';
-        showToast('Network error loading attendance.','error');
     });
 }
 
@@ -3783,7 +6113,20 @@ function renderAttPage(){
         if(!_attIsWeekend && _attData && _attData.date && (r.status==='ABSENT'||r.status==='INCOMPLETE') && isBeforeFirstAttendance(r,_attData.date)){
             r = Object.assign({}, r, {status:'NOT STARTED', am_time_in:null, am_time_out:null, pm_time_in:null, pm_time_out:null});
         }
-        const rowNum=start+i+1,cls=(r.status==='NOT STARTED'?'pending':(statusClass[r.status]||''));
+        // NEW (student schedule): not a duty day for this student and nothing recorded → NOT SCHEDULED, never ABSENT
+        if(!_attIsWeekend && _attData && _attData.date && (r.status==='ABSENT'||r.status==='INCOMPLETE')){
+            const eid = r.student_id ?? r.user_id ?? r.id;
+            const eEnd = (eid !== undefined && eid !== null) ? _ojtEndById[String(eid)] : undefined;
+            if (eEnd && _attData.date > eEnd && !['am_time_in','am_time_out','pm_time_in','pm_time_out'].some(k => attHasReal(r[k]))) {
+                r = Object.assign({}, r, {status:'OJT COMPLETED', am_time_in:null, am_time_out:null, pm_time_in:null, pm_time_out:null});
+            }
+        }
+        if(!_attIsWeekend && _attData && _attData.date && (r.status==='ABSENT'||r.status==='INCOMPLETE'||r.status==='PRESENT')){
+            const ss = schedStatus(r,_attData.date);
+            if (ss === 'NOT SCHEDULED') r = Object.assign({}, r, {status:'NOT SCHEDULED', am_time_in:null, am_time_out:null, pm_time_in:null, pm_time_out:null});
+            else if (ss) r = Object.assign({}, r, {status:ss});
+        }
+        const rowNum=start+i+1,cls=(r.status==='NOT STARTED'?'pending':((r.status==='NOT SCHEDULED'||r.status==='OJT COMPLETED')?'nosched':(statusClass[r.status]||'')));
         if(_attIsWeekend){return`<tr class="day-off-row"><td style="padding:8px 6px;text-align:center;color:#aaa;font-size:11px;">${rowNum}</td><td style="padding:8px 10px;">${escH(r.name)}</td><td class="day-off" style="text-align:center;">DAY OFF</td></tr>`;}
         return`<tr><td style="padding:8px 6px;text-align:center;color:#aaa;font-size:11px;white-space:nowrap;">${rowNum}</td><td style="padding:8px 10px;white-space:nowrap;">${escH(r.name)}</td><td style="text-align:center;padding:5px;">${mkTime(r.am_time_in)}</td><td style="text-align:center;padding:5px;">${mkPhoto(r.am_time_in_photo)}</td><td style="text-align:center;padding:5px;">${mkTime(r.am_time_out)}</td><td style="text-align:center;padding:5px;">${mkPhoto(r.am_time_out_photo)}</td><td style="text-align:center;padding:5px;">${mkTime(r.pm_time_in)}</td><td style="text-align:center;padding:5px;">${mkPhoto(r.pm_time_in_photo)}</td><td style="text-align:center;padding:5px;">${mkTime(r.pm_time_out)}</td><td style="text-align:center;padding:5px;">${mkPhoto(r.pm_time_out_photo)}</td><td class="${cls}" style="text-align:center;padding:5px;font-weight:700;">${escH(r.status)}</td></tr>`;
     }).join('');
@@ -3827,8 +6170,677 @@ document.getElementById('searchInput').addEventListener('keyup',function(){
     _attPage=0; renderAttPage();
 });
 
-// Poll every 60 seconds for new late requests
-setInterval(()=>{ fetchLateRequests(true); },60000);
+// (automatic 60-second late-request polling removed — the inbox loads when it is opened)
+</script>
+<!-- ══════════════════════════════════════════════════════════════════════
+     NEW (OJT trainee group chat) — NEW-MESSAGE POPUP + SIDE-MENU INDICATOR (same as Profile.php)
+     ------------------------------------------------------------------------
+     When the administrator or a registered OJT trainee writes in the company's chat (the chat itself lives on
+     Profile.php: "Admin" and "OJT Trainee Group Chat"), this page shows:
+       • the same navy popup ("Admin sent you a new message" / "<Name> sent a message in OJT Trainee Group Chat") —
+         clicking it opens that conversation on Profile.php;
+       • a live red count (both chats together) on the "My Profile" side-menu link.
+     The counts come from Profile.php?chat_unread=1 (admin) and Profile.php?gc_load=1&peek=1 (group) — read-only.
+     Same rules as the other popups: messages already waiting when the page opens are the baseline (no popup); seen ids
+     are kept briefly in sessionStorage (shared with Profile.php, so moving between pages never repeats a popup);
+     checked right away, then every 5 s (paused while the tab is hidden).
+     Self-contained: no existing function, poller or style is changed.
+     ══════════════════════════════════════════════════════════════════════ -->
+<style>
+    .sidebar-badge-chat { background:#dc2626; color:#fff; font-weight:800; text-align:center; box-sizing:border-box; min-width:18px; height:18px; padding:0 3px; border-radius:50%; font-size:10px; line-height:18px; display:inline-flex; align-items:center; justify-content:center; position:absolute; right:18px; top:50%; transform:translateY(-50%); animation:ccBadgePulse 2s ease-in-out infinite; }
+    .sidebar.collapsed .sidebar-badge-chat { right:14px; top:10px; transform:none; }
+    @keyframes ccBadgePulse { 0%, 100% { box-shadow:0 0 0 0 rgba(220,38,38,0.55); } 50% { box-shadow:0 0 0 6px rgba(220,38,38,0); } }
+    .cv-top-toast.cc-go { position:fixed; top:30px; left:50%; transform:translateX(-50%); background:#1B2A4A; color:#E3E8F1; border:1px solid #55668C; border-radius:0; padding:14px 20px; box-shadow:0 8px 24px rgba(27,42,74,0.30); display:flex; align-items:center; gap:12px; font-family:'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; font-size:12.5px; line-height:1.45; z-index:10020; max-width:440px; opacity:0; transition:opacity 0.35s, top 0.3s ease, background-color 0.15s ease; pointer-events:auto; cursor:pointer; }
+    .cv-top-toast.cc-go.show { opacity:1; }
+    .cv-top-toast.cc-go:hover { background:#24375E; }
+    .cv-top-toast.cc-go:focus-visible { outline:2px solid #F7C600; outline-offset:2px; }
+    .cv-top-toast.cc-go i { color:#8FD18F; font-size:18px; flex-shrink:0; }
+    .cv-top-toast.cc-go strong { color:#ffffff; font-weight:700; }
+    .cv-top-toast.cc-go .cv-toast-go { flex-shrink:0; margin-left:6px; color:#F7C600; font-size:10.5px; font-weight:700; text-transform:uppercase; letter-spacing:0.4px; white-space:nowrap; }
+    .cv-top-toast.cc-go .cv-toast-go i { color:inherit; font-size:9px; margin-left:3px; }
+</style>
+<script>
+(function () {
+    'use strict';
+    if (window._cvCompanyChatNotifyReady) return;
+    window._cvCompanyChatNotifyReady = true;
+    var POLL_MS = 5000, TOAST_MS = 7000, STORE_FRESH = 45000;
+    var KEYS = { admin: 'cvAdminChatKnownIds', group: 'cvGroupChatKnownIds' };
+    var known = { admin: null, group: null }, counts = { admin: 0, group: 0 }, inFlight = false;
+
+    function esc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
+    function readStore(key) { try { var o = JSON.parse(sessionStorage.getItem(key) || 'null'); if (o && Array.isArray(o.ids) && Date.now() - (o.ts || 0) <= STORE_FRESH) return new Set(o.ids.map(String)); } catch (e) {} return null; }
+    function writeStore(conv) { if (!known[conv]) return; try { sessionStorage.setItem(KEYS[conv], JSON.stringify({ ids: Array.from(known[conv]), ts: Date.now() })); } catch (e) {} }
+    function layoutToasts() {
+        var top = 30, undo = document.getElementById('undoToast');
+        if (undo && undo.classList && undo.classList.contains('show')) top = Math.max(top, undo.getBoundingClientRect().bottom + 12);
+        document.querySelectorAll('.cv-top-toast').forEach(function (el) { el.style.top = top + 'px'; top += el.offsetHeight + 12; });
+    }
+    function popup(conv, who, text) {
+        var go = function () { window.location.href = 'Profile.php?open_chat=' + conv; };
+        var div = document.createElement('div');
+        div.className = 'cv-top-toast cc-go'; div.setAttribute('role', 'status'); div.setAttribute('tabindex', '0');
+        div.innerHTML = '<i class="fas fa-comment-dots"></i><span><strong>' + esc(who) + '</strong> ' + esc(text) + '</span><span class="cv-toast-go">View <i class="fas fa-chevron-right"></i></span>';
+        div.addEventListener('click', go);
+        div.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); } });
+        document.body.appendChild(div); layoutToasts();
+        requestAnimationFrame(function () { div.classList.add('show'); });
+        setTimeout(function () { div.classList.remove('show'); setTimeout(function () { div.remove(); layoutToasts(); }, 400); }, TOAST_MS);
+    }
+    function paintBadge() {
+        var n = counts.admin + counts.group, b = document.getElementById('sidebarChatBadge');
+        if (b) { b.textContent = n > 99 ? '99+' : n; b.style.display = n > 0 ? '' : 'none'; }
+    }
+    function handle(conv, rows, count) {
+        var ids = new Set(rows.map(function (r) { return String(r.id); }));
+        counts[conv] = parseInt(count, 10) || 0;
+        if (known[conv] === null) {
+            var st = readStore(KEYS[conv]);
+            if (!st) { known[conv] = ids; writeStore(conv); return; }   // baseline: nothing pops up
+            known[conv] = st;
+        }
+        var fresh = rows.filter(function (r) { return !known[conv].has(String(r.id)); });
+        known[conv] = ids; writeStore(conv);
+        if (!fresh.length) return;
+        if (conv === 'admin') popup('admin', 'Admin', fresh.length > 1 ? 'sent you ' + fresh.length + ' new messages \u2014 open the chat.' : 'sent you a new message \u2014 open the chat.');
+        else {
+            var names = Array.from(new Set(fresh.map(function (r) { return r.name; })));
+            if (names.length === 1) popup('group', names[0], fresh.length > 1 ? 'sent ' + fresh.length + ' messages in OJT Trainee Group Chat.' : 'sent a message in OJT Trainee Group Chat.');
+            else popup('group', fresh.length + ' new messages', 'in OJT Trainee Group Chat.');
+        }
+    }
+    function poll() {
+        if (inFlight || document.hidden) return;
+        inFlight = true;
+        var a = fetch('Profile.php?chat_unread=1', { credentials: 'same-origin', cache: 'no-store' }).then(function (r) { return r.json(); })
+            .then(function (d) { if (d && d.success && Array.isArray(d.rows)) handle('admin', d.rows, d.count); }).catch(function () {});
+        var g = fetch('Profile.php?gc_load=1&peek=1', { credentials: 'same-origin', cache: 'no-store' }).then(function (r) { return r.json(); })
+            .then(function (d) { if (d && d.success) handle('group', d.unread_rows || [], d.unread); }).catch(function () {});
+        Promise.all([a, g]).then(function () { inFlight = false; paintBadge(); });
+    }
+    poll();
+    setInterval(poll, POLL_MS);
+    document.addEventListener('visibilitychange', function () { if (!document.hidden) poll(); });
+    window.addEventListener('focus', poll);
+    window.addEventListener('pageshow', function (e) { if (e.persisted) poll(); });
+    window.addEventListener('pagehide', function () { writeStore('admin'); writeStore('group'); });
+})();
+</script>
+<script>
+(function () {
+    'use strict';
+    if (window._cvCompanyLogoutReady) return;
+    window._cvCompanyLogoutReady = true;
+
+    var LOGOUT_SELECTOR = '.logout-link a[href*="logout=1"]';
+    var pendingHref = null, loggingOut = false, lastFocus = null, stuckTimer = null;
+
+    var overlay = document.createElement('div');
+    overlay.className = 'cv-logout-overlay';
+    overlay.id = 'cvLogoutConfirm';
+    overlay.setAttribute('role', 'dialog');
+    overlay.setAttribute('aria-modal', 'true');
+    overlay.setAttribute('aria-labelledby', 'cvLogoutTitle');
+    overlay.setAttribute('aria-describedby', 'cvLogoutMsg');
+    overlay.innerHTML =
+        '<div class="cv-logout-box">' +
+            '<h3 id="cvLogoutTitle"><i class="fas fa-sign-out-alt"></i> Log Out</h3>' +
+            '<p id="cvLogoutMsg">Are you sure you want to Log out? You need to login again to access your Account.</p>' +
+            '<div class="cv-logout-actions">' +
+                '<button type="button" class="cv-logout-btn ghost" data-cv-logout="cancel">Cancel</button>' +
+                '<button type="button" class="cv-logout-btn" data-cv-logout="ok"><i class="fas fa-sign-out-alt"></i> Log out</button>' +
+            '</div>' +
+        '</div>';
+    document.body.appendChild(overlay);
+    var btnCancel = overlay.querySelector('[data-cv-logout="cancel"]');
+    var btnOk     = overlay.querySelector('[data-cv-logout="ok"]');
+
+    function isOpen() { return overlay.classList.contains('show'); }
+    function openConfirm(href) {
+        pendingHref = href;
+        lastFocus = document.activeElement;
+        overlay.classList.add('show');
+        setTimeout(function () { btnCancel.focus(); }, 30);
+    }
+    function closeConfirm() {
+        overlay.classList.remove('show');
+        pendingHref = null;
+        if (lastFocus && lastFocus.focus) { try { lastFocus.focus(); } catch (e) {} }
+    }
+
+    // this page's own loading page, labelled "Logging out"
+    function showLoggingOut() {
+        var ov = document.getElementById('globalLoadingOverlay'), label = document.getElementById('globalLoadingLabel');
+        if (label) label.textContent = 'Logging out';
+        if (ov) { ov.classList.add('gl-instant'); ov.classList.remove('hidden'); }
+    }
+    function hideLoggingOut() {
+        var ov = document.getElementById('globalLoadingOverlay'), label = document.getElementById('globalLoadingLabel');
+        if (ov) { ov.classList.remove('gl-instant'); ov.classList.add('hidden'); }
+        if (label) label.textContent = 'Loading';
+    }
+
+    function confirmLogout() {
+        if (!pendingHref) return;
+        var href = pendingHref;
+        overlay.classList.remove('show');
+        pendingHref = null;
+        loggingOut = true;
+        showLoggingOut();
+        // safety: if the browser never leaves (e.g. the server cannot be reached), give the page back
+        clearTimeout(stuckTimer);
+        stuckTimer = setTimeout(function () { if (loggingOut) { loggingOut = false; hideLoggingOut(); } }, 15000);
+        setTimeout(function () { window.location.href = href; }, 60);   // lets "Logging out" paint first
+    }
+
+    // Catch the Logout click before any other click handler (capture phase)
+    function intercept(e) {
+        var a = e.target && e.target.closest ? e.target.closest(LOGOUT_SELECTOR) : null;
+        if (!a) return;
+        if (e.type === 'auxclick' && e.button !== 1) return;
+        e.preventDefault();
+        if (loggingOut) return;
+        openConfirm(a.href);
+    }
+    document.addEventListener('click', intercept, true);
+    document.addEventListener('auxclick', intercept, true);
+
+    btnCancel.addEventListener('click', closeConfirm);
+    btnOk.addEventListener('click', confirmLogout);
+    overlay.addEventListener('click', function (e) { if (e.target === overlay) closeConfirm(); });
+    document.addEventListener('keydown', function (e) {
+        if (!isOpen()) return;
+        if (e.key === 'Escape') { e.preventDefault(); closeConfirm(); }
+        else if (e.key === 'Tab') {        // keep keyboard focus inside the popup
+            var first = btnCancel, last = btnOk;
+            if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+            else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+        }
+    });
+
+    // While leaving, keep the label "Logging out" (some pages reset it to "Loading" on unload)
+    window.addEventListener('beforeunload', function () { if (loggingOut) showLoggingOut(); });
+
+    // Back / Forward restore: reload from the server so a logged-out visitor is sent to the login page
+    window.addEventListener('pageshow', function (e) {
+        if (!e.persisted) return;
+        loggingOut = false; clearTimeout(stuckTimer);
+        overlay.classList.remove('show'); pendingHref = null;
+        var ov = document.getElementById('globalLoadingOverlay');
+        if (ov) ov.classList.remove('hidden');
+        window.location.reload();
+    });
+})();
+</script><!-- ══════════════════════════════════════════════════════════════════════
+     NEW (application notification) — NEW-APPLICATION POPUP + SIDE-MENU INDICATOR (same on every company page)
+     ------------------------------------------------------------------------
+     Designed after administrator.php's company-invitation popup: the navy square .cv-top-toast bar at the TOP of the page
+     (slate frame, green icon, names in bold white, "— check the … inbox"), a small "View ›" mark, gone by itself after 7 s,
+     several stack downward (newest below), clickable and keyboard-operable (role="link"). When an application reaches this
+     company, every company page shows one for each place it lands:
+       • "Students Endorsed by the Admin" inbox  → "<Name> was endorsed by the administrator to be added as an OJT trainee —
+         check the Students Endorsed by the Admin inbox."
+       • "OJT Applicants — Endorsement Letter Validation" table → "<Name> submitted a new application — check the OJT
+         Applicants table."
+     Clicking a popup fades it out and opens THAT application on add_ojt_student.php — the inbox drawer with the card, or the
+     applicants table with the row — and briefly highlights it (from another page it navigates there behind the loading
+     page; the one-time link parameter is removed from the address bar so a refresh never repeats it).
+     A live count on the "OJT Student List" side-menu link shows every pending application (inbox + table).
+     The list comes from add_ojt_student.php?application_alerts=1 (read-only). Applications already waiting when the page opens
+     are the baseline (no popup); seen ids are kept briefly in sessionStorage, shared by all company pages, so moving between
+     pages neither repeats a popup nor misses one; an application that is only moved from the inbox to the table (already
+     known) does not pop up again. Checked right away, then every 5 s (paused while the tab is hidden, slower while the server
+     cannot be reached). Self-contained: no existing function, poller or style is changed.
+     ══════════════════════════════════════════════════════════════════════ -->
+<style>
+    .cv-top-toast.ap-notice {
+        position: fixed; top: 30px; left: 50%; transform: translateX(-50%);
+        background: #1B2A4A; color: #E3E8F1;
+        border: 1px solid #55668C; border-radius: 0;
+        padding: 14px 20px;
+        box-shadow: 0 8px 24px rgba(27,42,74,0.30);
+        display: flex; align-items: center; gap: 12px;
+        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        font-size: 12.5px; line-height: 1.45;
+        z-index: 10020; max-width: 440px;
+        opacity: 0; transition: opacity 0.35s, top 0.3s ease;
+        pointer-events: none;
+    }
+    .cv-top-toast.ap-notice.show { opacity: 1; }
+    .cv-top-toast.ap-notice i { color: #8FD18F; font-size: 18px; flex-shrink: 0; }
+    .cv-top-toast.ap-notice strong { color: #ffffff; font-weight: 700; }
+    .cv-top-toast.ap-notice[data-cv-go] { pointer-events: auto; cursor: pointer; transition: opacity 0.35s, top 0.3s ease, background-color 0.15s ease; }
+    .cv-top-toast.ap-notice[data-cv-go]:hover { background: #24375E; }
+    .cv-top-toast.ap-notice[data-cv-go]:focus-visible { outline: 2px solid #F7C600; outline-offset: 2px; }
+    .cv-top-toast.ap-notice .cv-toast-go { flex-shrink: 0; margin-left: 6px; color: #F7C600; font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px; white-space: nowrap; }
+    .cv-top-toast.ap-notice .cv-toast-go i { color: inherit; font-size: 9px; margin-left: 3px; }
+    /* the item a popup led to is briefly highlighted when it is shown */
+    .ap-go-highlight { outline: 2px solid #F7C600 !important; outline-offset: 2px; animation: apGoFlash 2.6s ease; }
+    @keyframes apGoFlash { 0%, 55% { box-shadow: 0 0 0 5px rgba(247, 198, 0, 0.35); } 100% { box-shadow: 0 0 0 0 rgba(247, 198, 0, 0); } }
+</style>
+<script>
+(function () {
+    'use strict';
+    if (window._cvAppAlertReady) return;
+    window._cvAppAlertReady = true;
+
+    var ENDPOINT = 'add_ojt_student.php?application_alerts=1';
+    var POLL_MS = 5000, POLL_MAX_MS = 60000, TOAST_MS = 7000, STORE_KEY = 'cvAppKnownIds', STORE_FRESH = 45000, FAIL_STOP = 30;
+    var PARAM = 'open_application';   // one-time link parameter: "<inbox|table>:<application id>"
+    var known = null, inFlight = false, fails = 0, timer = null, stopped = false;
+    var ON_PAGE = /add_ojt_student\.php$/i.test(window.location.pathname);
+
+    function esc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
+    function readStore() {
+        try {
+            var o = JSON.parse(sessionStorage.getItem(STORE_KEY) || 'null');
+            if (o && Array.isArray(o.ids) && Date.now() - (o.ts || 0) <= STORE_FRESH) return new Set(o.ids.map(String));
+        } catch (e) {}
+        return null;
+    }
+    function writeStore() { if (!known) return; try { sessionStorage.setItem(STORE_KEY, JSON.stringify({ ids: Array.from(known), ts: Date.now() })); } catch (e) {} }
+
+    // shares one top-of-page stack with every other .cv-top-toast popup (chat etc.)
+    function layoutToasts() {
+        var top = 30, undo = document.getElementById('undoToast');
+        if (undo && undo.classList && undo.classList.contains('show')) top = Math.max(top, undo.getBoundingClientRect().bottom + 12);
+        document.querySelectorAll('.cv-top-toast').forEach(function (el) { el.style.top = top + 'px'; top += el.offsetHeight + 12; });
+    }
+
+    /* ── going to the application a popup is about ── */
+    function waitFor(test, ms) {
+        return new Promise(function (resolve) {
+            var t0 = Date.now();
+            (function tick() {
+                var v = null; try { v = test(); } catch (e) { v = null; }
+                if (v) return resolve(v);
+                if (Date.now() - t0 > ms) return resolve(null);
+                setTimeout(tick, 150);
+            })();
+        });
+    }
+    function highlight(el) {
+        if (!el) return;
+        try { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch (e) { el.scrollIntoView(); }
+        el.classList.remove('ap-go-highlight'); void el.offsetWidth; el.classList.add('ap-go-highlight');
+        setTimeout(function () { el.classList.remove('ap-go-highlight'); }, 2800);
+    }
+    function goTo(url) {   // the loading page covers the page while it changes (same as administrator.php's popups)
+        var ov = document.getElementById('globalLoadingOverlay'), label = document.getElementById('globalLoadingLabel');
+        if (label) label.textContent = 'Loading';
+        if (ov) { ov.classList.add('gl-instant'); ov.classList.remove('hidden'); }
+        window.location.href = url;
+    }
+    function openHere(kind, id) {
+        if (kind === 'inbox') {
+            if (typeof window.openInbox === 'function') window.openInbox();
+            waitFor(function () { return document.getElementById('appCard' + id); }, 6000).then(function (c) { if (c) setTimeout(function () { highlight(c); }, 250); });
+            return;
+        }
+        // table: the row, once the table has it (it is refreshed every few seconds; ask for it right away)
+        if (typeof window.refreshApplicantTable === 'function') { try { window.refreshApplicantTable(); } catch (e) {} }
+        waitFor(function () { return document.getElementById('appRow' + id); }, 6000).then(function (row) {
+            highlight(row || document.querySelector('.applicants-card'));
+        });
+    }
+    function go(spec) {
+        var p = String(spec || '').split(':'), kind = p[0], id = parseInt(p[1], 10) || 0;
+        if (kind !== 'inbox' && kind !== 'table') return;
+        if (ON_PAGE) { openHere(kind, id); return; }
+        goTo('add_ojt_student.php?' + PARAM + '=' + encodeURIComponent(kind + ':' + id));
+    }
+    if (ON_PAGE) {   // arriving from a popup on another page: do it here once the page has loaded
+        try {
+            var params = new URLSearchParams(window.location.search), want = params.get(PARAM);
+            if (want) {
+                params.delete(PARAM);
+                if (window.history && window.history.replaceState) {
+                    var q = params.toString();
+                    window.history.replaceState({}, document.title, window.location.pathname + (q ? '?' + q : '') + window.location.hash);
+                }
+                var start = function () { setTimeout(function () { go(want); }, 800); };
+                if (document.readyState === 'complete') start(); else window.addEventListener('load', start);
+            }
+        } catch (e) {}
+    }
+
+    /* ── the popup (same markup as administrator.php's invitation popup + its "View ›" mark) ── */
+    function namesHtml(rows) {
+        var names = rows.map(function (r) { return esc(r.name || 'A student'); });
+        if (names.length > 3) return '<strong>' + names.length + ' students</strong>';
+        return names.length === 1 ? '<strong>' + names[0] + '</strong>'
+            : names.slice(0, -1).map(function (n) { return '<strong>' + n + '</strong>'; }).join(', ') + ' and <strong>' + names[names.length - 1] + '</strong>';
+    }
+    function tagToast(el, spec) {
+        el.setAttribute('data-cv-go', spec);
+        el.setAttribute('role', 'link');
+        el.setAttribute('tabindex', '0');
+        el.setAttribute('aria-label', (el.textContent || '').replace(/\s+/g, ' ').trim() + ' — open');
+        var hint = document.createElement('span');
+        hint.className = 'cv-toast-go';
+        hint.setAttribute('aria-hidden', 'true');
+        hint.innerHTML = 'View <i class="fas fa-chevron-right"></i>';
+        el.appendChild(hint);
+    }
+    function activate(toast) {   // fade out, then open the application
+        var spec = toast.getAttribute('data-cv-go');
+        toast.classList.remove('show');
+        setTimeout(function () { if (toast.parentNode) toast.parentNode.removeChild(toast); layoutToasts(); }, 350);
+        go(spec);
+    }
+    function popup(kind, rows) {
+        var one = rows.length === 1, who = namesHtml(rows);
+        var plural = rows.length > 1;
+        var msg = kind === 'inbox'
+            ? who + ' ' + (plural ? 'were' : 'was') + ' endorsed by the administrator to be added as ' + (plural ? 'OJT trainees' : 'an OJT trainee') + ' — check the Students Endorsed by the Admin inbox.'
+            : who + ' submitted ' + (plural ? 'new applications' : 'a new application') + ' — check the OJT Applicants table.';
+        var div = document.createElement('div');
+        div.className = 'cv-top-toast ap-notice';
+        div.setAttribute('role', 'status');
+        div.innerHTML = '<i class="fas ' + (kind === 'inbox' ? 'fa-user-plus' : 'fa-envelope-open-text') + '"></i><span>' + msg + '</span>';
+        document.body.appendChild(div);
+        tagToast(div, kind + ':' + (parseInt(rows[0].id, 10) || 0));   // clickable → that application
+        layoutToasts();
+        requestAnimationFrame(function () { div.classList.add('show'); });
+        setTimeout(function () { div.classList.remove('show'); setTimeout(function () { div.remove(); layoutToasts(); }, 400); }, TOAST_MS);
+    }
+    document.addEventListener('click', function (e) {
+        var t = e.target && e.target.closest ? e.target.closest('.cv-top-toast.ap-notice[data-cv-go]') : null;
+        if (t) { e.preventDefault(); activate(t); }
+    });
+    document.addEventListener('keydown', function (e) {
+        if (e.key !== 'Enter' && e.key !== ' ') return;
+        var t = e.target && e.target.closest ? e.target.closest('.cv-top-toast.ap-notice[data-cv-go]') : null;
+        if (t) { e.preventDefault(); activate(t); }
+    });
+
+    /* ── side-menu indicator ── */
+    function paintBadge(count) {
+        count = parseInt(count, 10) || 0;
+        var b = document.getElementById('sidebarAppBadge') || document.getElementById('sidebarInboxBadge');
+        if (!b) return;   // e.g. the locked sidebar of CompanyForm.php has no "OJT Student List" link
+        b.textContent = count > 99 ? '99+' : String(count);
+        b.style.display = count > 0 ? 'inline-flex' : 'none';
+    }
+
+    function handle(d) {
+        var rows = d.rows, ids = new Set(rows.map(function (r) { return String(r.id); }));
+        paintBadge(d.count != null ? d.count : rows.length);
+        if (known === null) {
+            var stored = readStore();
+            if (!stored) { known = ids; writeStore(); return; }      // baseline: nothing pops up
+            known = stored;
+        }
+        var fresh = rows.filter(function (r) { return !known.has(String(r.id)); });
+        known = ids; writeStore();                                  // an inbox → table move keeps its id, so it is never "new"
+        var inbox = fresh.filter(function (r) { return !parseInt(r.in_table, 10); });
+        var table = fresh.filter(function (r) { return parseInt(r.in_table, 10); });
+        if (inbox.length) popup('inbox', inbox);
+        if (table.length) popup('table', table);
+    }
+
+    /* ── polling ── */
+    function schedule() {
+        clearTimeout(timer);
+        if (stopped) return;
+        timer = setTimeout(poll, Math.min(POLL_MAX_MS, POLL_MS * Math.pow(2, Math.min(fails, 4))));
+    }
+    function poll() {
+        if (stopped) return;
+        if (inFlight || document.hidden) { schedule(); return; }
+        inFlight = true;
+        fetch(ENDPOINT, { credentials: 'same-origin', cache: 'no-store' })
+            .then(function (r) { if (!r.ok) throw new Error('http ' + r.status); return r.json(); })
+            .then(function (d) {
+                if (!d || !d.success || !Array.isArray(d.rows)) throw new Error('bad reply');
+                fails = 0; handle(d);
+            })
+            .catch(function () { fails++; if (fails >= FAIL_STOP) stopped = true; })   // e.g. the session ended: stop asking
+            .then(function () { inFlight = false; schedule(); });
+    }
+    function kick() { if (stopped || document.hidden || (known === null && inFlight)) return; clearTimeout(timer); poll(); }
+
+    poll();
+    document.addEventListener('visibilitychange', function () { if (!document.hidden && known !== null) kick(); });
+    window.addEventListener('focus', function () { if (known !== null) kick(); });
+    window.addEventListener('online', function () { fails = 0; kick(); });
+    window.addEventListener('pageshow', function (e) { if (e.persisted) kick(); });
+    window.addEventListener('pagehide', writeStore);
+})();
+</script>
+<!-- ══════════════════════════════════════════════════════════════════════
+     NEW (weekly report notification) — NEW-REPORT POPUP + SIDE-MENU INDICATOR (same on every company page)
+     ------------------------------------------------------------------------
+     When a student submits a weekly report, every company page shows the same navy popup as the application notification
+     ("<Name> submitted a weekly report (Oct 05 – Oct 09) — check the Company Reports."), and the "Company Reports" side-menu
+     link shows how many reports have not been opened yet. On company_reports.php the same news also puts a "N new" badge on
+     the student's card and a "NEW" tag on the report inside the student's library; all of them disappear as soon as the report
+     is opened. Clicking the popup opens that student's library on company_reports.php and highlights the report (from another
+     page it navigates there behind the loading page; the one-time link parameter is removed from the address bar).
+     The list comes from company_reports.php?report_alerts=1 (read-only). Reports already waiting when the page opens are the
+     baseline (no popup); seen ids are kept briefly in sessionStorage, shared by all company pages, so moving between pages
+     neither repeats a popup nor misses one. Checked right away, then every 6 s (paused while the tab is hidden, slower while
+     the server cannot be reached). Self-contained: no existing function, poller or style is changed.
+     ══════════════════════════════════════════════════════════════════════ -->
+<style>
+    .cv-top-toast.rp-notice {
+        position: fixed; top: 30px; left: 50%; transform: translateX(-50%);
+        background: #1B2A4A; color: #E3E8F1;
+        border: 1px solid #55668C; border-radius: 0;
+        padding: 14px 20px;
+        box-shadow: 0 8px 24px rgba(27,42,74,0.30);
+        display: flex; align-items: center; gap: 12px;
+        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        font-size: 12.5px; line-height: 1.45;
+        z-index: 10020; max-width: 440px;
+        opacity: 0; transition: opacity 0.35s, top 0.3s ease;
+        pointer-events: none;
+    }
+    .cv-top-toast.rp-notice.show { opacity: 1; }
+    .cv-top-toast.rp-notice i { color: #8FD18F; font-size: 18px; flex-shrink: 0; }
+    .cv-top-toast.rp-notice strong { color: #ffffff; font-weight: 700; }
+    .cv-top-toast.rp-notice[data-cv-go] { pointer-events: auto; cursor: pointer; transition: opacity 0.35s, top 0.3s ease, background-color 0.15s ease; }
+    .cv-top-toast.rp-notice[data-cv-go]:hover { background: #24375E; }
+    .cv-top-toast.rp-notice[data-cv-go]:focus-visible { outline: 2px solid #F7C600; outline-offset: 2px; }
+    .cv-top-toast.rp-notice .cv-toast-go { flex-shrink: 0; margin-left: 6px; color: #F7C600; font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px; white-space: nowrap; }
+    .cv-top-toast.rp-notice .cv-toast-go i { color: inherit; font-size: 9px; margin-left: 3px; }
+    /* the item a popup led to is briefly highlighted when it is shown */
+    .rp-go-highlight { outline: 2px solid #F7C600 !important; outline-offset: 2px; animation: rpGoFlash 2.6s ease; }
+    @keyframes rpGoFlash { 0%, 55% { box-shadow: 0 0 0 5px rgba(247, 198, 0, 0.35); } 100% { box-shadow: 0 0 0 0 rgba(247, 198, 0, 0); } }
+</style>
+<script>
+(function () {
+    'use strict';
+    if (window._cvReportAlertReady) return;
+    window._cvReportAlertReady = true;
+
+    var ENDPOINT = 'company_reports.php?report_alerts=1';
+    var POLL_MS = 6000, POLL_MAX_MS = 60000, TOAST_MS = 7000, STORE_KEY = 'cvReportKnownIds', STORE_FRESH = 45000, FAIL_STOP = 30;
+    var PARAM = 'open_report';   // one-time link parameter: "<report id>:<student id>"
+    var known = null, inFlight = false, fails = 0, timer = null, stopped = false;
+    var ON_PAGE = /company_reports\.php$/i.test(window.location.pathname);
+
+    function esc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
+    function readStore() {
+        try {
+            var o = JSON.parse(sessionStorage.getItem(STORE_KEY) || 'null');
+            if (o && Array.isArray(o.ids) && Date.now() - (o.ts || 0) <= STORE_FRESH) return new Set(o.ids.map(String));
+        } catch (e) {}
+        return null;
+    }
+    function writeStore() { if (!known) return; try { sessionStorage.setItem(STORE_KEY, JSON.stringify({ ids: Array.from(known), ts: Date.now() })); } catch (e) {} }
+
+    // shares one top-of-page stack with every other .cv-top-toast popup (chat, applications, action toasts)
+    function layoutToasts() {
+        var top = 30, undo = document.getElementById('undoToast');
+        if (undo && undo.classList && undo.classList.contains('show')) top = Math.max(top, undo.getBoundingClientRect().bottom + 12);
+        document.querySelectorAll('.cv-top-toast').forEach(function (el) { el.style.top = top + 'px'; top += el.offsetHeight + 12; });
+    }
+
+    /* ── going to the report a popup is about ── */
+    function waitFor(test, ms) {
+        return new Promise(function (resolve) {
+            var t0 = Date.now();
+            (function tick() {
+                var v = null; try { v = test(); } catch (e) { v = null; }
+                if (v) return resolve(v);
+                if (Date.now() - t0 > ms) return resolve(null);
+                setTimeout(tick, 150);
+            })();
+        });
+    }
+    function highlight(el) {
+        if (!el) return;
+        try { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch (e) { el.scrollIntoView(); }
+        el.classList.remove('rp-go-highlight'); void el.offsetWidth; el.classList.add('rp-go-highlight');
+        setTimeout(function () { el.classList.remove('rp-go-highlight'); }, 2800);
+    }
+    function goTo(url) {   // the loading page covers the page while it changes (same as the other popups)
+        var ov = document.getElementById('globalLoadingOverlay'), label = document.getElementById('globalLoadingLabel');
+        if (label) label.textContent = 'Loading';
+        if (ov) { ov.classList.add('gl-instant'); ov.classList.remove('hidden'); }
+        window.location.href = url;
+    }
+    function openHere(rid, sid) {
+        var opened = false;
+        if (typeof window.cvOpenReportFromAlert === 'function') { try { opened = window.cvOpenReportFromAlert(rid, sid) !== false; } catch (e) { opened = false; } }
+        if (!opened) { highlight(document.getElementById('scard-' + sid)); return; }   // the student is not on this list any more
+        waitFor(function () { return document.getElementById('list-item-' + rid); }, 6000).then(function (item) {
+            if (item) setTimeout(function () { highlight(item); }, 250); else highlight(document.getElementById('scard-' + sid));
+        });
+    }
+    function go(spec) {
+        var p = String(spec || '').split(':'), rid = parseInt(p[1], 10) || 0, sid = parseInt(p[2], 10) || 0;
+        if (p[0] !== 'report' || !rid || !sid) return;
+        if (ON_PAGE) { openHere(rid, sid); return; }
+        goTo('company_reports.php?' + PARAM + '=' + encodeURIComponent(rid + ':' + sid));
+    }
+    if (ON_PAGE) {   // arriving from a popup on another page: do it here once the page has loaded
+        try {
+            var params = new URLSearchParams(window.location.search), want = params.get(PARAM);
+            if (want) {
+                params.delete(PARAM);
+                if (window.history && window.history.replaceState) {
+                    var q = params.toString();
+                    window.history.replaceState({}, document.title, window.location.pathname + (q ? '?' + q : '') + window.location.hash);
+                }
+                var wp = String(want).split(':');
+                var start = function () { setTimeout(function () { go('report:' + wp[0] + ':' + wp[1]); }, 800); };
+                if (document.readyState === 'complete') start(); else window.addEventListener('load', start);
+            }
+        } catch (e) {}
+    }
+
+    /* ── the popup (same markup as the application popup + its "View ›" mark) ── */
+    function fmtWeek(ws) {
+        try {
+            var m = new Date(String(ws) + 'T00:00:00'), f = new Date(m.getTime()); f.setDate(f.getDate() + 4);
+            if (isNaN(m.getTime())) return '';
+            var o = { month: 'short', day: '2-digit' };
+            return m.toLocaleDateString('en-US', o) + ' – ' + f.toLocaleDateString('en-US', o);
+        } catch (e) { return ''; }
+    }
+    function tagToast(el, spec) {
+        el.setAttribute('data-cv-go', spec);
+        el.setAttribute('role', 'link');
+        el.setAttribute('tabindex', '0');
+        el.setAttribute('aria-label', (el.textContent || '').replace(/\s+/g, ' ').trim() + ' — open');
+        var hint = document.createElement('span');
+        hint.className = 'cv-toast-go';
+        hint.setAttribute('aria-hidden', 'true');
+        hint.innerHTML = 'View <i class="fas fa-chevron-right"></i>';
+        el.appendChild(hint);
+    }
+    function activate(toast) {   // fade out, then open the report
+        var spec = toast.getAttribute('data-cv-go');
+        toast.classList.remove('show');
+        setTimeout(function () { if (toast.parentNode) toast.parentNode.removeChild(toast); layoutToasts(); }, 350);
+        go(spec);
+    }
+    function popup(rows) {
+        // one popup per batch of new reports: the students in bold, what they submitted, where to look
+        var students = [], seen = {};
+        rows.forEach(function (r) { var k = String(r.student_id); if (!seen[k]) { seen[k] = true; students.push(r); } });
+        var names = students.map(function (r) { return '<strong>' + esc(r.name || 'A student') + '</strong>'; });
+        var who = students.length > 3 ? '<strong>' + students.length + ' students</strong>'
+            : (names.length === 1 ? names[0] : names.slice(0, -1).join(', ') + ' and ' + names[names.length - 1]);
+        var what = rows.length === 1
+            ? 'a weekly report' + (fmtWeek(rows[0].week_start) ? ' (' + esc(fmtWeek(rows[0].week_start)) + ')' : '')
+            : rows.length + ' new weekly reports';
+        var div = document.createElement('div');
+        div.className = 'cv-top-toast rp-notice';
+        div.setAttribute('role', 'status');
+        div.innerHTML = '<i class="fas fa-file-lines"></i><span>' + who + ' submitted ' + what + ' — check the Company Reports.</span>';
+        document.body.appendChild(div);
+        tagToast(div, 'report:' + (parseInt(rows[0].id, 10) || 0) + ':' + (parseInt(rows[0].student_id, 10) || 0));   // clickable → the newest report
+        layoutToasts();
+        requestAnimationFrame(function () { div.classList.add('show'); });
+        setTimeout(function () { div.classList.remove('show'); setTimeout(function () { div.remove(); layoutToasts(); }, 400); }, TOAST_MS);
+    }
+    document.addEventListener('click', function (e) {
+        var t = e.target && e.target.closest ? e.target.closest('.cv-top-toast.rp-notice[data-cv-go]') : null;
+        if (t) { e.preventDefault(); activate(t); }
+    });
+    document.addEventListener('keydown', function (e) {
+        if (e.key !== 'Enter' && e.key !== ' ') return;
+        var t = e.target && e.target.closest ? e.target.closest('.cv-top-toast.rp-notice[data-cv-go]') : null;
+        if (t) { e.preventDefault(); activate(t); }
+    });
+
+    /* ── side-menu indicator ── */
+    function paintBadge(count) {
+        count = parseInt(count, 10) || 0;
+        var b = document.getElementById('sidebarReportBadge');
+        if (!b) return;
+        b.textContent = count > 99 ? '99+' : String(count);
+        b.style.display = count > 0 ? 'inline-flex' : 'none';
+    }
+
+    function handle(d) {
+        var rows = d.rows, ids = new Set(rows.map(function (r) { return String(r.id); }));
+        var shown = d.count != null ? d.count : rows.length;
+        if (typeof window.cvAdjustedReportCount === 'function') { try { shown = window.cvAdjustedReportCount(d, shown); } catch (e) {} }
+        paintBadge(shown);
+        if (typeof window.cvApplyReportAlerts === 'function') { try { window.cvApplyReportAlerts(d); } catch (e) {} }   // company_reports.php: student cards + library
+        if (known === null) {
+            var stored = readStore();
+            if (!stored) { known = ids; writeStore(); return; }      // baseline: nothing pops up
+            known = stored;
+        }
+        var fresh = rows.filter(function (r) { return !known.has(String(r.id)); });
+        known = ids; writeStore();
+        if (fresh.length) popup(fresh);
+    }
+
+    /* ── polling ── */
+    function schedule() {
+        clearTimeout(timer);
+        if (stopped) return;
+        timer = setTimeout(poll, Math.min(POLL_MAX_MS, POLL_MS * Math.pow(2, Math.min(fails, 4))));
+    }
+    function poll() {
+        if (stopped) return;
+        if (inFlight || document.hidden) { schedule(); return; }
+        inFlight = true;
+        fetch(ENDPOINT, { credentials: 'same-origin', cache: 'no-store' })
+            .then(function (r) { if (!r.ok) throw new Error('http ' + r.status); return r.json(); })
+            .then(function (d) {
+                if (!d || !d.success || !Array.isArray(d.rows)) throw new Error('bad reply');
+                fails = 0; handle(d);
+            })
+            .catch(function () { fails++; if (fails >= FAIL_STOP) stopped = true; })   // e.g. the session ended: stop asking
+            .then(function () { inFlight = false; schedule(); });
+    }
+    function kick() { if (stopped || document.hidden || (known === null && inFlight)) return; clearTimeout(timer); poll(); }
+    window.cvReportAlertsRefresh = kick;   // lets company_reports.php refresh the indicators right after a report is opened
+
+    poll();
+    document.addEventListener('visibilitychange', function () { if (!document.hidden && known !== null) kick(); });
+    window.addEventListener('focus', function () { if (known !== null) kick(); });
+    window.addEventListener('online', function () { fails = 0; kick(); });
+    window.addEventListener('pageshow', function (e) { if (e.persisted) kick(); });
+    window.addEventListener('pagehide', writeStore);
+})();
 </script>
 </body>
 </html>
