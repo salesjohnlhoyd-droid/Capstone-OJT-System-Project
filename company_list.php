@@ -3323,108 +3323,6 @@ $companies = $conn->query("
         #placementReplacedModal .pm-btn-close { background: #DCE1EC !important; color: #2d3748 !important; }
         #placementReplacedModal .pm-btn-go { background: #A02A2A !important; }
 
-        /* ══ ADJUSTMENT: POPUP DESIGN — same look as the page's other dialogs (no icon) ══
-           Applies to the shared .popup-content popups: Incomplete Profile, Already Registered, Application Pending,
-           Cancel Request, Requirements Not Yet Verified, Preferred Placement Updated and the invitation popups.
-           The big round icon is gone; each popup now has a gold top bar, a left-aligned title with a thin divider, a
-           left-aligned message and a light button strip along the bottom. Only the look changed — the buttons keep their
-           ids, handlers and colours. */
-        #profileModal .popup-icon,
-        #registeredModal .popup-icon,
-        #pendingBlockedModal .popup-icon,
-        #cancelConfirmModal .popup-icon,
-        #reqUnverifiedModal .popup-icon,
-        #placementReplacedModal .popup-icon,
-        #ciConfirmModal .popup-icon,
-        #ciAcceptedModal .popup-icon { display: none !important; }
-        #profileModal .popup-content,
-        #registeredModal .popup-content,
-        #pendingBlockedModal .popup-content,
-        #cancelConfirmModal .popup-content,
-        #reqUnverifiedModal .popup-content,
-        #placementReplacedModal .popup-content,
-        #ciConfirmModal .popup-content,
-        #ciAcceptedModal .popup-content { text-align: left; padding: 18px 24px 0; border: 1px solid var(--grid-border); border-top: 4px solid #F7C600; overflow: hidden; }
-        #profileModal .popup-content h3,
-        #registeredModal .popup-content h3,
-        #pendingBlockedModal .popup-content h3,
-        #cancelConfirmModal .popup-content h3,
-        #reqUnverifiedModal .popup-content h3,
-        #placementReplacedModal .popup-content h3,
-        #ciConfirmModal .popup-content h3,
-        #ciAcceptedModal .popup-content h3 { margin: 0 -24px 14px; padding: 0 24px 14px; border-bottom: 1px solid #DCE1EC; color: var(--grid-navy); font-size: 17px; font-weight: 700; text-align: left; }
-        #profileModal .popup-content p,
-        #registeredModal .popup-content p,
-        #pendingBlockedModal .popup-content p,
-        #cancelConfirmModal .popup-content p,
-        #reqUnverifiedModal .popup-content p,
-        #placementReplacedModal .popup-content p,
-        #ciConfirmModal .popup-content p,
-        #ciAcceptedModal .popup-content p { text-align: left; line-height: 1.6; margin: 0 0 14px; }
-        #profileModal .popup-content button,
-        #registeredModal .popup-content button,
-        #pendingBlockedModal .popup-content button,
-        #cancelConfirmModal .popup-content button,
-        #reqUnverifiedModal .popup-content button,
-        #placementReplacedModal .popup-content button,
-        #ciConfirmModal .popup-content button,
-        #ciAcceptedModal .popup-content button { text-transform: uppercase; letter-spacing: 0.4px; font-size: 13px; padding: 11px 24px; }
-        #profileModal .popup-content button, #registeredModal .popup-content button, #pendingBlockedModal .popup-content button { background: var(--grid-navy); }
-        #cancelConfirmModal .ccm-actions,
-        #reqUnverifiedModal .rum-actions,
-        #placementReplacedModal .pm-actions,
-        #ciConfirmModal .pm-actions,
-        #ciAcceptedModal .pm-actions,
-        #profileModal .popup-actions,
-        #registeredModal .popup-actions,
-        #pendingBlockedModal .popup-actions,
-        #cancelConfirmModal .popup-actions,
-        #reqUnverifiedModal .popup-actions,
-        #placementReplacedModal .popup-actions,
-        #ciConfirmModal .popup-actions,
-        #ciAcceptedModal .popup-actions { display: flex; gap: 10px; justify-content: flex-end !important; margin: 18px -24px 0; padding: 14px 24px; background: #F3F5F9; border-top: 1px solid #DCE1EC; }
-        #cancelConfirmModal .ccm-actions button,
-        #reqUnverifiedModal .rum-actions button,
-        #placementReplacedModal .pm-actions button,
-        #ciConfirmModal .pm-actions button,
-        #ciAcceptedModal .pm-actions button,
-        #profileModal .popup-actions button,
-        #registeredModal .popup-actions button,
-        #pendingBlockedModal .popup-actions button,
-        #cancelConfirmModal .popup-actions button,
-        #reqUnverifiedModal .popup-actions button,
-        #placementReplacedModal .popup-actions button,
-        #ciConfirmModal .popup-actions button,
-        #ciAcceptedModal .popup-actions button { flex: 0 0 auto; }
-        @media (max-width: 480px) {
-            #cancelConfirmModal .ccm-actions,
-            #reqUnverifiedModal .rum-actions,
-            #placementReplacedModal .pm-actions,
-            #ciConfirmModal .pm-actions,
-            #ciAcceptedModal .pm-actions,
-            #profileModal .popup-actions,
-            #registeredModal .popup-actions,
-            #pendingBlockedModal .popup-actions,
-            #cancelConfirmModal .popup-actions,
-            #reqUnverifiedModal .popup-actions,
-            #placementReplacedModal .popup-actions,
-            #ciConfirmModal .popup-actions,
-            #ciAcceptedModal .popup-actions { flex-direction: column-reverse; }
-            #cancelConfirmModal .ccm-actions button,
-            #reqUnverifiedModal .rum-actions button,
-            #placementReplacedModal .pm-actions button,
-            #ciConfirmModal .pm-actions button,
-            #ciAcceptedModal .pm-actions button,
-            #profileModal .popup-actions button,
-            #registeredModal .popup-actions button,
-            #pendingBlockedModal .popup-actions button,
-            #cancelConfirmModal .popup-actions button,
-            #reqUnverifiedModal .popup-actions button,
-            #placementReplacedModal .popup-actions button,
-            #ciConfirmModal .popup-actions button,
-            #ciAcceptedModal .popup-actions button { width: 100%; }
-        }
-
         /* ══ REQUIREMENT PREVIEW MODAL ══ */
         #reqPreviewModal {
             display: none;
@@ -4409,9 +4307,9 @@ $companies = $conn->query("
 <!-- POPUP MODAL — incomplete profile -->
 <div id="profileModal" class="popup-modal" style="display:none;">
     <div class="popup-content">
-        <h3>Incomplete Profile</h3>
+        <h3><i class="fas fa-triangle-exclamation" style="color:#A0850A;"></i> Incomplete Profile</h3>
         <p>Please complete your student profile (skills, experience, and photo) before applying.</p>
-        <div class="popup-actions"><button onclick="redirectProfile()">Go to Profile</button></div>
+        <button onclick="redirectProfile()">Go to Profile</button>
     </div>
 </div>
 
@@ -4420,7 +4318,7 @@ $companies = $conn->query("
     <div class="popup-content">
         <h3>Already Registered</h3>
         <p>You are already registered to a company. You cannot apply to another company while you have an active OJT placement.</p>
-        <div class="popup-actions"><button onclick="document.getElementById('registeredModal').style.display='none'">Got it</button></div>
+        <button onclick="document.getElementById('registeredModal').style.display='none'">Got it</button>
     </div>
 </div>
 
@@ -4434,7 +4332,7 @@ $companies = $conn->query("
     <div class="popup-content">
         <h3>Application Pending</h3>
         <p>You already have an application request awaiting admin approval. Please cancel it first (in that company's details) if you'd like to apply elsewhere.</p>
-        <div class="popup-actions"><button onclick="document.getElementById('pendingBlockedModal').style.display='none'">Got it</button></div>
+        <button onclick="document.getElementById('pendingBlockedModal').style.display='none'">Got it</button>
     </div>
 </div>
 
@@ -4464,6 +4362,7 @@ $companies = $conn->query("
      requirements that are actually still outstanding. -->
 <div id="reqUnverifiedModal" class="popup-modal" style="display:none;">
     <div class="popup-content">
+        <span class="popup-icon"><i class="fas fa-clipboard-list" style="color:var(--maroon);"></i></span>
         <h3>Requirements Not Yet Verified</h3>
         <p>You cannot apply to a company until <strong>all</strong> of your requirements are <strong>Verified</strong> by the administrator. <span id="rumCount"></span></p>
         <ul class="rum-list" id="rumList"></ul>
@@ -4516,6 +4415,7 @@ $companies = $conn->query("
 <!-- POPUP MODAL — preferred placement replaced; new Application SIT required -->
 <div id="placementReplacedModal" class="popup-modal" style="display:none;">
     <div class="popup-content">
+        <span class="popup-icon"><i class="fas fa-circle-check" style="color:#2b6a3f;"></i></span>
         <h3>Preferred Placement Updated</h3>
         <p>Your preferred placement has been updated with the data of <strong><?= htmlspecialchars($placement_replaced['company_name']) ?></strong>, and your previous Application SIT requirement was removed.</p>
         <p>Please upload your <strong>new Application SIT</strong>. Your application to this company is on hold and will be sent automatically once all of your requirements are verified.</p>
@@ -4554,6 +4454,7 @@ $companies = $conn->query("
 
 <div id="ciConfirmModal" class="popup-modal" style="display:none;" role="alertdialog" aria-modal="true" aria-labelledby="ciConfirmTitle">
     <div class="popup-content">
+        <span class="popup-icon"><i class="fas fa-circle-question" style="color:#A0850A;"></i></span>
         <h3 id="ciConfirmTitle">Decline Invitation</h3>
         <p id="ciConfirmMsg"></p>
         <div class="pm-actions" style="justify-content:center;">
@@ -4565,6 +4466,7 @@ $companies = $conn->query("
 
 <div id="ciAcceptedModal" class="popup-modal" style="display:none;" role="dialog" aria-modal="true">
     <div class="popup-content">
+        <span class="popup-icon"><i class="fas fa-circle-check" style="color:#2b6a3f;"></i></span>
         <h3>Invitation Accepted</h3>
         <p id="ciAcceptedMsg"></p>
         <p>Your <strong>Application SIT</strong> has to be validated again. Please upload a new one on the <strong>Requirements</strong> page. You will be registered automatically once the administrator verifies it.</p>
