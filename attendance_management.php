@@ -324,6 +324,216 @@ if (!function_exists('attm_before_start')) {
 }
 
 /* ════════════════════════════════════════════════════════════════════
+   NEW (student schedule): attendance follows each student's own training
+   schedule (Day / Evening Schedule set on AccomForm.php and changed by the
+   company supervisor on add_ojt_student.php; stored in student_information
+   as Mon–Fri acronyms such as "MWF", "TTh" or "None").
+   Day Schedule = AM duty days, Evening Schedule = PM duty days. A student with
+   only a Day schedule reports (and is judged) on the AM duty only; with only an
+   Evening schedule, on the PM duty only; with both, on both.
+   A weekday with neither duty scheduled and no real attendance entry is never
+   counted as Absent / Missed / Incomplete — it is shown as "Not scheduled".
+   A duty period that holds a real entry is always judged, scheduled or not.
+   Schedule changes are dated (student_schedule_changes), so past days keep the
+   schedule that was in force back then. A student whose schedule is empty or
+   unreadable is treated as scheduled every weekday (nothing changes for them).
+   ════════════════════════════════════════════════════════════════════ */
+if (!function_exists('attsch_parse_days')) {
+    // "MWF" -> [1,3,5] (date('w') numbers); "None" / empty / unreadable -> []
+    function attsch_parse_days($value): array {
+        $rest = trim((string)$value);
+        if ($rest === '' || strcasecmp($rest, 'None') === 0) return [];
+        $codes = ['Th' => 4, 'M' => 1, 'T' => 2, 'W' => 3, 'F' => 5];
+        $found = [];
+        while ($rest !== '') {
+            $hit = false;
+            foreach ($codes as $code => $n) {
+                if (stripos($rest, $code) === 0) { $found[$n] = true; $rest = substr($rest, strlen($code)); $hit = true; break; }
+            }
+            if (!$hit) return [];
+        }
+        $days = array_keys($found);
+        sort($days);
+        return $days;
+    }
+}
+if (!function_exists('attsch_days')) {
+    // Day (AM duty) / Evening (PM duty) schedule -> ['d' => AM days, 'e' => PM days]; null = no usable schedule (both duties every weekday)
+    function attsch_days($day, $evening): ?array {
+        $d = attsch_parse_days($day);
+        $e = attsch_parse_days($evening);
+        if (empty($d) && empty($e)) return null;
+        return ['d' => $d, 'e' => $e];
+    }
+}
+if (!function_exists('attsch_load')) {
+    // [student_id => ['cur' => ['d'=>…,'e'=>…]|null, 'changes' => [['d' => 'Y-m-d', 'old' => same|null], ...oldest first]]]
+    function attsch_load($conn, array $ids): array {
+        static $cache = [];
+        $ids = array_values(array_unique(array_filter(array_map('intval', $ids))));
+        sort($ids);
+        if (empty($ids)) return [];
+        $key = implode(',', $ids);
+        if (isset($cache[$key])) return $cache[$key];
+        $map = [];
+        foreach ($ids as $i) $map[$i] = ['cur' => null, 'changes' => []];
+        try {
+            $r = $conn->query("SELECT user_id, day_sched, evening_sched FROM student_information WHERE user_id IN ($key)");
+            if ($r) { while ($row = $r->fetch_assoc()) $map[(int)$row['user_id']]['cur'] = attsch_days($row['day_sched'], $row['evening_sched']); }
+        } catch (\Throwable $e) {}
+        try {
+            $t = $conn->query("SHOW TABLES LIKE 'student_schedule_changes'");
+            if ($t && $t->num_rows > 0) {
+                $r = $conn->query("SELECT student_id, old_day_sched, old_evening_sched, DATE(created_at) AS d
+                                   FROM student_schedule_changes WHERE student_id IN ($key) ORDER BY created_at ASC, id ASC");
+                if ($r) {
+                    while ($row = $r->fetch_assoc()) {
+                        $map[(int)$row['student_id']]['changes'][] = ['d' => $row['d'], 'old' => attsch_days($row['old_day_sched'], $row['old_evening_sched'])];
+                    }
+                }
+            }
+        } catch (\Throwable $e) {}
+        return $cache[$key] = $map;
+    }
+}
+if (!function_exists('attsch_periods')) {
+    // which duty periods the student is scheduled for on $day: ['am' => bool, 'pm' => bool] (unknown student = both)
+    function attsch_periods(array $map, $studentId, string $day): array {
+        $s = $map[(int)$studentId] ?? null;
+        if ($s === null) return ['am' => true, 'pm' => true];
+        $sc = $s['cur'];
+        foreach ($s['changes'] as $c) {            // a change applies from its own date onward
+            if ($c['d'] > $day) { $sc = $c['old']; break; }
+        }
+        if ($sc === null) return ['am' => true, 'pm' => true];
+        $dow = (int)date('w', strtotime($day));
+        return ['am' => in_array($dow, $sc['d'], true), 'pm' => in_array($dow, $sc['e'], true)];
+    }
+}
+if (!function_exists('attsch_is_scheduled')) {
+    // true when the student is scheduled for at least one duty period on $day
+    function attsch_is_scheduled(array $map, $studentId, string $day): bool {
+        $p = attsch_periods($map, $studentId, $day);
+        return $p['am'] || $p['pm'];
+    }
+}
+if (!function_exists('attsch_has_real_entry')) {
+    // true when the log row holds at least one real time (a "missed"-only row is not an entry)
+    function attsch_has_real_entry($row): bool {
+        if (!is_array($row)) return false;
+        foreach (['am_time_in', 'am_time_out', 'pm_time_in', 'pm_time_out'] as $c) {
+            $v = $row[$c] ?? null;
+            if ($v !== null && $v !== '' && $v !== 'missed') return true;
+        }
+        return false;
+    }
+}
+if (!function_exists('attsch_limit_duty')) {
+    // narrows the day's active duty periods (['am' => bool, 'pm' => bool]) to the ones the student is scheduled for;
+    // a period that holds a real entry stays active so recorded attendance is never ignored
+    function attsch_limit_duty(array $duty, array $periods, $row): array {
+        $hv = fn($v) => ($v !== null && $v !== '' && $v !== 'missed');
+        $realAm = is_array($row) && ($hv($row['am_time_in'] ?? null) || $hv($row['am_time_out'] ?? null));
+        $realPm = is_array($row) && ($hv($row['pm_time_in'] ?? null) || $hv($row['pm_time_out'] ?? null));
+        $duty['am'] = !empty($duty['am']) && ($periods['am'] || $realAm);
+        $duty['pm'] = !empty($duty['pm']) && ($periods['pm'] || $realPm);
+        return $duty;
+    }
+}
+if (!function_exists('attsch_js_map')) {
+    // compact form for the page script: {id: {c: {d: AM days, e: PM days}|null, h: [[date, {d,e}|null], ...]}}
+    function attsch_js_map(array $map): object {
+        $o = [];
+        foreach ($map as $id => $s) {
+            $h = [];
+            foreach ($s['changes'] as $c) $h[] = [$c['d'], $c['old']];
+            $o[(string)$id] = ['c' => $s['cur'], 'h' => $h];
+        }
+        return (object)$o;
+    }
+}
+
+/* ════════════════════════════════════════════════════════════════════
+   NEW (OJT ends at the required hours): a student's OJT ends on the day their
+   rendered duty hours (all logs, all companies — same total as the Student List
+   and the OJT End marker) reach the "Total Required Hours" of their course on
+   course_offering.php. From the next day on, nothing is required of the student:
+   no Absent / Missed / Incomplete, no new sign-ins. A student without a Course
+   Offering (or without a total) simply never ends. A day that holds a real entry
+   is always shown as recorded.
+   ════════════════════════════════════════════════════════════════════ */
+if (!function_exists('ojtend_dates')) {
+    // [student_id => 'Y-m-d' (the day the required hours were reached)]; students who have not reached them are left out
+    function ojtend_dates($conn, array $ids): array {
+        static $cache = [];
+        $ids = array_values(array_unique(array_filter(array_map('intval', $ids))));
+        sort($ids);
+        if (empty($ids)) return [];
+        $key = implode(',', $ids);
+        if (isset($cache[$key])) return $cache[$key];
+        $out = [];
+        try {
+            $norm = function($c) { $c = preg_replace('/\s+/', ' ', trim((string)$c)); return function_exists('mb_strtolower') ? mb_strtolower($c) : strtolower($c); };
+            $hasCol = function($table, $col) use ($conn) {
+                $r = $conn->query("SHOW COLUMNS FROM `$table` LIKE '" . $conn->real_escape_string($col) . "'");
+                return $r && $r->num_rows > 0;
+            };
+            $rules = [];
+            $r = $conn->query("SELECT course, total_hours FROM course_offerings");
+            if ($r) { while ($row = $r->fetch_assoc()) { if ((int)$row['total_hours'] > 0) $rules[$norm($row['course'])] = (int)$row['total_hours']; } }
+            if (empty($rules)) return $cache[$key] = [];
+
+            $courses = [];
+            if ($hasCol('users', 'course')) {
+                $r = $conn->query("SELECT id, course FROM users WHERE id IN ($key)");
+                if ($r) { while ($row = $r->fetch_assoc()) if (trim((string)$row['course']) !== '') $courses[(int)$row['id']] = $row['course']; }
+            }
+            if ($hasCol('student_information', 'course')) {
+                $r = $conn->query("SELECT user_id, MAX(course) AS course FROM student_information WHERE user_id IN ($key) GROUP BY user_id");
+                if ($r) { while ($row = $r->fetch_assoc()) if (!isset($courses[(int)$row['user_id']]) && trim((string)$row['course']) !== '') $courses[(int)$row['user_id']] = $row['course']; }
+            }
+
+            $need = [];
+            foreach ($ids as $i) { $k = $norm($courses[$i] ?? ''); if ($k !== '' && isset($rules[$k])) $need[$i] = (int)round($rules[$k] * 3600); }
+            if (empty($need)) return $cache[$key] = [];
+
+            $sec = function($p) {
+                return "GREATEST(0, COALESCE(CASE
+                    WHEN {$p}_time_in  IS NOT NULL AND {$p}_time_in  != '' AND {$p}_time_in  != 'missed'
+                     AND {$p}_time_out IS NOT NULL AND {$p}_time_out != '' AND {$p}_time_out != 'missed'
+                    THEN CASE
+                        WHEN {$p}_time_in LIKE '%-%-% %' AND {$p}_time_out LIKE '%-%-% %'
+                        THEN TIMESTAMPDIFF(SECOND, {$p}_time_in, {$p}_time_out)
+                        ELSE (TIME_TO_SEC(TIME({$p}_time_out)) - TIME_TO_SEC(TIME({$p}_time_in)))
+                    END
+                    ELSE 0
+                END, 0))";
+            };
+            $needList = implode(',', array_keys($need));
+            $r = $conn->query("SELECT user_id, date, SUM(" . $sec('am') . " + " . $sec('pm') . ") AS secs
+                               FROM attendance_logs WHERE user_id IN ($needList) GROUP BY user_id, date ORDER BY user_id, date ASC");
+            $running = [];
+            if ($r) {
+                while ($row = $r->fetch_assoc()) {
+                    $u = (int)$row['user_id'];
+                    if (isset($out[$u])) continue;
+                    $running[$u] = ($running[$u] ?? 0) + (int)round((float)$row['secs']);
+                    if ($running[$u] >= $need[$u]) $out[$u] = $row['date'];
+                }
+            }
+        } catch (\Throwable $e) { $out = []; }
+        return $cache[$key] = $out;
+    }
+}
+if (!function_exists('ojtend_is_after')) {
+    // true when $day is after the student's OJT end date (the day the required hours were reached)
+    function ojtend_is_after(array $endMap, $studentId, string $day): bool {
+        $e = $endMap[(int)$studentId] ?? null;
+        return $e !== null && $day > $e;
+    }
+}
+
+/* ════════════════════════════════════════════════════════════════════
    UPDATED (Live updates instead of auto page reload): a small fingerprint
    of everything this page displays (attendance logs, late requests,
    schedules, assigned students, course rules and today's date). The page
@@ -342,6 +552,8 @@ if (!function_exists('attm_live_signature')) {
             "SELECT COUNT(*) AS c, COALESCE(SUM(CRC32(CONCAT_WS('|', date, IFNULL(am_time_in_start,''), IFNULL(am_time_in_end,''), IFNULL(am_time_out_start,''), IFNULL(am_time_out_end,''), IFNULL(pm_time_in_start,''), IFNULL(pm_time_in_end,''), IFNULL(pm_time_out_start,''), IFNULL(pm_time_out_end,'')))), 0) AS s
              FROM attendance_settings WHERE company_id = $cid",
             "SELECT COUNT(*) AS c, COALESCE(SUM(student_id), 0) AS s FROM ojt_assignments WHERE company_id = $cid",
+            "SELECT COUNT(*) AS c, COALESCE(SUM(CRC32(CONCAT_WS('|', user_id, IFNULL(day_sched,''), IFNULL(evening_sched,'')))), 0) AS s FROM student_information WHERE user_id IN (SELECT student_id FROM ojt_assignments WHERE company_id = $cid)", // NEW (student schedule)
+            "SELECT COUNT(*) AS c, COALESCE(SUM(id), 0) AS s FROM student_schedule_changes WHERE company_id = $cid", // NEW (student schedule): absent table is ignored below
             "SELECT COUNT(*) AS c, COALESCE(SUM(CRC32(CONCAT_WS('|', course, total_hours, daily_hours))), 0) AS s FROM course_offerings",
         ];
         foreach ($queries as $q) {
@@ -352,6 +564,700 @@ if (!function_exists('attm_live_signature')) {
             } catch (\Throwable $e) { $parts[] = '-'; }
         }
         return md5(implode('|', $parts));
+    }
+}
+
+/* ════════════════════════════════════════════════════════════════════
+   NEW (late request legitimacy check): evidence the SERVER records for every late request
+   (the student's browser cannot change it) so the supervisor can judge whether it is genuine:
+     late_requests.submit_ip / submit_ua / photo_hash / photo_valid, and
+     attendance_device_log — the device, network and photo fingerprint of every regular sign-in and late
+     request, which the request is compared against on attendance_management.php.
+   Columns / table are created automatically the first time they are needed (existing databases keep working).
+   ════════════════════════════════════════════════════════════════════ */
+if (!function_exists('ensureLateRequestEvidence')) {
+    function ensureLateRequestEvidence($conn): bool {
+        static $ok = null;
+        if ($ok !== null) return $ok;
+        try {
+            $have = [];
+            $r = $conn->query("SHOW COLUMNS FROM late_requests");
+            if ($r) { while ($c = $r->fetch_assoc()) $have[$c['Field']] = true; }
+            $add = [
+                'submit_ip'   => "VARCHAR(45) NULL",
+                'submit_ua'   => "VARCHAR(255) NULL",
+                'photo_hash'  => "CHAR(64) NULL",
+                'photo_valid' => "TINYINT(1) NULL",
+            ];
+            foreach ($add as $col => $def) {
+                if (!isset($have[$col])) {
+                    try { $conn->query("ALTER TABLE late_requests ADD COLUMN `$col` $def"); } catch (\Throwable $e) { /* added by a parallel request */ }
+                }
+            }
+            $conn->query("CREATE TABLE IF NOT EXISTS attendance_device_log (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                user_id INT NOT NULL,
+                company_id INT NOT NULL,
+                date DATE NOT NULL,
+                slot VARCHAR(20) NOT NULL,
+                kind VARCHAR(12) NOT NULL,
+                ip VARCHAR(45) NULL,
+                ua VARCHAR(255) NULL,
+                photo_hash CHAR(64) NULL,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                KEY idx_adl_user (user_id, created_at),
+                KEY idx_adl_hash (photo_hash)
+            )");
+            $r = $conn->query("SHOW COLUMNS FROM late_requests LIKE 'photo_hash'");
+            return $ok = ($r && $r->num_rows > 0);
+        } catch (\Throwable $e) { return $ok = false; }
+    }
+}
+
+if (!function_exists('attm_lr_ua_key')) {
+    // "Chrome / Windows" style key of a user-agent string (used to compare devices)
+    function attm_lr_ua_key(?string $ua): string {
+        $ua = (string)$ua;
+        if ($ua === '') return '';
+        $b = 'Browser';
+        if (preg_match('/Edg(e|A|iOS)?\//i', $ua))        $b = 'Edge';
+        elseif (preg_match('/OPR\/|Opera/i', $ua))         $b = 'Opera';
+        elseif (preg_match('/Firefox|FxiOS/i', $ua))       $b = 'Firefox';
+        elseif (preg_match('/Chrome|CriOS/i', $ua))        $b = 'Chrome';
+        elseif (preg_match('/Safari/i', $ua))              $b = 'Safari';
+        $o = 'Unknown OS';
+        if (preg_match('/Android/i', $ua))                 $o = 'Android';
+        elseif (preg_match('/iPhone|iPad|iPod/i', $ua))    $o = 'iOS';
+        elseif (preg_match('/Windows/i', $ua))             $o = 'Windows';
+        elseif (preg_match('/Mac OS X|Macintosh/i', $ua))  $o = 'Mac';
+        elseif (preg_match('/Linux|X11/i', $ua))           $o = 'Linux';
+        return $b . ' on ' . $o;
+    }
+}
+if (!function_exists('attm_lr_net_key')) {
+    // network of an IP address: IPv4 /24, IPv6 /48 (so a changing last number on the same network still matches)
+    function attm_lr_net_key(?string $ip): string {
+        $ip = (string)$ip;
+        if ($ip === '') return '';
+        if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) { $p = explode('.', $ip); return $p[0] . '.' . $p[1] . '.' . $p[2]; }
+        if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6)) { $b = @inet_pton($ip); return $b === false ? '' : bin2hex(substr($b, 0, 6)); }
+        return '';
+    }
+}
+if (!function_exists('attm_lr_mask_ip')) {
+    function attm_lr_mask_ip(?string $ip): string {
+        $ip = (string)$ip;
+        if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4)) { $p = explode('.', $ip); return $p[0] . '.' . $p[1] . '.' . $p[2] . '.xxx'; }
+        if (filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6)) { $p = explode(':', $ip); return implode(':', array_slice($p, 0, 3)) . ':…'; }
+        return '';
+    }
+}
+if (!function_exists('attm_lr_evidence')) {
+    /* Legitimacy check of ONE late request. Only evidence the server recorded or can verify is used:
+         photo (readable, not re-used), device + network compared with the student's regular sign-ins,
+         the rest of that day's attendance, how long after the window it was sent, how often the student asks,
+         and whether the same reason was already used. Returns
+         ['level' => 'ok'|'review'|'risk', 'label' => string, 'signals' => [['level' => 'ok'|'info'|'review'|'risk', 'text' => string], ...],
+          'device' => 'Chrome on Windows · 203.0.113.xxx'] — never throws. */
+    function attm_lr_evidence($conn, int $companyId, array $r): array {
+        $sig = [];
+        $add = function(string $lvl, string $txt) use (&$sig) { $sig[] = ['level' => $lvl, 'text' => $txt]; };
+        $device = '';
+        $detail = null;
+        $set = null;
+        try {
+            $id   = (int)($r['id'] ?? 0);
+            $sid  = (int)($r['student_id'] ?? 0);
+            $date = (string)($r['date'] ?? '');
+            $type = (string)($r['type'] ?? '');
+            $kind = 'late'; // overtime requests were removed (old overtime rows are handled as late requests)
+            $labels = ['am_time_in' => 'AM Sign In', 'am_time_out' => 'AM Sign Out', 'pm_time_in' => 'PM Sign In', 'pm_time_out' => 'PM Sign Out'];
+            $slotLbl = $labels[$type] ?? $type;
+
+            // 1) Photo
+            $hasPhoto = !empty($r['has_photo']) || !empty($r['photo']);
+            if (!$hasPhoto) {
+                $add('review', 'No photo was attached to this request.');
+            } elseif (isset($r['photo_valid']) && $r['photo_valid'] !== null && (int)$r['photo_valid'] === 0) {
+                $add('risk', 'The attached photo is not a valid image.');
+            } else {
+                $hash = (string)($r['photo_hash'] ?? '');
+                $dupMsg = null;
+                if ($hash !== '') {
+                    $q = $conn->prepare("SELECT lr2.student_id, lr2.date, CONCAT(u.first_name, ' ', u.last_name) AS nm FROM late_requests lr2 JOIN users u ON u.id = lr2.student_id WHERE lr2.photo_hash = ? AND lr2.id <> ? ORDER BY lr2.id ASC LIMIT 1");
+                    $q->bind_param("si", $hash, $id); $q->execute();
+                    $d = $q->get_result()->fetch_assoc(); $q->close();
+                    if ($d) {
+                        $dupMsg = ((int)$d['student_id'] === $sid)
+                            ? 'This exact photo was already used in an earlier request of this student (' . date('M j, Y', strtotime($d['date'])) . ').'
+                            : 'This exact photo was already submitted by another student (' . trim($d['nm']) . ', ' . date('M j, Y', strtotime($d['date'])) . ').';
+                    } else {
+                        $q = $conn->prepare("SELECT user_id, date FROM attendance_device_log WHERE photo_hash = ? AND NOT (kind IN ('late','overtime') AND user_id = ? AND date = ? AND slot = ?) ORDER BY id ASC LIMIT 1");
+                        $q->bind_param("siss", $hash, $sid, $date, $type); $q->execute();
+                        $d = $q->get_result()->fetch_assoc(); $q->close();
+                        if ($d) $dupMsg = 'This exact photo was already used for another attendance entry (' . date('M j, Y', strtotime($d['date'])) . ').';
+                    }
+                }
+                if ($dupMsg) $add('risk', $dupMsg);
+                else         $add('ok', 'A readable photo is attached and has not been used before.');
+            }
+
+            // 2) Device / network compared with the student's regular sign-ins (last 60 days)
+            $ip = (string)($r['submit_ip'] ?? ''); $ua = (string)($r['submit_ua'] ?? '');
+            if ($ip !== '' || $ua !== '') $device = trim(attm_lr_ua_key($ua) . ($ip !== '' ? ' · ' . attm_lr_mask_ip($ip) : ''), ' ·');
+            if ($ip === '' && $ua === '') {
+                $add('info', 'Device and network were not recorded for this request (sent before this check existed).');
+            } else {
+                $q = $conn->prepare("SELECT ip, ua FROM attendance_device_log WHERE user_id = ? AND kind = 'attendance' AND created_at >= (NOW() - INTERVAL 60 DAY) ORDER BY id DESC LIMIT 40");
+                $q->bind_param("i", $sid); $q->execute();
+                $hist = $q->get_result()->fetch_all(MYSQLI_ASSOC); $q->close();
+                if (empty($hist)) {
+                    $add('info', 'No earlier sign-ins are recorded to compare this device or network with.');
+                } else {
+                    $uaKey = attm_lr_ua_key($ua); $netKey = attm_lr_net_key($ip);
+                    $sameUa = false; $sameNet = false;
+                    foreach ($hist as $h) {
+                        if ($uaKey !== '' && attm_lr_ua_key($h['ua']) === $uaKey)   $sameUa = true;
+                        if ($netKey !== '' && attm_lr_net_key($h['ip']) === $netKey) $sameNet = true;
+                    }
+                    if ($sameUa && $sameNet)      $add('ok', 'Sent from the same device and network as the student\'s regular sign-ins.');
+                    elseif ($sameUa)              $add('review', 'Sent from a different network than the student\'s regular sign-ins (same device).');
+                    elseif ($sameNet)             $add('review', 'Sent from a different device than the student\'s regular sign-ins (same network).');
+                    else                          $add(count($hist) >= 3 ? 'risk' : 'review', 'Sent from a device and network the student has never signed in from.');
+                }
+            }
+
+            // 3) The rest of that day's attendance
+            $q = $conn->prepare("SELECT am_time_in, am_time_out, pm_time_in, pm_time_out FROM attendance_logs WHERE user_id = ? AND date = ? AND company_id = ? LIMIT 1");
+            $q->bind_param("isi", $sid, $date, $companyId); $q->execute();
+            $log = $q->get_result()->fetch_assoc(); $q->close();
+            $real = 0;
+            foreach (['am_time_in', 'am_time_out', 'pm_time_in', 'pm_time_out'] as $c) { $v = $log[$c] ?? null; if ($v !== null && $v !== '' && $v !== 'missed') $real++; }
+            if ($real === 0) {
+                $add('review', 'The student has no other attendance recorded on this day.');
+            } else {
+                $add('ok', 'The student has ' . $real . ' other recorded entr' . ($real === 1 ? 'y' : 'ies') . ' on this day.');
+            }
+            if ($kind === 'late' && in_array($type, ['am_time_out', 'pm_time_out'], true)) {
+                $inV = $log[$type === 'am_time_out' ? 'am_time_in' : 'pm_time_in'] ?? null;
+                if ($inV === null || $inV === '' || $inV === 'missed') $add('review', 'No ' . ($type === 'am_time_out' ? 'AM' : 'PM') . ' Sign In is recorded for this duty, so there is nothing to sign out from.');
+            }
+
+            // 4) How long after the window it was sent (information)
+            $endKeys = ['am_time_in' => 'am_time_in_end', 'am_time_out' => 'am_time_out_end', 'pm_time_in' => 'pm_time_in_end', 'pm_time_out' => 'pm_time_out_end'];
+            if (isset($endKeys[$type]) && $date !== '') {
+                $q = $conn->prepare("SELECT * FROM attendance_settings WHERE company_id = ? AND (date = ? OR (is_auto = 1 AND date <= ?)) ORDER BY (date = ?) DESC, date DESC LIMIT 1");
+                $q->bind_param("isss", $companyId, $date, $date, $date); $q->execute();
+                $set = $q->get_result()->fetch_assoc(); $q->close();
+                $endT = $set[$endKeys[$type]] ?? null;
+                $sentTs = strtotime((string)($r['created_at'] ?? ''));
+                if ($endT && $sentTs) {
+                    $endTs = strtotime($date . ' ' . $endT);
+                    if ($endTs) {
+                        $mins = (int)round(($sentTs - $endTs) / 60);
+                        if ($mins >= 0) $add('info', 'Sent ' . ($mins >= 60 ? floor($mins / 60) . ' h ' . ($mins % 60) . ' min' : $mins . ' min') . ' after the ' . $slotLbl . ' window closed.');
+                    }
+                }
+            }
+
+            // 4b) What allowing this late request records: the Sign Out is credited at the SCHEDULED sign-out time
+            //     (never later than the moment the request was sent, never before the Sign In).
+            if (in_array($type, ['am_time_out', 'pm_time_out'], true) && $set) {
+                $per = ($type === 'am_time_out') ? 'am' : 'pm';
+                $fmt = function($ts) { return $ts ? date('g:i A', $ts) : null; };
+                $dur = function($sec) { $m = (int)round(max(0, $sec) / 60); return floor($m / 60) . 'h ' . ($m % 60) . 'm'; };
+                $toTs = function($v) use ($date) {
+                    if (!$v || $v === 'missed') return null;
+                    $v = (strpos($v, ' ') === false) ? ($date . ' ' . $v) : $v;
+                    $t = strtotime($v);
+                    return $t === false ? null : $t;
+                };
+                $inTs    = $toTs($log[$per . '_time_in'] ?? null);
+                $schedTs = $toTs($set[$per . '_time_out_start'] ?? null);
+                $sentTs2 = strtotime((string)($r['created_at'] ?? '')) ?: null;
+                $detail = [
+                    'period' => strtoupper($per),
+                    'in' => $fmt($inTs), 'sched_out' => $fmt($schedTs), 'sent' => $fmt($sentTs2),
+                    'late_credit' => null,
+                ];
+                if ($inTs && $schedTs && $sentTs2) {
+                    $lateOut = min($schedTs, $sentTs2); if ($lateOut < $inTs) $lateOut = $inTs;
+                    $detail['late_credit'] = $dur($lateOut - $inTs);
+                    $add('info', 'Allowing it credits ' . $detail['late_credit'] . ' (sign-in to the scheduled sign-out, ' . $detail['sched_out'] . ').');
+                } elseif (!$inTs) {
+                    $detail['late_credit'] = '0h 0m';
+                }
+            }
+
+            // 5) How often this student asks
+            $q = $conn->prepare("SELECT COUNT(*) AS n, SUM(status = 'rejected') AS rej FROM late_requests WHERE student_id = ? AND id <> ? AND created_at >= (NOW() - INTERVAL 30 DAY)");
+            $q->bind_param("ii", $sid, $id); $q->execute();
+            $f = $q->get_result()->fetch_assoc(); $q->close();
+            $n = (int)($f['n'] ?? 0); $rej = (int)($f['rej'] ?? 0);
+            if ($n >= 5)      $add('risk',   $n . ' other late requests from this student in the last 30 days.');
+            elseif ($n >= 3)  $add('review', $n . ' other late requests from this student in the last 30 days.');
+            else              $add('ok',     $n === 0 ? 'No other late requests from this student in the last 30 days.' : $n . ' other late request' . ($n === 1 ? '' : 's') . ' from this student in the last 30 days.');
+            if ($rej >= 2)    $add('review', $rej . ' of this student\'s recent requests were rejected.');
+
+            // 6) The reason
+            $reason = trim((string)($r['reason'] ?? ''));
+            $norm = preg_replace('/[^a-z0-9]+/', ' ', function_exists('mb_strtolower') ? mb_strtolower($reason) : strtolower($reason));
+            $norm = trim($norm);
+            if ($norm !== '') {
+                if ((function_exists('mb_strlen') ? mb_strlen($reason) : strlen($reason)) < 15) $add('review', 'The reason is very short.');
+                $q = $conn->prepare("SELECT student_id, reason FROM late_requests WHERE company_id = ? AND id <> ? AND (student_id = ? OR date = ?) ORDER BY id DESC LIMIT 200");
+                $q->bind_param("iiis", $companyId, $id, $sid, $date); $q->execute();
+                $others = $q->get_result()->fetch_all(MYSQLI_ASSOC); $q->close();
+                $sameSelf = false; $sameOther = false;
+                foreach ($others as $o) {
+                    $on = trim(preg_replace('/[^a-z0-9]+/', ' ', function_exists('mb_strtolower') ? mb_strtolower((string)$o['reason']) : strtolower((string)$o['reason'])));
+                    if ($on === $norm) { if ((int)$o['student_id'] === $sid) $sameSelf = true; else $sameOther = true; }
+                }
+                if ($sameOther)     $add('risk',   'The same reason was submitted by another student on this day.');
+                if ($sameSelf)      $add('review', 'The student used exactly the same reason in an earlier request.');
+            }
+        } catch (\Throwable $e) {
+            $add('info', 'Some checks could not be completed.');
+        }
+        $rank = ['ok' => 0, 'info' => 0, 'review' => 1, 'risk' => 2];
+        $max = 0;
+        foreach ($sig as $s) $max = max($max, $rank[$s['level']] ?? 0);
+        $level = $max >= 2 ? 'risk' : ($max === 1 ? 'review' : 'ok');
+        $label = ['ok' => 'Looks consistent', 'review' => 'Review before approving', 'risk' => 'High risk — verify with the student first'][$level];
+        return ['level' => $level, 'label' => $label, 'signals' => $sig, 'device' => $device, 'detail' => $detail];
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// XLSX EXPORT HANDLER
+// (formerly the separate export_attendance_xlsx.php — the Export XLSX button of the
+//  Monthly Attendance Summary now calls attendance_management.php?export=xlsx&month=YYYY-MM)
+//
+// Filename format: {CompanyName}_{MonAbbrev}{Year}.xlsx   e.g.  AcmeCorp_Jan2025.xlsx
+// Uses the same student schedule (Day = AM duty, Evening = PM duty) and OJT-end rules as the page.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Minimal pure-PHP XLSX writer.
+ * Supports: cell values, bold header row, column auto-width, cell fill colours.
+ */
+if (!function_exists('attm_build_xlsx')) {
+function attm_build_xlsx(array $header, array $rows, string $sheet_title,
+                    string $company_display, string $month_label): string
+{
+    // ── Colour map for status values ──────────────────────────────────────────
+    $status_fills = [
+        'PRESENT'    => 'C6EFCE',   // green tint
+        'ABSENT'     => 'FFC7CE',   // red tint
+        'INCOMPLETE' => 'FFEB9C',   // amber tint
+        'OFF'        => 'E4DFEC',   // purple tint (Day Off)
+        'OFF'        => 'E4DFEC',
+    ];
+
+    // ── Shared strings ────────────────────────────────────────────────────────
+    $sst    = [];    // index => string
+    $sstMap = [];    // string => index
+
+    $si = function(string $v) use (&$sst, &$sstMap): int {
+        if (!isset($sstMap[$v])) {
+            $sstMap[$v] = count($sst);
+            $sst[]      = $v;
+        }
+        return $sstMap[$v];
+    };
+
+    // ── Figure out column widths (max char length per column) ─────────────────
+    $col_widths = [];
+    foreach ($header as $ci => $h) {
+        $col_widths[$ci] = mb_strlen((string)$h);
+    }
+    foreach ($rows as $row) {
+        foreach ($row as $ci => $cell) {
+            $len = mb_strlen((string)$cell);
+            if (!isset($col_widths[$ci]) || $len > $col_widths[$ci]) {
+                $col_widths[$ci] = $len;
+            }
+        }
+    }
+    // Add padding; cap at 40; Name column wider
+    foreach ($col_widths as $ci => &$w) {
+        $w = min(40, max(9, $w + 4));
+    }
+    unset($w);
+    $col_widths[0] = min(40, max(20, $col_widths[0] ?? 20)); // Name col
+
+    // ── Build sheet XML ───────────────────────────────────────────────────────
+    // Style indices (defined in styles.xml below):
+    //   0 = default, 1 = bold header, 2 = present, 3 = absent, 4 = incomplete, 5 = off
+    $style_map = [
+        'PRESENT'    => 2,
+        'ABSENT'     => 3,
+        'INCOMPLETE' => 4,
+        'OFF'        => 5,
+    ];
+
+    $col_letter = function(int $n): string {
+        $s = '';
+        $n++;   // 0-indexed → 1-indexed
+        while ($n > 0) {
+            $n--;
+            $s = chr(65 + ($n % 26)) . $s;
+            $n = intdiv($n, 26);
+        }
+        return $s;
+    };
+
+    $xml_sheet = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+    $xml_sheet .= '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">';
+
+    // column widths
+    $xml_sheet .= '<cols>';
+    foreach ($col_widths as $ci => $w) {
+        $c1 = $c2 = $ci + 1;
+        $xml_sheet .= '<col min="'.$c1.'" max="'.$c2.'" width="'.$w.'" customWidth="1"/>';
+    }
+    $xml_sheet .= '</cols>';
+
+    $xml_sheet .= '<sheetData>';
+
+    // Title row (row 1) — merged later via mergeCell; put text in A1
+    $title_text = $company_display . ' — Attendance Summary — ' . $month_label;
+    $xml_sheet .= '<row r="1"><c r="A1" t="s" s="6"><v>'.$si($title_text).'</v></c></row>';
+
+    // Header row (row 2)
+    $xml_sheet .= '<row r="2">';
+    foreach ($header as $ci => $h) {
+        $col = $col_letter($ci);
+        $xml_sheet .= '<c r="'.$col.'2" t="s" s="1"><v>'.$si((string)$h).'</v></c>';
+    }
+    $xml_sheet .= '</row>';
+
+    // Data rows (start at row 3)
+    $excel_row = 3;
+    foreach ($rows as $row) {
+        $xml_sheet .= '<row r="'.$excel_row.'">';
+        foreach ($row as $ci => $cell) {
+            $col   = $col_letter($ci);
+            $ref   = $col . $excel_row;
+            $upper = strtoupper(trim((string)$cell));
+            $s_idx = isset($style_map[$upper]) ? $style_map[$upper] : 0;
+            if ($cell === '') {
+                $xml_sheet .= '<c r="'.$ref.'" s="'.$s_idx.'"/>';
+            } else {
+                $xml_sheet .= '<c r="'.$ref.'" t="s" s="'.$s_idx.'"><v>'.$si((string)$cell).'</v></c>';
+            }
+        }
+        $xml_sheet .= '</row>';
+        $excel_row++;
+    }
+
+    $xml_sheet .= '</sheetData>';
+
+    // Merge title row across all columns
+    $total_cols  = count($header);
+    $last_col    = $col_letter($total_cols - 1);
+    $xml_sheet .= '<mergeCells><mergeCell ref="A1:'.$last_col.'1"/></mergeCells>';
+
+    $xml_sheet .= '</worksheet>';
+
+    // ── Shared strings XML ────────────────────────────────────────────────────
+    $xml_sst = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+    $xml_sst .= '<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="'.count($sst).'" uniqueCount="'.count($sst).'">';
+    foreach ($sst as $sv) {
+        $xml_sst .= '<si><t xml:space="preserve">'.htmlspecialchars($sv, ENT_XML1, 'UTF-8').'</t></si>';
+    }
+    $xml_sst .= '</sst>';
+
+    // ── Styles XML ────────────────────────────────────────────────────────────
+    // Fill indices: 0=none,1=gray(reserved),2=present(green),3=absent(red),4=incomplete(amber),5=off(purple),6=header(dark blue),7=title(navy)
+    $xml_styles = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+    $xml_styles .= '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">';
+
+    // fonts: 0=default, 1=bold, 2=bold+white(for header), 3=bold+dark(for status), 4=bold+white+larger(title)
+    $xml_styles .= '<fonts count="5">';
+    $xml_styles .= '<font><sz val="11"/><name val="Arial"/></font>';                                                         // 0 default
+    $xml_styles .= '<font><b/><sz val="11"/><name val="Arial"/></font>';                                                     // 1 bold
+    $xml_styles .= '<font><b/><sz val="11"/><color rgb="FFFFFFFF"/><name val="Arial"/></font>';                              // 2 bold white (header bg)
+    $xml_styles .= '<font><b/><sz val="10"/><name val="Arial"/></font>';                                                     // 3 bold dark (status cells)
+    $xml_styles .= '<font><b/><sz val="13"/><color rgb="FFFFFFFF"/><name val="Arial"/></font>';                              // 4 bold white large (title)
+    $xml_styles .= '</fonts>';
+
+    // fills: 0=none,1=gray,2=present,3=absent,4=incomplete,5=off,6=header,7=title
+    $xml_styles .= '<fills count="8">';
+    $xml_styles .= '<fill><patternFill patternType="none"/></fill>';
+    $xml_styles .= '<fill><patternFill patternType="gray125"/></fill>';
+    $xml_styles .= '<fill><patternFill patternType="solid"><fgColor rgb="FFC6EFCE"/></patternFill></fill>';   // 2 present
+    $xml_styles .= '<fill><patternFill patternType="solid"><fgColor rgb="FFFFC7CE"/></patternFill></fill>';   // 3 absent
+    $xml_styles .= '<fill><patternFill patternType="solid"><fgColor rgb="FFFFEB9C"/></patternFill></fill>';   // 4 incomplete
+    $xml_styles .= '<fill><patternFill patternType="solid"><fgColor rgb="FFE4DFEC"/></patternFill></fill>';   // 5 off
+    $xml_styles .= '<fill><patternFill patternType="solid"><fgColor rgb="FF1565C0"/></patternFill></fill>';   // 6 header dark blue
+    $xml_styles .= '<fill><patternFill patternType="solid"><fgColor rgb="FF0D2B6B"/></patternFill></fill>';   // 7 title navy
+    $xml_styles .= '</fills>';
+
+    // borders
+    $border_thin = '<border><left style="thin"><color rgb="FFD0D0D0"/></left><right style="thin"><color rgb="FFD0D0D0"/></right><top style="thin"><color rgb="FFD0D0D0"/></top><bottom style="thin"><color rgb="FFD0D0D0"/></bottom></border>';
+    $xml_styles .= '<borders count="2">';
+    $xml_styles .= '<border/>';
+    $xml_styles .= $border_thin;
+    $xml_styles .= '</borders>';
+
+    // cellStyleXfs (required)
+    $xml_styles .= '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>';
+
+    // cellXfs:
+    // 0 = default (data)
+    // 1 = header  (bold white text, dark-blue fill, thin border, centered)
+    // 2 = present (bold, green fill, border, centered)
+    // 3 = absent  (bold, red fill, border, centered)
+    // 4 = incomplete (bold, amber fill, border, centered)
+    // 5 = off     (bold, purple fill, border, centered)
+    // 6 = title   (bold white, navy fill, larger, wrap, centered)
+    $center  = '<alignment horizontal="center" vertical="center"/>';
+    $wrap_c  = '<alignment horizontal="center" vertical="center" wrapText="1"/>';
+    $xml_styles .= '<cellXfs count="7">';
+    $xml_styles .= '<xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0"><alignment vertical="center"/></xf>'; // 0
+    $xml_styles .= '<xf numFmtId="0" fontId="2" fillId="6" borderId="1" xfId="0">'.$center.'</xf>';  // 1 header
+    $xml_styles .= '<xf numFmtId="0" fontId="3" fillId="2" borderId="1" xfId="0">'.$center.'</xf>';  // 2 present
+    $xml_styles .= '<xf numFmtId="0" fontId="3" fillId="3" borderId="1" xfId="0">'.$center.'</xf>';  // 3 absent
+    $xml_styles .= '<xf numFmtId="0" fontId="3" fillId="4" borderId="1" xfId="0">'.$center.'</xf>';  // 4 incomplete
+    $xml_styles .= '<xf numFmtId="0" fontId="3" fillId="5" borderId="1" xfId="0">'.$center.'</xf>';  // 5 off
+    $xml_styles .= '<xf numFmtId="0" fontId="4" fillId="7" borderId="1" xfId="0">'.$wrap_c.'</xf>'; // 6 title
+    $xml_styles .= '</cellXfs>';
+
+    $xml_styles .= '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>';
+    $xml_styles .= '</styleSheet>';
+
+    // ── Workbook XML ──────────────────────────────────────────────────────────
+    $xml_workbook = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+    $xml_workbook .= '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">';
+    $xml_workbook .= '<sheets><sheet name="'.htmlspecialchars($sheet_title, ENT_XML1).'" sheetId="1" r:id="rId1"/></sheets>';
+    $xml_workbook .= '</workbook>';
+
+    // ── Relationships ─────────────────────────────────────────────────────────
+    $xml_wb_rels = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+    $xml_wb_rels .= '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">';
+    $xml_wb_rels .= '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>';
+    $xml_wb_rels .= '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="sharedStrings.xml"/>';
+    $xml_wb_rels .= '<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>';
+    $xml_wb_rels .= '</Relationships>';
+
+    $xml_root_rels = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+    $xml_root_rels .= '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">';
+    $xml_root_rels .= '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>';
+    $xml_root_rels .= '</Relationships>';
+
+    $xml_ct = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
+    $xml_ct .= '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">';
+    $xml_ct .= '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>';
+    $xml_ct .= '<Default Extension="xml" ContentType="application/xml"/>';
+    $xml_ct .= '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>';
+    $xml_ct .= '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>';
+    $xml_ct .= '<Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/>';
+    $xml_ct .= '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>';
+    $xml_ct .= '</Types>';
+
+    // ── ZIP it into XLSX ──────────────────────────────────────────────────────
+    $tmp = tempnam(sys_get_temp_dir(), 'xlsx_');
+    @unlink($tmp);
+    $tmp .= '.xlsx';
+
+    $zip = new ZipArchive();
+    $zip->open($tmp, ZipArchive::CREATE | ZipArchive::OVERWRITE);
+    $zip->addFromString('[Content_Types].xml',       $xml_ct);
+    $zip->addFromString('_rels/.rels',               $xml_root_rels);
+    $zip->addFromString('xl/workbook.xml',           $xml_workbook);
+    $zip->addFromString('xl/_rels/workbook.xml.rels',$xml_wb_rels);
+    $zip->addFromString('xl/worksheets/sheet1.xml',  $xml_sheet);
+    $zip->addFromString('xl/sharedStrings.xml',      $xml_sst);
+    $zip->addFromString('xl/styles.xml',             $xml_styles);
+    $zip->close();
+
+    $blob = file_get_contents($tmp);
+    @unlink($tmp);
+    return $blob;
+}
+
+}
+
+if (!function_exists('attm_export_xlsx')) {
+    function attm_export_xlsx($conn, $company_id) {
+        if (!class_exists('ZipArchive')) {
+            http_response_code(500);
+            header('Content-Type: text/plain; charset=UTF-8');
+            echo 'Excel export is unavailable: the PHP zip extension is not enabled on this server.';
+            exit;
+        }
+        $company_id = (int)$company_id;
+
+    // ── Fetch company name ────────────────────────────────────────────────────────
+    $co_stmt = $conn->prepare("
+        SELECT ci.company, u.first_name, u.last_name
+        FROM users u
+        LEFT JOIN company_information ci ON ci.user_id = u.id
+        WHERE u.id = ? LIMIT 1
+    ");
+    $co_stmt->bind_param("i", $company_id);
+    $co_stmt->execute();
+    $co_row = $co_stmt->get_result()->fetch_assoc();
+    $company_name_raw = !empty($co_row['company'])
+        ? $co_row['company']
+        : trim(($co_row['first_name'] ?? '') . ' ' . ($co_row['last_name'] ?? ''));
+    if (!$company_name_raw) $company_name_raw = 'Company';
+    // Sanitise for filename (remove chars that aren't word chars / spaces / hyphens)
+    $company_name_safe = preg_replace('/[^\w\s\-]/', '', $company_name_raw);
+    $company_name_safe = preg_replace('/\s+/', '_', trim($company_name_safe));
+
+    // ── Month & date range ────────────────────────────────────────────────────────
+    $exp_month = $_GET['month'] ?? date('Y-m');
+    if (!preg_match('/^\d{4}-(0[1-9]|1[0-2])$/', (string)$exp_month)) $exp_month = date('Y-m'); // NEW: bad / missing month falls back to the current month
+
+    $s2 = $conn->prepare("SELECT MIN(date) as sd FROM attendance_settings WHERE company_id=?");
+    $s2->bind_param("i", $company_id);
+    $s2->execute();
+    $sd_row = $s2->get_result()->fetch_assoc();
+    $sd = $sd_row['sd'] ?? date('Y-m-d');
+
+    if (date('Y-m', strtotime($sd)) === $exp_month) {
+        $exp_start = $sd;
+    } else {
+        $exp_start = $exp_month . '-01';
+    }
+    $exp_end = date('Y-m-t', strtotime($exp_month . '-01'));
+
+    // ── Filename: CompanyName_MonYear.xlsx ────────────────────────────────────────
+    $month_abbrev = date('M', strtotime($exp_month . '-01'));   // e.g. "Jan"
+    $year_4       = date('Y', strtotime($exp_month . '-01'));   // e.g. "2025"
+    $filename     = $company_name_safe . '_' . $month_abbrev . $year_4 . '.xlsx';
+
+    // ── Students ──────────────────────────────────────────────────────────────────
+    $stud_res = $conn->query("
+        SELECT u.id, u.first_name, u.last_name
+        FROM ojt_assignments oa
+        JOIN users u ON oa.student_id = u.id
+        WHERE oa.company_id = $company_id
+        ORDER BY u.first_name ASC
+    ");
+    $exp_students = [];
+    while ($sr = $stud_res->fetch_assoc()) {
+        $exp_students[$sr['id']] = $sr;
+    }
+
+
+    $exp_sched = attsch_load($conn, array_keys($exp_students)); // NEW (student schedule)
+    $exp_ojt_end = ojtend_dates($conn, array_keys($exp_students)); // NEW (OJT ends at the required hours)
+
+    // ── Logs ──────────────────────────────────────────────────────────────────────
+    $log_res = $conn->query("
+        SELECT user_id, date, am_time_in, am_time_out, pm_time_in, pm_time_out
+        FROM attendance_logs
+        WHERE company_id = $company_id
+          AND date BETWEEN '$exp_start' AND '$exp_end'
+    ");
+    $exp_logs = [];
+    $exp_has_entry = []; // real times only (a "missed"-only row is not an entry)
+    while ($lr = $log_res->fetch_assoc()) {
+        foreach (['am_time_in','am_time_out','pm_time_in','pm_time_out'] as $c_) {
+            if ($lr[$c_] !== null && $lr[$c_] !== '' && $lr[$c_] !== 'missed') { $exp_has_entry[$lr['user_id']][$lr['date']] = true; break; }
+        }
+        $dow   = (int)date('w', strtotime($lr['date']));
+        $wknd  = ($dow === 0 || $dow === 6);
+        $isMissed = fn($v) => ($v === 'missed');
+        $hasVal   = fn($v) => ($v !== null && $v !== '' && $v !== 'missed');
+        // NEW (student schedule): judged on the duty periods scheduled that day (Day = AM duty, Evening = PM duty);
+        // a period holding a real entry always counts. Students on both duties are judged exactly as before.
+        $per    = attsch_periods($exp_sched, $lr['user_id'], $lr['date']);
+        $needAm = $per['am'] || $hasVal($lr['am_time_in']) || $hasVal($lr['am_time_out']);
+        $needPm = $per['pm'] || $hasVal($lr['pm_time_in']) || $hasVal($lr['pm_time_out']);
+        if (!$needAm && !$needPm) { $needAm = $needPm = true; }
+        if ($wknd) {
+            $st = 'OFF';
+        } elseif ((!$needAm || ($hasVal($lr['am_time_in']) && $hasVal($lr['am_time_out'])))
+               && (!$needPm || ($hasVal($lr['pm_time_in']) && $hasVal($lr['pm_time_out'])))) {
+            $st = 'PRESENT';
+        } elseif (($needAm && ($hasVal($lr['am_time_in']) || $isMissed($lr['am_time_in']) || $isMissed($lr['am_time_out'])))
+               || ($needPm && ($hasVal($lr['pm_time_in']) || $isMissed($lr['pm_time_in']) || $isMissed($lr['pm_time_out'])))
+               || ($per['am'] && $per['pm'] && ($hasVal($lr['am_time_in']) || $hasVal($lr['pm_time_in'])))) {
+            $st = 'INCOMPLETE';
+        } else {
+            $st = 'ABSENT';
+        }
+        $exp_logs[$lr['user_id']][$lr['date']] = $st;
+    }
+
+    // ── Date columns ──────────────────────────────────────────────────────────────
+    $exp_dates = [];
+    for ($d = strtotime($exp_start); $d <= strtotime($exp_end); $d = strtotime('+1 day', $d)) {
+        $exp_dates[] = date('Y-m-d', $d);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    // Build the data array (header + rows)
+    // ─────────────────────────────────────────────────────────────────────────────
+    $today_str = date('Y-m-d');
+
+    $header_row = ['Name'];
+    foreach ($exp_dates as $d) {
+        $dow = (int)date('w', strtotime($d));
+        $label = date('D d', strtotime($d));
+        if ($dow === 0 || $dow === 6) $label .= ' (Off)';
+        $header_row[] = $label;
+    }
+
+    $data_rows = [];
+    foreach ($exp_students as $sid => $stu) {
+        $row = [$stu['first_name'] . ' ' . $stu['last_name']];
+        foreach ($exp_dates as $d) {
+            $dow = (int)date('w', strtotime($d));
+            if ($dow === 0 || $dow === 6) {
+                $row[] = 'OFF';
+            } elseif ($d > $today_str) {
+                $row[] = '';
+            } elseif (empty($exp_has_entry[$sid][$d]) && ojtend_is_after($exp_ojt_end, $sid, $d)) {
+                $row[] = ''; // NEW (OJT ends at the required hours): the student already completed the OJT
+            } elseif (empty($exp_has_entry[$sid][$d]) && !attsch_is_scheduled($exp_sched, $sid, $d)) {
+                $row[] = 'NOT SCHEDULED'; // NEW (student schedule): not a duty day for this student — never absent
+            } elseif ($d === $today_str && empty($exp_has_entry[$sid][$d])) {
+                $row[] = ''; // today with no attendance entry yet: blank until the day has passed
+            } else {
+                $row[] = $exp_logs[$sid][$d] ?? 'ABSENT';
+            }
+        }
+        $data_rows[] = $row;
+    }
+
+    // Generate & stream
+    // ─────────────────────────────────────────────────────────────────────────────
+    $sheet_title     = 'Attendance ' . $month_abbrev . $year_4;
+    $month_label_fmt = date('F Y', strtotime($exp_month . '-01'));
+
+    $xlsx_blob = attm_build_xlsx(
+        $header_row,
+        $data_rows,
+        $sheet_title,
+        $company_name_raw,
+        $month_label_fmt
+    );
+
+    header('Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    header('Content-Disposition: attachment; filename="' . $filename . '"');
+    header('Content-Length: ' . strlen($xlsx_blob));
+    header('Cache-Control: no-cache, no-store, must-revalidate');
+    header('Pragma: no-cache');
+    header('Expires: 0');
+    echo $xlsx_blob;
+    exit;
+
+    }
+}
+if (isset($_GET['export']) && $_GET['export'] === 'xlsx') {
+    try {
+        attm_export_xlsx($conn, $company_id);
+    } catch (\Throwable $e) {
+        while (ob_get_level() > 0) { ob_end_clean(); }
+        http_response_code(500);
+        header('Content-Type: text/plain; charset=UTF-8');
+        echo 'The Excel export could not be generated. Please try again.';
+        exit;
     }
 }
 
@@ -388,6 +1294,8 @@ if (isset($_GET['export']) && $_GET['export'] == '1') {
         $exp_students[$sr['id']] = $sr;
     }
     $exp_first = attm_first_attendance_map($conn, array_keys($exp_students)); // UPDATED (Start = first attendance)
+    $exp_sched = attsch_load($conn, array_keys($exp_students)); // NEW (student schedule)
+    $exp_ojt_end = ojtend_dates($conn, array_keys($exp_students)); // NEW (OJT ends at the required hours)
 
     $log_res = $conn->query("
         SELECT user_id, date, am_time_in, am_time_out, pm_time_in, pm_time_out
@@ -396,13 +1304,18 @@ if (isset($_GET['export']) && $_GET['export'] == '1') {
           AND date BETWEEN '$exp_start' AND '$exp_end'
     ");
     $exp_logs = [];
+    $exp_has_entry = []; // real times only (a "missed"-only row is not an entry)
     while ($lr = $log_res->fetch_assoc()) {
+        foreach (['am_time_in','am_time_out','pm_time_in','pm_time_out'] as $c_) {
+            if ($lr[$c_] !== null && $lr[$c_] !== '' && $lr[$c_] !== 'missed') { $exp_has_entry[$lr['user_id']][$lr['date']] = true; break; }
+        }
         $dow = (int)date('w', strtotime($lr['date']));
         $wknd = ($dow === 0 || $dow === 6);
         if ($wknd) {
             $st = 'DAY OFF';
         } else {
             $duty = getActiveDutyPeriods($lr['date'], $all_settings_map);
+            $duty = attsch_limit_duty($duty, attsch_periods($exp_sched, $lr['user_id'], $lr['date']), $lr); // NEW (student schedule): Day = AM duty, Evening = PM duty
             $st   = computeStatusForLog($lr, $duty['am'], $duty['pm']);
         }
         $exp_logs[$lr['user_id']][$lr['date']] = $st;
@@ -440,6 +1353,12 @@ if (isset($_GET['export']) && $_GET['export'] == '1') {
                 $row[] = '';
             } elseif (attm_before_start($exp_first, $sid, $d)) {
                 $row[] = ''; // UPDATED: before first attendance — not absent / missed
+            } elseif (empty($exp_has_entry[$sid][$d]) && ojtend_is_after($exp_ojt_end, $sid, $d)) {
+                $row[] = ''; // NEW (OJT ends at the required hours): the student already completed the OJT
+            } elseif (empty($exp_has_entry[$sid][$d]) && !attsch_is_scheduled($exp_sched, $sid, $d)) {
+                $row[] = 'NOT SCHEDULED'; // NEW (student schedule): not a duty day for this student — never absent
+            } elseif ($d === date('Y-m-d') && empty($exp_has_entry[$sid][$d])) {
+                $row[] = ''; // today with no attendance entry yet: blank until the day has passed
             } else {
                 $raw = $exp_logs[$sid][$d] ?? 'ABSENT';
                 $row[] = $raw;
@@ -478,6 +1397,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_SERVER['HTTP_X_REQUESTED_WI
 
         if (!$lr) { echo json_encode(['success'=>false,'message'=>'Request not found or already processed.']); exit; }
 
+        // NEW (late request legitimacy check): a high-risk request is only approved after the supervisor explicitly confirms the warnings
+        $lrEv = attm_lr_evidence($conn, (int)$company_id, $lr);
+        if ($lrEv['level'] === 'risk' && empty($_POST['confirm_risk'])) {
+            echo json_encode(['success'=>false,'needs_confirm'=>true,'message'=>'This request has high-risk warnings. Review them and confirm again to approve it.','evidence'=>$lrEv]);
+            exit;
+        }
+
         $student_id = $lr['student_id'];
         $lr_date    = $lr['date'];
         $type       = $lr['type'];
@@ -504,10 +1430,34 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_SERVER['HTTP_X_REQUESTED_WI
             $settingRow = $fallback->get_result()->fetch_assoc();
         }
 
-        $chk = $conn->prepare("SELECT id FROM attendance_logs WHERE user_id=? AND date=? AND company_id=?");
+        $chk = $conn->prepare("SELECT * FROM attendance_logs WHERE user_id=? AND date=? AND company_id=?");
         $chk->bind_param("isi", $student_id, $lr_date, $company_id);
         $chk->execute();
         $existing_log = $chk->get_result()->fetch_assoc();
+
+        /* ── Late request (sign-out entries only) ──
+           Duty time everywhere in the system is (sign out − sign in), so the time recorded for the
+           sign out is what decides the hours credited: only that duty (AM Sign In → AM Sign Out) is counted —
+           the Sign Out is credited at the scheduled sign-out time instead of the (later) submission time. */
+        if (in_array($type, ['am_time_out','pm_time_out'], true)) {
+            $period = ($type === 'am_time_out') ? 'am' : 'pm';
+            $toTs = function($v) use ($lr_date) {
+                if (!$v || $v === 'missed') return null;
+                $v = (strpos($v, ' ') === false) ? ($lr_date . ' ' . $v) : $v;
+                $ts = strtotime($v);
+                return $ts === false ? null : $ts;
+            };
+            $inTs      = $toTs($existing_log[$period . '_time_in'] ?? null);
+            $createdTs = strtotime($approved_time);
+
+            $schedOut = $settingRow[$period . '_time_out_start'] ?? null;
+            $schedTs  = $schedOut ? $toTs($schedOut) : null;
+            if ($schedTs !== null) {
+                if ($createdTs !== false && $schedTs > $createdTs) $schedTs = $createdTs;   // never later than the submission
+                if ($inTs !== null && $schedTs < $inTs)            $schedTs = $inTs;         // never before the sign in (0 min)
+                $approved_time = date('Y-m-d H:i:s', $schedTs);
+            }
+        }
 
         $photoStmt = $conn->prepare("SELECT photo FROM late_requests WHERE id=?");
         $photoStmt->bind_param("i", $req_id);
@@ -556,6 +1506,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_SERVER['HTTP_X_REQUESTED_WI
         echo json_encode([
             'success'       => true,
             'message'       => "Approved. {$sName} time and photo updated recorded.",
+            'recorded_time' => $approved_time,
             'duty_info'     => $dutyInfo,
             'req_id'        => $req_id,
             'pending_count' => $newPendingCount,
@@ -742,6 +1693,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET'
 
     header('Content-Type: application/json');
 
+    // NEW (late request legitimacy check): server-recorded evidence; photos sent before this check existed get their fingerprint here
+    $evOk  = ensureLateRequestEvidence($conn);
+    $evSel = $evOk ? ', lr.submit_ip, lr.submit_ua, lr.photo_hash, lr.photo_valid' : '';
+    if ($evOk) {
+        try { $conn->query("UPDATE late_requests SET photo_hash = SHA2(photo, 256) WHERE company_id = " . (int)$company_id . " AND photo IS NOT NULL AND photo_hash IS NULL LIMIT 100"); } catch (\Throwable $e) {}
+    }
     $stmt = $conn->prepare("
         SELECT
             lr.id,
@@ -751,7 +1708,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET'
             lr.reason,
             lr.status,
             lr.created_at,
-            lr.photo IS NOT NULL AS has_photo,
+            lr.photo IS NOT NULL AS has_photo{$evSel},
             u.first_name,
             u.middle_name,
             u.last_name,
@@ -785,6 +1742,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'GET'
     foreach ($rows as &$row) {
         $row['has_photo'] = (bool)$row['has_photo'];
         $row['photo_url'] = "late_request_photo.php?id={$row['id']}&t=" . time();
+        // NEW (late request legitimacy check): evidence for the requests still waiting for a decision
+        $row['evidence'] = ($row['status'] === 'pending') ? attm_lr_evidence($conn, (int)$company_id, $row) : null;
+        unset($row['submit_ip'], $row['submit_ua'], $row['photo_hash'], $row['photo_valid']);
     }
     unset($row);
 
@@ -824,6 +1784,20 @@ $start_res  = $stmt->get_result()->fetch_assoc();
 $start_date = $start_res['start_date'] ?? date("Y-m-d");
 
 $end_date_limit = date("Y-m-d", strtotime("+4 months", strtotime($start_date)));
+
+// Display range of the Monthly Attendance Summary / Attendance Overview chart.
+// The 4-month OJT window above still governs schedules, but attendance that students keep recording
+// AFTER it is real data and must stay visible: when the company has logs past the window, the
+// display range runs through today (days without an entry are Absent once they have passed).
+$display_end_limit = $end_date_limit;
+try {
+    $dl_stmt = $conn->prepare("SELECT MAX(date) AS d FROM attendance_logs WHERE company_id=? AND date<=?");
+    $dl_today = date("Y-m-d");
+    $dl_stmt->bind_param("is", $company_id, $dl_today);
+    $dl_stmt->execute();
+    $dl_last = $dl_stmt->get_result()->fetch_assoc()['d'] ?? null;
+    if ($dl_last && $dl_last > $end_date_limit) $display_end_limit = $dl_today;
+} catch (\Throwable $e) {}
 
 $date = $_GET['date'] ?? date("Y-m-d");
 if ($date < $start_date)     $date = $start_date;
@@ -874,7 +1848,38 @@ if ($today_dow === 0 || $today_dow === 6) {
     if ($ts_ids_res) { while ($tr = $ts_ids_res->fetch_assoc()) $ts_all_ids[] = (int)$tr['student_id']; }
     $ts_first   = attm_first_attendance_map($conn, $ts_all_ids);
     $ts_started = array_values(array_filter($ts_all_ids, fn($sid) => !attm_before_start($ts_first, $sid, $today_str)));
-    $ts_started_sql = !empty($ts_started) ? implode(',', $ts_started) : '0';
+    // NEW (student schedule): a student who is not scheduled today and has no real entry is neither Absent nor Incomplete
+    $ts_sched = attsch_load($conn, $ts_all_ids);
+    $ts_real_today = [];
+    $ts_rows_today = [];
+    try {
+        $ts_nr = $conn->query("SELECT user_id, am_time_in, am_time_out, pm_time_in, pm_time_out FROM attendance_logs WHERE company_id=$company_id AND date='$today_str'");
+        if ($ts_nr) { while ($tn = $ts_nr->fetch_assoc()) { $ts_rows_today[(int)$tn['user_id']] = $tn; if (attsch_has_real_entry($tn)) $ts_real_today[(int)$tn['user_id']] = true; } }
+    } catch (\Throwable $e) {}
+    $ts_end = ojtend_dates($conn, $ts_all_ids); // NEW (OJT ends at the required hours)
+    $ts_completed_count = 0;
+    $ts_started = array_values(array_filter($ts_started, function($sid) use ($ts_end, $ts_real_today, $today_str, &$ts_completed_count) {
+        if (ojtend_is_after($ts_end, $sid, $today_str) && empty($ts_real_today[(int)$sid])) { $ts_completed_count++; return false; }
+        return true;
+    }));
+    $ts_not_sched_count = 0;
+    $ts_started = array_values(array_filter($ts_started, function($sid) use ($ts_sched, $ts_real_today, $today_str, &$ts_not_sched_count) {
+        if (attsch_is_scheduled($ts_sched, $sid, $today_str) || !empty($ts_real_today[(int)$sid])) return true;
+        $ts_not_sched_count++;
+        return false;
+    }));
+    // NEW (student schedule): a student scheduled for only ONE duty (Day = AM only, Evening = PM only) is judged on that duty
+    // alone — counted here in PHP with the same rules as the Monthly Attendance Summary; everyone else uses the query below.
+    $ts_part = ['present' => 0, 'incomplete' => 0, 'absent' => 0];
+    $ts_full = [];
+    foreach ($ts_started as $ts_sid) {
+        $ts_per = attsch_periods($ts_sched, $ts_sid, $today_str);
+        if ($ts_per['am'] && $ts_per['pm']) { $ts_full[] = $ts_sid; continue; }
+        $ts_duty = attsch_limit_duty(getActiveDutyPeriods($today_str, $all_settings_map), $ts_per, $ts_rows_today[$ts_sid] ?? null);
+        $ts_st   = computeStatusForLog($ts_rows_today[$ts_sid] ?? [], $ts_duty['am'], $ts_duty['pm']);
+        if ($ts_st === 'PRESENT') $ts_part['present']++; elseif ($ts_st === 'INCOMPLETE') $ts_part['incomplete']++; else $ts_part['absent']++;
+    }
+    $ts_started_sql = !empty($ts_full) ? implode(',', $ts_full) : '0';
     $ts_res = $conn->query("
         SELECT
             SUM(CASE WHEN
@@ -901,6 +1906,7 @@ if ($today_dow === 0 || $today_dow === 6) {
         $incomplete = max(0, $partial - $present);
         $total      = (int)($ts_row['total_count'] ?? 0);
         $absent     = max(0, $total - $present - $incomplete);
+        $present += $ts_part['present']; $incomplete += $ts_part['incomplete']; $absent += $ts_part['absent']; // NEW (student schedule)
         $total      = count($ts_all_ids); // UPDATED: header still shows every assigned student
         $today_stats = [
             'present'    => $present,
@@ -908,6 +1914,8 @@ if ($today_dow === 0 || $today_dow === 6) {
             'incomplete' => $incomplete,
             'day_off'    => 0,
             'total'      => $total,
+            'not_scheduled' => $ts_not_sched_count, // NEW (student schedule)
+            'completed'     => $ts_completed_count, // NEW (OJT ends at the required hours)
         ];
     }
 }
@@ -945,8 +1953,9 @@ $month = $_GET['month'] ?? date("Y-m", strtotime($start_date));
 $ojt_start_month = date("Y-m", strtotime($start_date));
 $month_min = $ojt_start_month;
 $month_max = date("Y-m", strtotime($end_date_limit));
+$sm_month_max = date("Y-m", strtotime($display_end_limit)); // Monthly Attendance Summary navigation limit
 if ($month < $month_min) $month = $month_min;
-if ($month > $month_max) $month = $month_max;
+if ($month > $sm_month_max) $month = $sm_month_max;
 
 $start = max($start_date, $month . "-01");
 if (date("Y-m", strtotime($start_date)) === $month) {
@@ -955,7 +1964,7 @@ if (date("Y-m", strtotime($start_date)) === $month) {
     $start = $month . "-01";
 }
 $end   = date("Y-m-t", strtotime($month . "-01"));
-if ($end > $end_date_limit) $end = $end_date_limit;
+if ($end > $display_end_limit) $end = $display_end_limit;
 
 $students = [];
 $res = $conn->query("
@@ -966,6 +1975,8 @@ $res = $conn->query("
 ");
 while ($row = $res->fetch_assoc()) { $students[$row['id']] = $row; }
 $student_first_attendance = attm_first_attendance_map($conn, array_keys($students)); // UPDATED (Start = first attendance)
+$student_sched = attsch_load($conn, array_keys($students)); // NEW (student schedule)
+$student_ojt_end = ojtend_dates($conn, array_keys($students)); // NEW (OJT ends at the required hours)
 
 /* ════════════════════════════════════════════════════════════════════
    UPDATED (Start / End indicators in the Monthly Attendance Summary):
@@ -1095,18 +2106,23 @@ try {
 // ── Monthly Summary table logs ───────────────────────────────────────────────
 // Now uses getActiveDutyPeriods() + computeStatusForLog() per day
 $logs = [];
+$logs_has_entry = []; // [student_id][date] => true when the day holds at least one REAL time (a "missed"-only row is not an entry)
 $res = $conn->query("
     SELECT user_id, date, am_time_in, am_time_out, pm_time_in, pm_time_out
     FROM attendance_logs
     WHERE company_id = $company_id AND date BETWEEN '$start' AND '$end'
 ");
 while ($row = $res->fetch_assoc()) {
+    foreach (['am_time_in','am_time_out','pm_time_in','pm_time_out'] as $c_) {
+        if ($row[$c_] !== null && $row[$c_] !== '' && $row[$c_] !== 'missed') { $logs_has_entry[$row['user_id']][$row['date']] = true; break; }
+    }
     $dow  = (int)date('w', strtotime($row['date']));
     $wknd = ($dow === 0 || $dow === 6);
     if ($wknd) {
         $status = "DAY OFF";
     } else {
         $duty   = getActiveDutyPeriods($row['date'], $all_settings_map);
+        $duty   = attsch_limit_duty($duty, attsch_periods($student_sched, $row['user_id'], $row['date']), $row); // NEW (student schedule): Day = AM duty, Evening = PM duty
         $status = computeStatusForLog($row, $duty['am'], $duty['pm']);
     }
     $logs[$row['user_id']][$row['date']] = $status;
@@ -1120,7 +2136,7 @@ for ($d = strtotime($start); $d <= strtotime($end); $d = strtotime("+1 day", $d)
 
 $all_chart_months = [];
 $cm = strtotime(date("Y-m-01", strtotime($start_date)));
-$cm_end = strtotime(date("Y-m-01", strtotime($end_date_limit)));
+$cm_end = strtotime(date("Y-m-01", strtotime($display_end_limit)));
 while ($cm <= $cm_end) {
     $all_chart_months[] = date("Y-m", $cm);
     $cm = strtotime("+1 month", $cm);
@@ -1146,7 +2162,7 @@ $monthly_stats = [];
 foreach ($all_chart_months as $ym) {
     $ym_start = (date('Y-m', strtotime($start_date)) === $ym) ? $start_date : $ym . '-01';
     $ym_end   = date('Y-m-t', strtotime($ym . '-01'));
-    if ($ym_end > $end_date_limit) $ym_end = $end_date_limit;
+    if ($ym_end > $display_end_limit) $ym_end = $display_end_limit;
 
     if ($ym_start > $today_str) continue;
     if ($ym_end > $today_str) $ym_end = $today_str;
@@ -1162,9 +2178,14 @@ foreach ($all_chart_months as $ym) {
 
         foreach ($students as $sid => $s) {
             if (attm_before_start($student_first_attendance, $sid, $day_str)) continue; // UPDATED: not started yet
+            // NEW (OJT ends at the required hours): after the student's OJT end date nothing is counted unless something was recorded
+            if (ojtend_is_after($student_ojt_end, $sid, $day_str) && !attsch_has_real_entry($all_logs[$sid][$day_str] ?? null)) continue;
+            // NEW (student schedule): not a duty day for this student and nothing recorded → not counted at all
+            if (!attsch_has_real_entry($all_logs[$sid][$day_str] ?? null) && !attsch_is_scheduled($student_sched, $sid, $day_str)) continue;
             if (isset($all_logs[$sid][$day_str])) {
                 $lr2    = $all_logs[$sid][$day_str];
-                $status = computeStatusForLog($lr2, $duty['am'], $duty['pm']);
+                $duty_s = attsch_limit_duty($duty, attsch_periods($student_sched, $sid, $day_str), $lr2); // NEW (student schedule)
+                $status = computeStatusForLog($lr2, $duty_s['am'], $duty_s['pm']);
                 if      ($status === 'PRESENT')    $p++;
                 elseif  ($status === 'INCOMPLETE')  $inc++;
                 else                                $a++;
@@ -1596,26 +2617,21 @@ body { margin: 0; display: flex; min-height: 100vh; font-family: 'Segoe UI', Tah
 .sm-mark-start { color:#2C5A2C; }
 .sm-mark-end   { color:#A02A2A; }
 .sm-mark-est   { opacity:.55; }
+.sm-table td.sm-nosched { background:#eff6ff; color:#2563eb; font-style:italic; } /* NEW (student schedule): not scheduled that day */
+.sm-table td.sm-ended { background:#f1f5f9; } /* NEW (OJT ends at the required hours) */
 .sm-table td.sm-before-start { background:#f8fafc; color:#cbd5e1; } /* UPDATED: before first attendance */
 .sm-table td.sm-has-mark { box-shadow:inset 0 0 0 1px rgba(21,101,192,.25); }
 .sm-table tbody tr:hover td { filter:brightness(0.97); }
 .sm-table tbody tr:last-child td { border-bottom:none; }
 .sm-table-empty { text-align:center; padding:30px; color:#aaa; font-size:12px; }
 
-#toastContainer { position:fixed; bottom:20px; right:20px; z-index:9999; display:flex; flex-direction:column; gap:8px; }
-.toast { background:#323232; color:#fff; padding:12px 20px; border-radius:8px; font-size:13px; max-width:320px;
-    opacity:0; transform:translateY(10px); transition:opacity .3s,transform .3s; box-shadow:0 3px 12px rgba(0,0,0,.2); }
-.toast.show    { opacity:1; transform:translateY(0); }
-.toast.success { background:#2e7d32; }
-.toast.error   { background:#c62828; }
-.toast.warning { background:#e65100; }
-.toast.info    { background:#1565c0; }
 
 td.day-off   { background:#ede7f6 !important; color:#512da8; font-weight:700; text-align:center; }
 td.present   { color:#2e7d32; font-weight:700; text-align:center; }
 td.absent    { color:#c62828; font-weight:700; text-align:center; }
 td.incomplete{ color:#e65100; font-weight:700; text-align:center; }
 td.pending   { color:#888;    font-weight:600; text-align:center; }
+td.nosched   { color:#2563eb; background:#eff6ff; font-weight:700; text-align:center; } /* NEW (student schedule) */
 td.missed    { color:#e65100; font-weight:700; text-align:center; }
 tr.day-off-row td { background:#ede7f6; color:#512da8; font-style:italic; }
 .weekend-notice { background:#ede7f6; color:#512da8; padding:10px 16px; border-radius:8px; margin-bottom:12px; font-size:13px; font-weight:500; display:flex; align-items:center; gap:8px; }
@@ -1827,6 +2843,24 @@ tr.day-off-row td { background:#ede7f6; color:#512da8; font-style:italic; }
 .req-type-badge.am_time_out { background:#c62828; }
 .req-type-badge.pm_time_in  { background:#1565c0; }
 .req-type-badge.pm_time_out { background:#2e7d32; }
+.req-kind-note { margin-top:8px; font-size:12px; color:#5A6272; line-height:1.5; }
+.req-kind-note strong { color:#1B2A4A; }
+.req-evidence { border:1px solid #e0e4ef; border-radius:8px; margin-bottom:10px; overflow:hidden; font-size:12.5px; }
+.req-evidence-head { display:flex; align-items:center; gap:8px; padding:8px 12px; font-weight:700; }
+.req-evidence.ok .req-evidence-head { background:#ecfdf3; color:#166534; }
+.req-evidence.review .req-evidence-head { background:#fffbeb; color:#92400e; }
+.req-evidence.risk .req-evidence-head { background:#fef2f2; color:#991b1b; }
+.req-evidence-list { list-style:none; margin:0; padding:8px 12px 10px; background:#fff; }
+.req-evidence-list li { display:flex; gap:8px; padding:3px 0; color:#444; line-height:1.45; }
+.req-evidence-list li i { margin-top:3px; font-size:11px; flex-shrink:0; }
+.req-evidence-list li.ok i { color:#16a34a; } .req-evidence-list li.info i { color:#64748b; }
+.req-evidence-list li.review i { color:#d97706; } .req-evidence-list li.risk i { color:#dc2626; }
+.req-evidence-detail { display:grid; grid-template-columns:1fr 1fr; gap:1px; background:#e8ebf3; border-top:1px solid #e8ebf3; }
+.req-evidence-detail div { background:#f8f9fd; padding:7px 12px; display:flex; flex-direction:column; gap:1px; }
+.req-evidence-detail span { font-size:10.5px; text-transform:uppercase; letter-spacing:.3px; color:#64748b; }
+.req-evidence-detail strong { font-size:12.5px; color:#1B2A4A; }
+@media (max-width:520px){ .req-evidence-detail { grid-template-columns:1fr; } }
+.req-evidence-device { padding:0 12px 9px; background:#fff; color:#64748b; font-size:11.5px; }
 .req-reason-box { background:#f8f9ff; border:1px solid #e8eaf6; border-radius:8px; padding:10px 13px; font-size:13px; color:#444; line-height:1.55; margin-bottom:10px; }
 .req-reason-label { font-size:10px; font-weight:700; color:#9fa8da; text-transform:uppercase; margin-bottom:4px; }
 .req-photo-section { margin-bottom:12px; }
@@ -2042,9 +3076,9 @@ tr.day-off-row td { background:#ede7f6; color:#512da8; font-style:italic; }
         <button id="toggleBtn" class="toggle-btn"><i class="fas fa-bars"></i></button>
     </div>
     <div class="sidebar-links">
-        <a href="Profile.php">
+        <a href="Profile.php" style="position:relative;">
             <i class="fas fa-user-circle"></i>
-            <span class="link-text">My Profile</span>
+            <span class="link-text">My Profile</span><!-- NEW (company chat notification): unread messages from the administrator / OJT trainees --><span class="sidebar-badge-chat" id="sidebarChatBadge" style="display:none"></span>
         </a>
         <a href="add_ojt_student.php">
             <i class="fas fa-user-graduate"></i>
@@ -2241,7 +3275,7 @@ tr.day-off-row td { background:#ede7f6; color:#512da8; font-style:italic; }
                                 <span class="chart-nav-btn" aria-disabled="true">&#8592;</span>
                             <?php endif; ?>
                             <span class="sm-month-label" id="smMonthLabel"><?= date("F Y", strtotime($month . "-01")) ?></span>
-                            <?php if ($sm_next_month <= $month_max): ?>
+                            <?php if ($sm_next_month <= $sm_month_max): ?>
                                 <a class="chart-nav-btn" href="<?= htmlspecialchars($sm_month_url($sm_next_month)) ?>" title="Next month (<?= date("F Y", strtotime($sm_next_month . "-01")) ?>)">&#8594;</a>
                             <?php else: ?>
                                 <span class="chart-nav-btn" aria-disabled="true">&#8594;</span>
@@ -2252,7 +3286,7 @@ tr.day-off-row td { background:#ede7f6; color:#512da8; font-style:italic; }
                         <button class="sm-action-btn print" onclick="printSummary()">
                             <i class="fas fa-print"></i> Print
                         </button>
-                        <a class="sm-action-btn export" href="export_attendance_xlsx.php?month=<?= htmlspecialchars($month) ?>" target="_blank">
+                        <a class="sm-action-btn export" href="attendance_management.php?export=xlsx&month=<?= htmlspecialchars($month) ?>" target="_blank">
                             <i class="fas fa-file-excel"></i> Export XLSX
                         </a>
                     </div>
@@ -2263,10 +3297,11 @@ tr.day-off-row td { background:#ede7f6; color:#512da8; font-style:italic; }
                     <span class="sm-legend-item"><span class="sm-legend-dot" style="background:#fffbeb;border:1px solid #fcd34d;"></span><span style="color:#92400e;">I — Incomplete</span></span>
                     <span class="sm-legend-item"><span class="sm-legend-dot" style="background:#fef2f2;border:1px solid #fca5a5;"></span><span style="color:#9b1c1c;">A — Absent</span></span>
                     <span class="sm-legend-item"><span class="sm-legend-dot" style="background:#f3f0ff;border:1px solid #c4b5fd;"></span><span style="color:#7c3aed;">O — Day Off</span></span>
+                    <span class="sm-legend-item"><span class="sm-legend-dot" style="background:#eff6ff;border:1px solid #93c5fd;"></span><span style="color:#2563eb;">N — Not scheduled</span></span>
                     <span class="sm-legend-item"><i class="fas fa-play-circle sm-mark-start" style="font-size:10px;"></i><span style="color:#2C5A2C;">OJT Start</span></span>
                     <span class="sm-legend-item"><i class="fas fa-stop-circle sm-mark-end" style="font-size:10px;"></i><span style="color:#A02A2A;">OJT End</span></span>
                     <span class="sm-legend-item"><i class="fas fa-stop-circle sm-mark-end sm-mark-est" style="font-size:10px;"></i><span style="color:#A02A2A;">OJT End (est.)</span></span>
-                    <span class="sm-legend-item"><span class="sm-legend-dot" style="background:#f8fafc;border:1px solid #e2e8f0;"></span><span style="color:#64748b;">Blank — Before first attendance</span></span>
+                    <span class="sm-legend-item"><span class="sm-legend-dot" style="background:#f8fafc;border:1px solid #e2e8f0;"></span><span style="color:#64748b;">Blank — Before first attendance / after OJT completion</span></span>
                 </div>
 
                 <div id="summaryTableWrapper">
@@ -2308,9 +3343,18 @@ tr.day-off-row td { background:#ede7f6; color:#512da8; font-style:italic; }
                                 if ($is_wkd) {
                                     $val = 'O'; $cls = 'sm-off';
                                 } elseif ($d > date("Y-m-d")) {
-                                    $val = ''; $cls = '';
+                                    // NEW (OJT ends at the required hours): nothing is shown for upcoming days after the OJT end date
+                                    // NEW (student schedule): upcoming days the student is not scheduled on carry the marker too
+                                    if (!attm_before_start($student_first_attendance, $id, $d) && !ojtend_is_after($student_ojt_end, $id, $d) && !attsch_is_scheduled($student_sched, $id, $d)) { $val = 'N'; $cls = 'sm-nosched'; }
+                                    else { $val = ''; $cls = ''; }
                                 } elseif (attm_before_start($student_first_attendance, $id, $d)) {
                                     $val = ''; $cls = 'sm-before-start'; // UPDATED: before first attendance — not absent / missed
+                                } elseif (empty($logs_has_entry[$id][$d]) && ojtend_is_after($student_ojt_end, $id, $d)) {
+                                    $val = ''; $cls = 'sm-before-start sm-ended'; // NEW (OJT ends at the required hours): OJT already completed
+                                } elseif (empty($logs_has_entry[$id][$d]) && !attsch_is_scheduled($student_sched, $id, $d)) {
+                                    $val = 'N'; $cls = 'sm-nosched'; // NEW (student schedule): not scheduled on this day → not absent
+                                } elseif ($d === date("Y-m-d") && empty($logs_has_entry[$id][$d])) {
+                                    $val = ''; $cls = ''; // today and no attendance entry yet: stay blank, it becomes Absent once the day has passed
                                 } else {
                                     $raw = $logs[$id][$d] ?? 'ABSENT';
                                     $first = substr($raw, 0, 1);
@@ -2331,8 +3375,14 @@ tr.day-off-row td { background:#ede7f6; color:#512da8; font-style:italic; }
                                     $mark_html .= '<i class="fas fa-stop-circle sm-mark sm-mark-end' . ($is_est ? ' sm-mark-est' : '') . '" title="OJT End' . ($is_est ? ' (estimated)' : '') . ': ' . date('M j, Y', strtotime($d)) . '"></i>';
                                 }
                                 $td_cls = trim($cls . ($mark_html !== '' ? ' sm-has-mark' : ''));
+                                // NEW (student schedule): hint when the student is scheduled for only one duty that day
+                                $td_title = '';
+                                if (!$is_wkd && $val !== 'N') {
+                                    $per_t = attsch_periods($student_sched, $id, $d);
+                                    if ($per_t['am'] xor $per_t['pm']) $td_title = $per_t['am'] ? 'Scheduled: Day (AM duty) only' : 'Scheduled: Evening (PM duty) only';
+                                }
                             ?>
-                            <td class="<?= $td_cls ?>"><?= $mark_html ?><?= $val ?></td>
+                            <td class="<?= $td_cls ?>"<?= $td_title !== '' ? ' title="' . htmlspecialchars($td_title) . '"' : '' ?>><?= $mark_html ?><?= $val ?></td>
                             <?php endforeach; ?>
                         </tr>
                         <?php endforeach; ?>
@@ -2440,7 +3490,7 @@ tr.day-off-row td { background:#ede7f6; color:#512da8; font-style:italic; }
             </div>
             <div class="panel-card-body" style="padding:14px 16px;">
                 <div style="font-size:11px; color:#9ca3af; margin-bottom:10px; font-weight:600;">
-                    <?= date("l, F j") ?> &middot; <?= $today_stats['total'] ?> student<?= $today_stats['total'] !== 1 ? 's' : '' ?>
+                    <?= date("l, F j") ?> &middot; <?= $today_stats['total'] ?> student<?= $today_stats['total'] !== 1 ? 's' : '' ?><?php if (!empty($today_stats['not_scheduled'])): ?> &middot; <?= (int)$today_stats['not_scheduled'] ?> not scheduled today<?php endif; ?><?php if (!empty($today_stats['completed'])): ?> &middot; <?= (int)$today_stats['completed'] ?> completed OJT<?php endif; ?>
                 </div>
                 <div class="kpi-card kpi-present">
                     <span class="kpi-icon"><i class="fas fa-check-circle" style="color:#15803d;font-size:20px;"></i></span>
@@ -2482,8 +3532,6 @@ tr.day-off-row td { background:#ede7f6; color:#512da8; font-style:italic; }
     <span class="close" onclick="closeModal()">&times;</span>
     <img id="modalImg">
 </div>
-
-<div id="toastContainer"></div>
 
 <!-- ══ ATTENDANCE LOG MODAL ══ -->
 <div id="attLogModal">
@@ -3000,13 +4048,6 @@ function printSummary() {
 }
 
 /* ── TOAST ── */
-function showToast(message, type="info") {
-    let t = document.createElement("div"); t.className="toast " + type; t.innerText=message;
-    document.getElementById("toastContainer").appendChild(t);
-    setTimeout(()=>t.classList.add("show"),100);
-    setTimeout(()=>{ t.classList.remove("show"); setTimeout(()=>t.remove(),300); },4500);
-}
-
 /* ── LIVE UPDATES (UPDATED: replaces the old 45-second automatic page reload) ──
    Every few seconds the page asks the server for a tiny fingerprint of its
    data. Only when the fingerprint changes (new attendance, late request,
@@ -3065,9 +4106,13 @@ function liveApplyPage(html) {
     // First-attendance maps used by the Attendance Log popup (NOT STARTED rows)
     const byId   = html.match(/const _firstAttendanceById\s*=\s*(\{[\s\S]*?\});/);
     const byName = html.match(/const _firstAttendanceByName\s*=\s*(\{[\s\S]*?\});/);
+    const byEnd = html.match(/const _ojtEndById\s*=\s*(\{[\s\S]*?\});\s*\n/); // NEW (OJT ends at the required hours)
+    const bySched = html.match(/const _schedById\s*=\s*(\{[\s\S]*?\});\s*\n/); // NEW (student schedule)
     try {
         if (byId)   { const o = JSON.parse(byId[1]);   Object.keys(_firstAttendanceById).forEach(k => delete _firstAttendanceById[k]);   Object.assign(_firstAttendanceById, o); }
         if (byName) { const o = JSON.parse(byName[1]); Object.keys(_firstAttendanceByName).forEach(k => delete _firstAttendanceByName[k]); Object.assign(_firstAttendanceByName, o); }
+        if (byEnd) { const o = JSON.parse(byEnd[1]); Object.keys(_ojtEndById).forEach(k => delete _ojtEndById[k]); Object.assign(_ojtEndById, o); }
+        if (bySched) { const o = JSON.parse(bySched[1]); Object.keys(_schedById).forEach(k => delete _schedById[k]); Object.assign(_schedById, o); }
     } catch (e) {}
 
     // Refresh open popups that show live data
@@ -3089,7 +4134,6 @@ function liveRefreshNow(force) {
                 .then(html => {
                     _liveSignature = data.signature;
                     const changed = liveApplyPage(html);
-                    if (changed && !force) showToast('Attendance data updated.', 'info');
                     return changed;
                 });
         })
@@ -3116,7 +4160,7 @@ function renderEmailDebug(emailErrors) {
     panel.classList.add('open');
 }
 function closeEmailDebug() { document.getElementById('emailDebugPanel').classList.remove('open'); }
-function copyEmailDebug() { navigator.clipboard.writeText(document.getElementById('emailDebugBody').innerText).then(()=>showToast('Copied','info')); }
+function copyEmailDebug() { navigator.clipboard.writeText(document.getElementById('emailDebugBody').innerText).then(()=>{}); }
 function escHtml(str) { return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
 
 /* ── EMAIL SENDING LOADING OVERLAY ── */
@@ -3189,8 +4233,6 @@ function wizardDutyTotalMins() {
 function blockIfOverMax() {
     const total = wizardDutyTotalMins();
     if (total > MAX_DUTY_MINS) {
-        const h=Math.floor(total/60), m=total%60;
-        showToast('Schedule is '+h+'h'+(m?' '+m+'m':'')+' — the maximum allowed is 8 hours per day.','warning');
         return true;
     }
     return false;
@@ -3312,14 +4354,13 @@ function wizNext(step){
     const skipPm = document.getElementById('skipPmCheckbox').checked;
 
     if (skipAm && skipPm) {
-        showToast('You cannot skip both AM and PM duty times.','warning');
         return;
     }
 
     if(step===1){
         if (!skipAm) {
             if(!g('w_am_ti_s')||!g('w_am_ti_e')||!g('w_am_to_s')||!g('w_am_to_e')){
-                showToast('Please fill all AM time fields.','warning'); return;
+                return;
             }
             let hasError = false;
             ['w_am_ti_s','w_am_ti_e'].forEach(id=>{
@@ -3339,7 +4380,7 @@ function wizNext(step){
         if (!skipPm) {
             const pmAny=g('w_pm_ti_s')||g('w_pm_ti_e')||g('w_pm_to_s')||g('w_pm_to_e');
             const pmAll=g('w_pm_ti_s')&&g('w_pm_ti_e')&&g('w_pm_to_s')&&g('w_pm_to_e');
-            if(pmAny&&!pmAll){showToast('Fill all PM fields or leave all blank to skip.','warning');return;}
+            if(pmAny&&!pmAll){return;}
             if(pmAll){
                 let hasPmError=false;
                 ['w_pm_ti_s','w_pm_ti_e','w_pm_to_s','w_pm_to_e'].forEach(id=>{
@@ -3392,7 +4433,6 @@ function wizSave(){
 
     if (skipAm && skipPm) {
         btn.classList.remove('loading'); btn.innerHTML='<i class="fas fa-save"></i> Save & Notify';
-        showToast('You cannot skip both AM and PM duty times.','warning');
         return;
     }
 
@@ -3423,25 +4463,18 @@ function wizSave(){
         setTimeout(() => {
             hideEmailSendingOverlay();
             let data=null;
-            try{data=JSON.parse(rawText);}catch(e){showToast('Unexpected server response.','error');console.error(e,rawText);return;}
+            try{data=JSON.parse(rawText);}catch(e){console.error(e,rawText);return;}
             if(data.success){
-                showToast(''+data.message,'success');
-                if(data.total_students>0){
-                    if(data.notified===data.total_students) setTimeout(()=>showToast(`${data.notified} student(s) notified.`,'info'),700);
-                    else if(data.notified>0) setTimeout(()=>showToast(`${data.notified}/${data.total_students} notified — see details.`,'warning'),700);
-                    else setTimeout(()=>showToast('Email delivery failed — see details.','error'),700);
-                }
-                if(data.admin_notified&&data.admin_notified>0) setTimeout(()=>showToast(`${data.admin_notified} admin(s) also notified.`,'info'),1200);
                 if(data.email_errors&&data.email_errors.length>0) setTimeout(()=>renderEmailDebug(data.email_errors),1400);
-                if(data.db_errors&&data.db_errors.length>0){setTimeout(()=>showToast(`${data.db_errors.length} DB error(s).`,'warning'),1800);console.warn('DB errors:',data.db_errors);}
+                if(data.db_errors&&data.db_errors.length>0){console.warn('DB errors:',data.db_errors);}
                 setTimeout(()=>liveRefreshNow(true),1500); // UPDATED: show the new schedule in place (no page reload)
-            }else{showToast(''+(data.message||'Save failed.'),'error');}
+            }else{console.warn('Save failed:',data.message||'');}
         }, 900);
     })
     .catch(err=>{
         btn.classList.remove('loading');btn.innerHTML='<i class="fas fa-save"></i> Save & Notify';
         hideEmailSendingOverlay();
-        showToast('Network error.','error');
+        console.warn('Network error.',err);
     });
 }
 document.getElementById('wizardOverlay').addEventListener('click',function(e){if(e.target===this)closeWizard();});
@@ -3451,7 +4484,7 @@ document.getElementById('hoursPopupOverlay').addEventListener('click',function(e
 function requestNotifPermission() { /* no-op */ }
 function sendSystemNotification(title, body, onClick) {
     const container=document.getElementById('builtInNotifContainer');
-    if(!container){showToast(title+' — '+body,'info');return;}
+    if(!container){return;}
     const AUTO_CLOSE_MS=7000;
     const notif=document.createElement('div');
     notif.className='builtin-notif';
@@ -3491,6 +4524,12 @@ let _lastKnownPendingIds=new Set(<?php
     $id_arr=[];while($idr=$init_ids->fetch_assoc())$id_arr[]=$idr['id'];echo json_encode($id_arr);
 ?>);
 const TYPE_LABELS_CO={am_time_in:'AM Sign In',am_time_out:'AM Sign Out',pm_time_in:'PM Sign In',pm_time_out:'PM Sign Out'};
+function reqKindNote(req){
+    const isOut=(req.type==='am_time_out'||req.type==='pm_time_out');
+    if(!isOut) return '';
+    const P=req.type==='am_time_out'?'AM':'PM';
+    return `<div class="req-kind-note"><strong>Late Request:</strong> only the ${P} duty is counted &mdash; ${P} Sign In to the scheduled ${P} Sign Out.</div>`;
+}
 
 function openLateInbox(){document.getElementById('lateInboxOverlay').classList.add('open');if(!liLoaded)fetchLateRequests();}
 function closeLateInbox(){document.getElementById('lateInboxOverlay').classList.remove('open');}
@@ -3517,7 +4556,6 @@ function fetchLateRequests(isPolling){
                 const studentName=req?(req.first_name+(req.middle_name?' '+req.middle_name:'')+' '+req.last_name):'A student';
                 const typeLabel=req?(TYPE_LABELS_CO[req.type]||req.type):'';
                 sendSystemNotification('New Late Request',`${studentName} submitted a late request for ${typeLabel}.`,()=>{window.focus();openLateInbox();switchTab('pending');});
-                showToast(`New late request from ${studentName}`,'info');
             }
             newPendingIds.forEach(id=>_lastKnownPendingIds.add(id));
             const currentPendingSet=new Set(newPendingIds);
@@ -3552,7 +4590,9 @@ function renderLiBody(){
             const fmt=v=>{if(!v||v==='missed')return'—';const t=v.includes(' ')?v.split(' ')[1]:v;const [h,m]=t.split(':').map(Number);const ampm=h>=12?'PM':'AM';const h12=h%12||12;return`${h12}:${String(m).padStart(2,'0')} ${ampm}`;};
             dutyHtml=`<div class="req-duty-info has-late"><div class="req-duty-stat"><strong>AM In</strong>${fmt(req.am_time_in)}</div><div class="req-duty-stat"><strong>AM Out</strong>${fmt(req.am_time_out)}</div><div class="req-duty-stat"><strong>PM In</strong>${fmt(req.pm_time_in)}</div><div class="req-duty-stat"><strong>PM Out</strong>${fmt(req.pm_time_out)}</div></div>`;
         }
-        html+=`<div class="req-card" id="req-card-${req.id}"><div class="req-card-top"><div class="req-student-info"><div class="req-student-name">${escH(req.first_name)}${req.middle_name?' '+escH(req.middle_name):''} ${escH(req.last_name)}</div><div class="req-meta">${typeBadge}<span>${escH(dateLabel)}</span><span>Submitted ${escH(submitted)}</span></div></div></div>${photoHtml}<div class="req-reason-box"><div class="req-reason-label">Reason</div>${escH(req.reason)}</div>${dutyHtml}${statusSection}</div>`;
+        let evidenceHtml='';
+        if(req.evidence){const ev=req.evidence,ico={ok:'fa-circle-check',info:'fa-circle-info',review:'fa-triangle-exclamation',risk:'fa-circle-xmark'};evidenceHtml=`<div class="req-evidence ${escH(ev.level)}"><div class="req-evidence-head"><i class="fas ${ev.level==='ok'?'fa-shield-halved':(ev.level==='review'?'fa-triangle-exclamation':'fa-circle-exclamation')}"></i>Legitimacy check — ${escH(ev.label)}</div><ul class="req-evidence-list">${(ev.signals||[]).map(sg=>`<li class="${escH(sg.level)}"><i class="fas ${ico[sg.level]||'fa-circle-info'}"></i><span>${escH(sg.text)}</span></li>`).join('')}</ul>${ev.detail?`<div class="req-evidence-detail"><div><span>${ev.detail.period} Sign In recorded</span><strong>${ev.detail.in?escH(ev.detail.in):'none'}</strong></div><div><span>Scheduled ${ev.detail.period} Sign Out</span><strong>${ev.detail.sched_out?escH(ev.detail.sched_out):'—'}</strong></div><div><span>Request sent at</span><strong>${ev.detail.sent?escH(ev.detail.sent):'—'}</strong></div><div><span>Credited if allowed</span><strong>${ev.detail.late_credit?escH(ev.detail.late_credit):'—'}</strong></div></div>`:''}${ev.device?`<div class="req-evidence-device">Sent from: ${escH(ev.device)}</div>`:''}</div>`;}
+        html+=`<div class="req-card" id="req-card-${req.id}"><div class="req-card-top"><div class="req-student-info"><div class="req-student-name">${escH(req.first_name)}${req.middle_name?' '+escH(req.middle_name):''} ${escH(req.last_name)}</div><div class="req-meta">${typeBadge}<span>${escH(dateLabel)}</span><span>Submitted ${escH(submitted)}</span></div>${reqKindNote(req)}</div></div>${photoHtml}<div class="req-reason-box"><div class="req-reason-label">Reason</div>${escH(req.reason)}</div>${evidenceHtml}${dutyHtml}${statusSection}</div>`;
     });
     body.innerHTML=html;
     filtered.forEach(req=>{if(req.has_photo)loadPhotoIntoFrame(req.id);});
@@ -3583,23 +4623,24 @@ function openPhotoLightbox(reqId,studentName){
 function approveRequest(reqId,btn){
     const req=liRequests.find(r=>r.id===reqId);
     const studentName=req?(req.first_name+(req.middle_name?' '+req.middle_name:'')+' '+req.last_name):null;
-    showCustomConfirm({title:'Allow Late Request?',message:"The student's time and photo will be recorded.",studentName,type:'approve',onConfirm:()=>{
+    const isRisk=!!(req&&req.evidence&&req.evidence.level==='risk');
+    const baseMsg="The student's time and photo will be recorded.";
+    showCustomConfirm({title:'Allow Late Request?',message:isRisk?"High-risk warnings were found in the legitimacy check. Allow only if you have confirmed this with the student. "+baseMsg:baseMsg,studentName,type:'approve',onConfirm:()=>{
         btn.classList.add('loading'); btn.textContent='Processing…';
-        const fd=new FormData(); fd.append('action','approve_late_request'); fd.append('req_id',reqId);
+        const fd=new FormData(); fd.append('action','approve_late_request'); fd.append('req_id',reqId); if(isRisk) fd.append('confirm_risk','1');
         fetch(window.location.pathname,{method:'POST',headers:{'X-Requested-With':'XMLHttpRequest'},body:fd})
         .then(r=>r.json())
         .then(data=>{
             if(data.success){
-                showToast(''+data.message,'success');
                 const idx=liRequests.findIndex(r=>r.id===reqId);
                 if(idx!==-1)liRequests[idx].status='approved';
                 const pending=liRequests.filter(r=>r.status==='pending').length;
                 updateBadges(pending);
                 if(data.pending_count!==undefined)updateBadges(data.pending_count);
                 renderLiBody();
-            }else{btn.classList.remove('loading');btn.textContent='Allow';showToast(''+(data.message||'Failed.'),'error');}
+            }else{btn.classList.remove('loading');btn.textContent='Allow';}
         })
-        .catch(()=>{btn.classList.remove('loading');btn.textContent='Allow';showToast('Network error.','error');});
+        .catch(()=>{btn.classList.remove('loading');btn.textContent='Allow';});
     }});
 }
 
@@ -3612,16 +4653,15 @@ function rejectRequest(reqId,btn){
         .then(r=>r.json())
         .then(data=>{
             if(data.success){
-                showToast('Request rejected.','warning');
                 const idx=liRequests.findIndex(r=>r.id===reqId);
                 if(idx!==-1)liRequests[idx].status='rejected';
                 const pending=liRequests.filter(r=>r.status==='pending').length;
                 updateBadges(pending);
                 if(data.pending_count!==undefined)updateBadges(data.pending_count);
                 renderLiBody();
-            }else{showToast(''+(data.message||'Failed.'),'error');}
+            }
         })
-        .catch(()=>showToast('Network error.','error'));
+        .catch(()=>{});
     }});
 }
 
@@ -3654,6 +4694,41 @@ const _firstAttendanceByName = <?php
     }
     echo json_encode((object)$fa_by_name);
 ?>;
+/* NEW (student schedule): each student's Day (AM duty) / Evening (PM duty) training days (0=Sun…6=Sat numbers, null = both
+   duties every weekday) and dated schedule changes, so the Attendance Log judges a student only on the duties they are scheduled for. */
+const _schedById = <?= json_encode(attsch_js_map($student_sched)) ?>;
+/* NEW (OJT ends at the required hours): the day each student reached the course's required hours; later days are never ABSENT / INCOMPLETE. */
+const _ojtEndById = <?= json_encode((object)array_map('strval', $student_ojt_end)) ?>;
+function schedPeriods(row, dateStr){
+    const both = {am:true, pm:true};
+    const id = row.student_id ?? row.user_id ?? row.id;
+    if (id === undefined || id === null || !Object.prototype.hasOwnProperty.call(_schedById, String(id))) return both; // unknown student: keep server status
+    const s = _schedById[String(id)];
+    let sc = s.c;
+    for (const h of (s.h || [])) { if (h[0] > dateStr) { sc = h[1]; break; } }
+    if (sc === null || sc === undefined) return both;
+    const dow = new Date(dateStr + 'T00:00:00').getDay();
+    return {am: (sc.d||[]).indexOf(dow) !== -1, pm: (sc.e||[]).indexOf(dow) !== -1};
+}
+/* Day schedule = AM duty, Evening schedule = PM duty. Returns the corrected status (or null = keep the server's):
+   NOT SCHEDULED when neither duty is scheduled and nothing was recorded; otherwise the status is re-judged on the
+   duty periods the student is scheduled for (a period holding a real entry always counts). */
+function schedStatus(row, dateStr){
+    const sp = schedPeriods(row, dateStr);
+    if (sp.am && sp.pm) return null;
+    const realAm = attHasReal(row.am_time_in) || attHasReal(row.am_time_out);
+    const realPm = attHasReal(row.pm_time_in) || attHasReal(row.pm_time_out);
+    if (!sp.am && !sp.pm && !realAm && !realPm) return 'NOT SCHEDULED';
+    const cols = [];
+    if (sp.am || realAm) cols.push(row.am_time_in, row.am_time_out);
+    if (sp.pm || realPm) cols.push(row.pm_time_in, row.pm_time_out);
+    const isMissed = v => String(v||'').trim().toLowerCase() === 'missed';
+    const anyReal = cols.some(attHasReal), allReal = cols.every(attHasReal), anyMissed = cols.some(isMissed);
+    if (!anyReal && !anyMissed) return 'ABSENT';
+    if (allReal && !anyMissed) return 'PRESENT';
+    return 'INCOMPLETE';
+}
+function attHasReal(v){ if (v === null || v === undefined) return false; const t = String(v).trim().toLowerCase(); return t !== '' && t !== '-' && t !== 'missed'; } // the log popup shows '-' for empty and 'MISSED' for missed
 function isBeforeFirstAttendance(row, dateStr){
     const id = row.student_id ?? row.user_id ?? row.id;
     let first;
@@ -3734,13 +4809,12 @@ function loadAttLogForDate(dateStr){
     .then(data=>{
         document.getElementById('attLogSpinner').style.display='none';
         document.getElementById('attLogTableBox').style.opacity='1';
-        if(!data.success){showToast('Failed to load attendance.','error');return;}
+        if(!data.success){return;}
         renderAttLogTable(data);
     })
     .catch(()=>{
         document.getElementById('attLogSpinner').style.display='none';
         document.getElementById('attLogTableBox').style.opacity='1';
-        showToast('Network error loading attendance.','error');
     });
 }
 
@@ -3783,7 +4857,20 @@ function renderAttPage(){
         if(!_attIsWeekend && _attData && _attData.date && (r.status==='ABSENT'||r.status==='INCOMPLETE') && isBeforeFirstAttendance(r,_attData.date)){
             r = Object.assign({}, r, {status:'NOT STARTED', am_time_in:null, am_time_out:null, pm_time_in:null, pm_time_out:null});
         }
-        const rowNum=start+i+1,cls=(r.status==='NOT STARTED'?'pending':(statusClass[r.status]||''));
+        // NEW (student schedule): not a duty day for this student and nothing recorded → NOT SCHEDULED, never ABSENT
+        if(!_attIsWeekend && _attData && _attData.date && (r.status==='ABSENT'||r.status==='INCOMPLETE')){
+            const eid = r.student_id ?? r.user_id ?? r.id;
+            const eEnd = (eid !== undefined && eid !== null) ? _ojtEndById[String(eid)] : undefined;
+            if (eEnd && _attData.date > eEnd && !['am_time_in','am_time_out','pm_time_in','pm_time_out'].some(k => attHasReal(r[k]))) {
+                r = Object.assign({}, r, {status:'OJT COMPLETED', am_time_in:null, am_time_out:null, pm_time_in:null, pm_time_out:null});
+            }
+        }
+        if(!_attIsWeekend && _attData && _attData.date && (r.status==='ABSENT'||r.status==='INCOMPLETE'||r.status==='PRESENT')){
+            const ss = schedStatus(r,_attData.date);
+            if (ss === 'NOT SCHEDULED') r = Object.assign({}, r, {status:'NOT SCHEDULED', am_time_in:null, am_time_out:null, pm_time_in:null, pm_time_out:null});
+            else if (ss) r = Object.assign({}, r, {status:ss});
+        }
+        const rowNum=start+i+1,cls=(r.status==='NOT STARTED'?'pending':((r.status==='NOT SCHEDULED'||r.status==='OJT COMPLETED')?'nosched':(statusClass[r.status]||'')));
         if(_attIsWeekend){return`<tr class="day-off-row"><td style="padding:8px 6px;text-align:center;color:#aaa;font-size:11px;">${rowNum}</td><td style="padding:8px 10px;">${escH(r.name)}</td><td class="day-off" style="text-align:center;">DAY OFF</td></tr>`;}
         return`<tr><td style="padding:8px 6px;text-align:center;color:#aaa;font-size:11px;white-space:nowrap;">${rowNum}</td><td style="padding:8px 10px;white-space:nowrap;">${escH(r.name)}</td><td style="text-align:center;padding:5px;">${mkTime(r.am_time_in)}</td><td style="text-align:center;padding:5px;">${mkPhoto(r.am_time_in_photo)}</td><td style="text-align:center;padding:5px;">${mkTime(r.am_time_out)}</td><td style="text-align:center;padding:5px;">${mkPhoto(r.am_time_out_photo)}</td><td style="text-align:center;padding:5px;">${mkTime(r.pm_time_in)}</td><td style="text-align:center;padding:5px;">${mkPhoto(r.pm_time_in_photo)}</td><td style="text-align:center;padding:5px;">${mkTime(r.pm_time_out)}</td><td style="text-align:center;padding:5px;">${mkPhoto(r.pm_time_out_photo)}</td><td class="${cls}" style="text-align:center;padding:5px;font-weight:700;">${escH(r.status)}</td></tr>`;
     }).join('');
@@ -3829,6 +4916,100 @@ document.getElementById('searchInput').addEventListener('keyup',function(){
 
 // Poll every 60 seconds for new late requests
 setInterval(()=>{ fetchLateRequests(true); },60000);
+</script>
+<!-- ══════════════════════════════════════════════════════════════════════
+     NEW (OJT trainee group chat) — NEW-MESSAGE POPUP + SIDE-MENU INDICATOR (same as Profile.php)
+     ------------------------------------------------------------------------
+     When the administrator or a registered OJT trainee writes in the company's chat (the chat itself lives on
+     Profile.php: "Admin" and "OJT Trainee Group Chat"), this page shows:
+       • the same navy popup ("Admin sent you a new message" / "<Name> sent a message in OJT Trainee Group Chat") —
+         clicking it opens that conversation on Profile.php;
+       • a live red count (both chats together) on the "My Profile" side-menu link.
+     The counts come from Profile.php?chat_unread=1 (admin) and Profile.php?gc_load=1&peek=1 (group) — read-only.
+     Same rules as the other popups: messages already waiting when the page opens are the baseline (no popup); seen ids
+     are kept briefly in sessionStorage (shared with Profile.php, so moving between pages never repeats a popup);
+     checked right away, then every 5 s (paused while the tab is hidden).
+     Self-contained: no existing function, poller or style is changed.
+     ══════════════════════════════════════════════════════════════════════ -->
+<style>
+    .sidebar-badge-chat { background:#dc2626; color:#fff; font-weight:800; text-align:center; box-sizing:border-box; min-width:18px; height:18px; padding:0 3px; border-radius:50%; font-size:10px; line-height:18px; display:inline-flex; align-items:center; justify-content:center; position:absolute; right:18px; top:50%; transform:translateY(-50%); animation:ccBadgePulse 2s ease-in-out infinite; }
+    .sidebar.collapsed .sidebar-badge-chat { right:14px; top:10px; transform:none; }
+    @keyframes ccBadgePulse { 0%, 100% { box-shadow:0 0 0 0 rgba(220,38,38,0.55); } 50% { box-shadow:0 0 0 6px rgba(220,38,38,0); } }
+    .cv-top-toast.cc-go { position:fixed; top:30px; left:50%; transform:translateX(-50%); background:#1B2A4A; color:#E3E8F1; border:1px solid #55668C; border-radius:0; padding:14px 20px; box-shadow:0 8px 24px rgba(27,42,74,0.30); display:flex; align-items:center; gap:12px; font-family:'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; font-size:12.5px; line-height:1.45; z-index:10020; max-width:440px; opacity:0; transition:opacity 0.35s, top 0.3s ease, background-color 0.15s ease; pointer-events:auto; cursor:pointer; }
+    .cv-top-toast.cc-go.show { opacity:1; }
+    .cv-top-toast.cc-go:hover { background:#24375E; }
+    .cv-top-toast.cc-go:focus-visible { outline:2px solid #F7C600; outline-offset:2px; }
+    .cv-top-toast.cc-go i { color:#8FD18F; font-size:18px; flex-shrink:0; }
+    .cv-top-toast.cc-go strong { color:#ffffff; font-weight:700; }
+    .cv-top-toast.cc-go .cv-toast-go { flex-shrink:0; margin-left:6px; color:#F7C600; font-size:10.5px; font-weight:700; text-transform:uppercase; letter-spacing:0.4px; white-space:nowrap; }
+    .cv-top-toast.cc-go .cv-toast-go i { color:inherit; font-size:9px; margin-left:3px; }
+</style>
+<script>
+(function () {
+    'use strict';
+    if (window._cvCompanyChatNotifyReady) return;
+    window._cvCompanyChatNotifyReady = true;
+    var POLL_MS = 5000, TOAST_MS = 7000, STORE_FRESH = 45000;
+    var KEYS = { admin: 'cvAdminChatKnownIds', group: 'cvGroupChatKnownIds' };
+    var known = { admin: null, group: null }, counts = { admin: 0, group: 0 }, inFlight = false;
+
+    function esc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
+    function readStore(key) { try { var o = JSON.parse(sessionStorage.getItem(key) || 'null'); if (o && Array.isArray(o.ids) && Date.now() - (o.ts || 0) <= STORE_FRESH) return new Set(o.ids.map(String)); } catch (e) {} return null; }
+    function writeStore(conv) { if (!known[conv]) return; try { sessionStorage.setItem(KEYS[conv], JSON.stringify({ ids: Array.from(known[conv]), ts: Date.now() })); } catch (e) {} }
+    function layoutToasts() {
+        var top = 30, undo = document.getElementById('undoToast');
+        if (undo && undo.classList && undo.classList.contains('show')) top = Math.max(top, undo.getBoundingClientRect().bottom + 12);
+        document.querySelectorAll('.cv-top-toast').forEach(function (el) { el.style.top = top + 'px'; top += el.offsetHeight + 12; });
+    }
+    function popup(conv, who, text) {
+        var go = function () { window.location.href = 'Profile.php?open_chat=' + conv; };
+        var div = document.createElement('div');
+        div.className = 'cv-top-toast cc-go'; div.setAttribute('role', 'status'); div.setAttribute('tabindex', '0');
+        div.innerHTML = '<i class="fas fa-comment-dots"></i><span><strong>' + esc(who) + '</strong> ' + esc(text) + '</span><span class="cv-toast-go">View <i class="fas fa-chevron-right"></i></span>';
+        div.addEventListener('click', go);
+        div.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); } });
+        document.body.appendChild(div); layoutToasts();
+        requestAnimationFrame(function () { div.classList.add('show'); });
+        setTimeout(function () { div.classList.remove('show'); setTimeout(function () { div.remove(); layoutToasts(); }, 400); }, TOAST_MS);
+    }
+    function paintBadge() {
+        var n = counts.admin + counts.group, b = document.getElementById('sidebarChatBadge');
+        if (b) { b.textContent = n > 99 ? '99+' : n; b.style.display = n > 0 ? '' : 'none'; }
+    }
+    function handle(conv, rows, count) {
+        var ids = new Set(rows.map(function (r) { return String(r.id); }));
+        counts[conv] = parseInt(count, 10) || 0;
+        if (known[conv] === null) {
+            var st = readStore(KEYS[conv]);
+            if (!st) { known[conv] = ids; writeStore(conv); return; }   // baseline: nothing pops up
+            known[conv] = st;
+        }
+        var fresh = rows.filter(function (r) { return !known[conv].has(String(r.id)); });
+        known[conv] = ids; writeStore(conv);
+        if (!fresh.length) return;
+        if (conv === 'admin') popup('admin', 'Admin', fresh.length > 1 ? 'sent you ' + fresh.length + ' new messages \u2014 open the chat.' : 'sent you a new message \u2014 open the chat.');
+        else {
+            var names = Array.from(new Set(fresh.map(function (r) { return r.name; })));
+            if (names.length === 1) popup('group', names[0], fresh.length > 1 ? 'sent ' + fresh.length + ' messages in OJT Trainee Group Chat.' : 'sent a message in OJT Trainee Group Chat.');
+            else popup('group', fresh.length + ' new messages', 'in OJT Trainee Group Chat.');
+        }
+    }
+    function poll() {
+        if (inFlight || document.hidden) return;
+        inFlight = true;
+        var a = fetch('Profile.php?chat_unread=1', { credentials: 'same-origin', cache: 'no-store' }).then(function (r) { return r.json(); })
+            .then(function (d) { if (d && d.success && Array.isArray(d.rows)) handle('admin', d.rows, d.count); }).catch(function () {});
+        var g = fetch('Profile.php?gc_load=1&peek=1', { credentials: 'same-origin', cache: 'no-store' }).then(function (r) { return r.json(); })
+            .then(function (d) { if (d && d.success) handle('group', d.unread_rows || [], d.unread); }).catch(function () {});
+        Promise.all([a, g]).then(function () { inFlight = false; paintBadge(); });
+    }
+    poll();
+    setInterval(poll, POLL_MS);
+    document.addEventListener('visibilitychange', function () { if (!document.hidden) poll(); });
+    window.addEventListener('focus', poll);
+    window.addEventListener('pageshow', function (e) { if (e.persisted) poll(); });
+    window.addEventListener('pagehide', function () { writeStore('admin'); writeStore('group'); });
+})();
 </script>
 </body>
 </html>
