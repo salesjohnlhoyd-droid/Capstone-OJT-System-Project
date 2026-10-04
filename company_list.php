@@ -3108,9 +3108,9 @@ $companies = $conn->query("
 
         /* ══ ALREADY-REGISTERED POPUP ══ */
         #registeredModal .popup-content { border: 1px solid var(--grid-border); }
-        #registeredModal .popup-content h3 { color: #A0850A; }
+        #registeredModal .popup-content h3 { color: var(--grid-navy); }   /* ADJUSTMENT: navy instead of yellow */
         #registeredModal .popup-icon { font-size: 42px; margin-bottom: 12px; display: block; }
-        #registeredModal .popup-content button { background: #A0850A; }
+        #registeredModal .popup-content button { background: var(--grid-navy); }   /* ADJUSTMENT: navy instead of yellow */
 
         /* ══ PENDING-APPLICATION-BLOCKS-APPLY POPUP ══
            ADJUSTMENT: shown when the student clicks Apply on a company
@@ -3118,9 +3118,9 @@ $companies = $conn->query("
            mirrors #registeredModal's styling exactly, just a distinct
            id/message so the copy is accurate to the actual guard. */
         #pendingBlockedModal .popup-content { border: 1px solid var(--grid-border); }
-        #pendingBlockedModal .popup-content h3 { color: #A0850A; }
+        #pendingBlockedModal .popup-content h3 { color: var(--grid-navy); }   /* ADJUSTMENT: navy instead of yellow */
         #pendingBlockedModal .popup-icon { font-size: 42px; margin-bottom: 12px; display: block; }
-        #pendingBlockedModal .popup-content button { background: #A0850A; }
+        #pendingBlockedModal .popup-content button { background: var(--grid-navy); }   /* ADJUSTMENT: navy instead of yellow */
 
         /* ══ CANCEL-REQUEST CONFIRMATION POPUP ══
            ADJUSTMENT (this revision): replaces the old browser-native
