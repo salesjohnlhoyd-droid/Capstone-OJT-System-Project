@@ -137,6 +137,14 @@ ini_set('error_log', __DIR__ . '/ojt_debug.log');
 error_reporting(E_ALL);
 
 session_start();
+// LOGOUT + BACK BUTTON — never let the browser keep a copy of this page (same as the admin pages): after logging
+// out, the Back arrow asks the server again and a logged-out visitor is sent to login.php. Only for the page
+// itself (a top-level page load), not for files / images / AJAX it serves.
+if (($_SERVER['HTTP_SEC_FETCH_DEST'] ?? 'document') === 'document' && !headers_sent()) {
+    header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+    header('Pragma: no-cache');
+    header('Expires: Sat, 01 Jan 2000 00:00:00 GMT');
+}
 include "db.php";
 
 $_builder_path = __DIR__ . '/weekly_report_form_builder.php';
@@ -144,14 +152,14 @@ if (!file_exists($_builder_path)) {
     while (ob_get_level() > 0) { ob_end_clean(); }
     http_response_code(500);
     echo '<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Setup Error</title>'
-       . '<style>body{font-family:sans-serif;background:#fef2f2;display:flex;align-items:center;'
+       . '<style>body{font-family:sans-serif;background:#F7E9E9;display:flex;align-items:center;'
        . 'justify-content:center;min-height:100vh;margin:0;}'
-       . '.box{background:white;border-radius:14px;padding:36px 40px;max-width:520px;'
-       . 'box-shadow:0 4px 24px rgba(0,0,0,.12);text-align:center;}'
-       . 'h2{color:#dc2626;margin-bottom:12px;}p{color:#374151;line-height:1.6;font-size:.95rem;}'
-       . 'code{background:#f3f4f6;padding:2px 8px;border-radius:5px;font-size:.88rem;}'
+       . '.box{background:white;border-radius:0;padding:36px 40px;max-width:520px;'
+       . 'box-shadow:none;text-align:center;}'
+       . 'h2{color:#A02A2A;margin-bottom:12px;}p{color:#2d3748;line-height:1.6;font-size:.95rem;}'
+       . 'code{background:#F3F5F9;padding:2px 8px;border-radius:0;font-size:.88rem;}'
        . '</style></head><body><div class="box">'
-       . '<h2>&#x26A0; Setup Error</h2>'
+       . '<h2>Setup Error</h2>'
        . '<p>The file <code>weekly_report_form_builder.php</code> is missing from the server.</p>'
        . '<p>Please copy <code>weekly_report_form_builder.php</code> to:<br>'
        . '<code>' . htmlspecialchars(__DIR__) . '</code></p>'
@@ -213,10 +221,53 @@ use PHPMailer\PHPMailer\Exception;
 
 if (!isset($_SESSION['user_id']) || $_SESSION['role'] != "student") {
     while (ob_get_level() > 0) { ob_end_clean(); }
+    // no session at all (e.g. after logging out) → back to the login page; anything else keeps the old message
+    if (!isset($_SESSION['user_id']) && ($_SERVER['HTTP_SEC_FETCH_DEST'] ?? 'document') === 'document' && !headers_sent()) {
+        header("Location: login.php");
+        exit;
+    }
     die("Access denied.");
 }
 
 $user_id = $_SESSION['user_id'];
+
+/* ============================================================
+   NEW (registration guard): this page is only for a student who is registered to a company.
+   The company can remove the student (add_ojt_student.php sets deploy_status back to 'Waiting' and deletes the
+   assignment). Then:
+     • opening this page → student_profile.php (its side menu is locked again);
+     • ?poll_registration=1 → the script at the bottom of this page asks every few seconds and does the same redirect
+       while the page is open.
+   Registered = an ojt_assignments row AND deploy_status 'Deployed'. Page-internal AJAX requests are left exactly as before.
+   ============================================================ */
+if (!function_exists('reg_is_registered')) {
+    function reg_is_registered($conn, $uid) {
+        try {
+            $q = $conn->prepare("SELECT u.deploy_status, (SELECT COUNT(*) FROM ojt_assignments oa WHERE oa.student_id = u.id) AS n FROM users u WHERE u.id = ?");
+            $q->bind_param("i", $uid);
+            $q->execute();
+            $r = $q->get_result()->fetch_assoc();
+            $q->close();
+            if (!$r) return true;   // cannot tell → never lock anyone out because of a lookup problem
+            return $r['deploy_status'] === 'Deployed' && (int)$r['n'] > 0;
+        } catch (\Throwable $e) {
+            error_log('registration guard: ' . $e->getMessage());
+            return true;
+        }
+    }
+}
+if (isset($_GET['poll_registration'])) {
+    header('Content-Type: application/json');
+    header('Cache-Control: no-store');
+    echo json_encode(['registered' => reg_is_registered($conn, (int)$user_id)]);
+    exit;
+}
+if ($_SERVER['REQUEST_METHOD'] === 'GET' && ($_SERVER['HTTP_SEC_FETCH_DEST'] ?? 'document') === 'document'
+    && !isset($_SERVER['HTTP_X_REQUESTED_WITH']) && !headers_sent() && !reg_is_registered($conn, (int)$user_id)) {
+    $_SESSION['unreg_flash'] = 1;
+    header('Location: student_profile.php');
+    exit;
+}
 
 /* ============================================================ HELPER FUNCTIONS ============================================================ */
 function fmtTime12($t) {
@@ -490,7 +541,7 @@ if (isset($_GET['dtr']) && $_GET['dtr'] == '1') {
     $iframe_src = 'student_report.php?dtrraw=1&month=' . urlencode($month_param);
     $month_label_js = strtoupper(date('F Y', mktime(0,0,0,$month_num,1,$year)));
     sendJson([
-        'html'        => '<div style="text-align:center;padding:12px 0 0;"><iframe src="' . htmlspecialchars($iframe_src) . '" style="width:100%;height:640px;border:none;border-radius:8px;background:#fff;" title="DTR ' . htmlspecialchars($month_label_js) . '"></iframe></div>',
+        'html'        => '<div style="text-align:center;padding:12px 0 0;"><iframe src="' . htmlspecialchars($iframe_src) . '" style="width:100%;height:640px;border:none;border-radius:0;background:#fff;" title="DTR ' . htmlspecialchars($month_label_js) . '"></iframe></div>',
         'month_label' => $month_label_js,
         'is_html'     => true,
     ]);
@@ -551,7 +602,7 @@ if (isset($_GET['view']) && $_GET['view'] == '1') {
     if (!$dlrow || empty($dlrow['report_blob'])) { sendJson(['error' => 'File not found.']); }
     try {
         $blob = $dlrow['report_blob'];
-        if (strlen($blob) >= 2 && substr($blob, 0, 2) === 'PK') { sendJson(['html' => '<div style="padding:24px;text-align:center;color:#6b7280;"><p>Legacy XLSX format. Use Download button.</p></div>', 'week' => date("M d, Y", strtotime($dlrow['week_start']))]); }
+        if (strlen($blob) >= 2 && substr($blob, 0, 2) === 'PK') { sendJson(['html' => '<div style="padding:24px;text-align:center;color:#5A6272;"><p>Legacy XLSX format. Use Download button.</p></div>', 'week' => date("M d, Y", strtotime($dlrow['week_start']))]); }
         $iframe_src = 'student_report.php?viewraw=1&id=' . $report_id;
         sendJson(['html' => $iframe_src, 'week' => date("M d, Y", strtotime($dlrow['week_start'])), 'is_html' => true, 'iframe_src' => $iframe_src]);
     } catch (Throwable $e) { sendJson(['error' => 'Failed to render report: ' . $e->getMessage()]); }
@@ -612,6 +663,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['submit_journal'])) {
            the builder already knows how to render it (it falls back to
            an em-dash placeholder when empty, same as the other fields). */
         $training_station_val = trim($_POST['training_station'] ?? '');
+        /* Training Station is required — enforced here too so it can't be bypassed client-side. */
+        if ($training_station_val === '') {
+            if ($is_ajax) { sendJson(['success' => false, 'message' => 'Training Station is required. Please enter it and try again.']); }
+            while (ob_get_level() > 0) { ob_end_clean(); } die("Training Station is required.");
+        }
         $aq = $conn->prepare("SELECT date, am_time_in, am_time_out, pm_time_in, pm_time_out FROM attendance_logs WHERE user_id = ? AND date BETWEEN ? AND ?"); $aq->bind_param("iss", $user_id, $week_start, $week_end_val); $aq->execute(); $att_map = []; $att_res = $aq->get_result(); while ($ar = $att_res->fetch_assoc()) { $att_map[$ar['date']] = $ar; } $aq->close();
         $day_labels_val = ['Monday','Tuesday','Wednesday','Thursday','Friday']; $days_arr = []; for ($i = 0; $i < 5; $i++) $days_arr[] = date("Y-m-d", strtotime("monday this week +{$i} days"));
         $days_data = []; $total_hours = 0;
@@ -671,38 +727,547 @@ if (!$res_company) {
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <style>
         *{box-sizing:border-box;margin:0;padding:0;}
-        body{font-family:'Segoe UI',sans-serif;background:#f5f5f0;color:#2d3748;}
-        :root{--maroon:#07145fe5;--gold:#FFD700;--active:#1a237e;}
-        .sidebar{width:260px;background:var(--maroon);height:100vh;position:fixed;top:0;left:0;display:flex;flex-direction:column;z-index:1000;}
-        .sidebar-header{padding:16px 20px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid rgba(255,255,255,0.1);min-height:72px;}
-        .sidebar-user-info{display:flex;flex-direction:column;gap:1px;overflow:hidden;max-width:180px;}
-        .sidebar-user-name{color:var(--gold);font-size:14px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.3;}
-        .sidebar-user-role{color:rgba(255,255,255,0.55);font-size:10px;font-weight:500;text-transform:uppercase;letter-spacing:0.08em;white-space:nowrap;}
-        .sidebar-links{flex:1;display:flex;flex-direction:column;padding:10px 0;}
-        .sidebar a{padding:15px 25px;color:#cbd5e0;text-decoration:none;font-size:14px;display:flex;align-items:center;transition:background .2s;}
-        .sidebar a i{width:30px;font-size:18px;margin-right:15px;text-align:center;}
+        body{font-family:'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;background:#EEF1F6;color:#2d3748;}
+        :root{--maroon:#07145fe5;--gold:#FFD700;--active:#1a237e;--neust-maroon:#07145fe5;--neust-gold:#FFD700;--neust-active:#1a237e;--grid-navy:#1B2A4A;--grid-border:#C3CADA;--grid-amber:#A0850A;--grid-amber-bg:#FAF3DC;}
+        .sidebar{
+            width: 260px;
+            background: var(--neust-maroon);
+            height: 100vh;
+            position: fixed;
+            display: flex;
+            flex-direction: column;
+            transition: width 0.3s ease;
+            z-index: 1000;
+            box-shadow: 4px 0 10px rgba(0,0,0,0.1);
+            top: 0; left: 0;
+        }
+        .sidebar-header{
+            padding: 20px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+            flex-shrink: 0;
+            min-height: 72px;
+        }
+        .sidebar-user-info{
+            display: flex;
+            flex-direction: column;
+            gap: 1px;
+            overflow: hidden;
+            transition: opacity 0.2s, width 0.3s;
+            max-width: 180px;
+            min-width: 0;
+        }
+        .sidebar-user-name{
+            color: var(--neust-gold);
+            font-size: 18px;
+            font-weight: bold;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            line-height: 1.3;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+        .sidebar-user-role{
+            color: rgba(255,255,255,0.55);
+            font-size: 11px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.8px;
+            margin-top: 3px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .sidebar-links{ flex: 1; display: flex; flex-direction: column; padding: 10px 0; overflow: hidden; }
+        .sidebar a{
+            padding: 15px 25px;
+            color: #cbd5e0;
+            text-decoration: none;
+            font-size: 14px;
+            display: flex;
+            align-items: center;
+            transition: background 0.2s, color 0.2s;
+            white-space: nowrap;
+            position: relative;
+        }
+        .sidebar a i{
+            width: 30px;
+            font-size: 18px;
+            margin-right: 15px;
+            text-align: center;
+            flex-shrink: 0;
+        }
         .sidebar a:hover{background:rgba(255,255,255,0.07);color:white;}
-        .sidebar a.active{background:var(--active);color:white;border-left:4px solid var(--gold);}
-        .logout-link{margin-top:auto;padding:20px;border-top:1px solid rgba(255,255,255,0.1);}
-        .logout-link a{border:1px solid var(--gold);color:var(--gold);border-radius:6px;justify-content:center;padding:10px;display:flex;align-items:center;text-decoration:none;}
-        .toggle-btn{background:transparent;border:none;color:white;cursor:pointer;font-size:20px;}
+        .sidebar a.active{
+            background: var(--neust-active);
+            color: white;
+            border-left: 4px solid var(--neust-gold);
+        }
+        .logout-link{ margin-top: auto; padding: 20px; border-top: 1px solid rgba(255,255,255,0.1); }
+        .logout-link a{
+            border: 1px solid var(--neust-gold); color: var(--neust-gold);
+            border-radius: 6px; justify-content: center; padding: 10px;
+            display: flex; align-items: center; text-decoration: none;
+            font-size: 14px; transition: background 0.2s;
+        }
+        .toggle-btn{
+            background: transparent; border: none; color: white;
+            cursor: pointer; font-size: 20px; outline: none; flex-shrink: 0;
+        }
         .main-content{margin-left:260px;width:calc(100% - 260px);display:flex;flex-direction:column;min-height:100vh;}
         .navbar{background:var(--maroon);padding:10px 30px;display:flex;align-items:center;color:white;height:60px;}
         .navbar img{height:40px;margin-right:14px;}
         .error-wrap{display:flex;align-items:center;justify-content:center;flex:1;padding:40px 20px;}
-        .error-box{background:white;border-radius:20px;padding:48px 44px;max-width:540px;width:100%;text-align:center;box-shadow:0 4px 24px rgba(0,0,0,.08);}
-        .error-icon{font-size:3.5rem;margin-bottom:18px;}
-        .error-box h2{font-size:1.3rem;font-weight:700;color:#111827;margin-bottom:10px;}
-        .error-box p{color:#6b7280;font-size:.92rem;line-height:1.65;margin-bottom:6px;}
-        .error-box .hint{background:#fef3c7;border:1.5px solid #fcd34d;border-radius:10px;padding:12px 16px;margin:18px 0;color:#92400e;font-size:.85rem;text-align:left;}
-        .btn-dash{display:inline-flex;align-items:center;gap:8px;background:#07145f;color:white;border:none;border-radius:10px;padding:12px 26px;font-size:.9rem;font-weight:700;text-decoration:none;margin-top:6px;}
+        .error-box{background:white;border:1px solid var(--grid-border);border-radius:0;padding:48px 44px;max-width:540px;width:100%;text-align:center;box-shadow:none;}
+        .error-icon{font-size:3rem;margin-bottom:18px;color:var(--grid-amber);}
+        .error-box h2{text-transform:uppercase;letter-spacing:0.4px;}
+        .btn-dash{text-transform:uppercase;letter-spacing:0.4px;font-size:.8rem;background:var(--grid-navy);}
+        .error-box h2{font-size:1.3rem;font-weight:700;color:#1B2A4A;margin-bottom:10px;}
+        .error-box p{color:#5A6272;font-size:.92rem;line-height:1.65;margin-bottom:6px;}
+        .error-box .hint{background:#FAF3DC;border:1.5px solid #E6D9A8;border-radius:0;padding:12px 16px;margin:18px 0;color:#A0850A;font-size:.85rem;text-align:left;}
+        .btn-dash{display:inline-flex;align-items:center;gap:8px;background:#1B2A4A;color:white;border:none;border-radius:0;padding:12px 26px;font-size:.9rem;font-weight:700;text-decoration:none;margin-top:6px;}
     </style>
 </head>
 <body>
+<!-- STUDENT PAGE SHELL (self-contained): side-menu loading page + sync, logout popup, sidebar state, action loading page. -->
+<style>
+    /* the overlay appears with no fade while the page is being left (same as the admin pages) */
+    #globalLoadingOverlay.gl-instant { transition: none; }
+    /* the saved menu state is applied before the first paint — nothing animates while it is restored */
+    html.cv-sb-restoring .sidebar, html.cv-sb-restoring .main-content, html.cv-sb-restoring #att-notif-bar { transition: none !important; }
+
+    /* LOGOUT CONFIRMATION POPUP — same square navy look as the admin pages' */
+    .cv-logout-overlay { position: fixed; inset: 0; z-index: 100050; display: flex; align-items: center; justify-content: center; padding: 20px;
+        background: rgba(27, 42, 74, 0.45); opacity: 0; visibility: hidden; transition: opacity 0.2s ease, visibility 0.2s ease; }
+    .cv-logout-overlay.show { opacity: 1; visibility: visible; }
+    .cv-logout-box { background: #ffffff; width: 420px; max-width: 100%; border-top: 3px solid #1B2A4A; box-shadow: 0 20px 60px rgba(0, 0, 0, 0.25);
+        padding: 26px 24px 22px; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; transform: translateY(8px); transition: transform 0.2s ease; }
+    .cv-logout-overlay.show .cv-logout-box { transform: translateY(0); }
+    .cv-logout-box h3 { margin: 0 0 10px; font-size: 16px; color: #1B2A4A; display: flex; align-items: center; gap: 10px; }
+    .cv-logout-box h3 i { color: #1B2A4A; }
+    .cv-logout-box p { margin: 0 0 22px; font-size: 13.5px; color: #4A5568; line-height: 1.6; }
+    .cv-logout-actions { display: flex; justify-content: flex-end; gap: 8px; }
+    .cv-logout-btn { display: inline-flex; align-items: center; gap: 8px; border: 1px solid #1B2A4A; cursor: pointer; font-family: inherit; font-size: 12px;
+        font-weight: 600; letter-spacing: 0.4px; text-transform: uppercase; padding: 11px 18px; border-radius: 0; background: #1B2A4A; color: #ffffff; transition: opacity 0.2s ease; }
+    .cv-logout-btn:hover { opacity: 0.88; }
+    .cv-logout-btn:focus-visible { outline: 2px solid #F7C600; outline-offset: 2px; }
+    .cv-logout-btn.ghost { background: #ffffff; color: #1B2A4A; border-color: #D5DBE6; }
+    @media (prefers-reduced-motion: reduce) { .cv-logout-overlay, .cv-logout-box { transition: none; } }
+</style>
+<!-- Loading page for pages that had none — same markup / look as company_list.php's and the admin pages'.
+     Visible from the first paint, hidden by the script below once the page has loaded. -->
+<style>
+    #globalLoadingOverlay {
+        position: fixed; inset: 0; z-index: 100000;
+        display: flex; align-items: center; justify-content: center;
+        background: rgba(238, 241, 246, 0.92);
+        opacity: 1; visibility: visible;
+        transition: opacity 0.35s ease, visibility 0.35s ease;
+    }
+    #globalLoadingOverlay.hidden { opacity: 0; visibility: hidden; pointer-events: none; }
+    .global-loading-box { display: flex; flex-direction: column; align-items: center; gap: 16px; animation: globalLoadingPop 0.35s ease; }
+    .global-loading-spinner {
+        width: 64px; height: 64px; border: 0; border-radius: 50%; box-sizing: border-box;
+        background: conic-gradient(from 0deg, rgba(27,42,74,0.12) 0deg, rgba(27,42,74,0.35) 120deg, rgba(27,42,74,0.7) 240deg, #1B2A4A 330deg, #1B2A4A 360deg);
+        -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 9px), #000 calc(100% - 8px)),
+                      repeating-conic-gradient(from 5deg, #000 0deg 20deg, transparent 20deg 30deg);
+        -webkit-mask-composite: source-in;
+                mask: radial-gradient(farthest-side, transparent calc(100% - 9px), #000 calc(100% - 8px)),
+                      repeating-conic-gradient(from 5deg, #000 0deg 20deg, transparent 20deg 30deg);
+                mask-composite: intersect;
+        will-change: transform;
+        animation: cvRingSpin 1s steps(12, end) infinite;
+    }
+    @keyframes cvRingSpin { to { transform: rotate(360deg); } }
+    .global-loading-text { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; font-size: 13px; font-weight: 700; color: #1B2A4A; text-transform: uppercase; letter-spacing: 0.6px; display: flex; align-items: center; gap: 8px; }
+    .global-loading-dots span { animation: globalLoadingDots 1.2s infinite; opacity: 0; }
+    .global-loading-dots span:nth-child(2) { animation-delay: 0.2s; }
+    .global-loading-dots span:nth-child(3) { animation-delay: 0.4s; }
+    @keyframes globalLoadingPop { from { transform: scale(0.9); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+    @keyframes globalLoadingDots { 0%, 20% { opacity: 0; } 50% { opacity: 1; } 100% { opacity: 0; } }
+    @media (prefers-reduced-motion: reduce) { .global-loading-box, .global-loading-spinner { animation: none; } }
+</style>
+<div id="globalLoadingOverlay" aria-live="polite">
+    <div class="global-loading-box">
+        <div class="global-loading-spinner"></div>
+        <div class="global-loading-text">
+            <span id="globalLoadingLabel">Loading</span>
+            <span class="global-loading-dots"><span>.</span><span>.</span><span>.</span></span>
+        </div>
+    </div>
+</div>
+<!-- Without JavaScript nothing could ever close the overlay — never leave the page covered. -->
+<noscript><style>#globalLoadingOverlay { display: none !important; }</style></noscript>
+<script>
+(function () {
+    'use strict';
+    if (window._cvShellReady) return;
+    window._cvShellReady = true;
+
+    var OWN_OVERLAY = false;
+    var OWN_NAV     = false;
+    var root  = document.documentElement;
+    var ov    = document.getElementById('globalLoadingOverlay');
+    var label = document.getElementById('globalLoadingLabel');
+    var byId  = function (id) { return document.getElementById(id); };
+    var isDesktop = function () { return !(window.matchMedia && window.matchMedia('(max-width: 768px)').matches); };
+
+    function overlayShown() {
+        try { return !!ov && !ov.classList.contains('hidden') && !ov.classList.contains('success-state') && window.getComputedStyle(ov).display !== 'none'; }
+        catch (e) { return false; }
+    }
+
+    /* ── 1a) SIDEBAR STATE SYNC — restore (before the first paint) + save ───────────────────────────────────────────
+       Applies exactly what the pages' own toggle button does (the .collapsed class, the main content's margin / width
+       and the attendance notification bar's .sidebar-collapsed), so the page's toggle code carries on unchanged.
+       Phones (768px and narrower) are left alone: some pages collapse the menu there on their own. */
+    var SB_KEY = 'neustSidebarCollapsed';
+    var wantCollapsed = false;
+    try { wantCollapsed = isDesktop() && window.localStorage.getItem(SB_KEY) === '1'; } catch (e) { /* storage blocked: default state */ }
+    var sbDone = { sb: false, mc: false, anb: false }, sbWatching = false;
+    if (wantCollapsed) root.classList.add('cv-sb-restoring');
+    function watchSidebar(sb) {
+        if (sbWatching || !window.MutationObserver) return;
+        sbWatching = true;
+        new MutationObserver(function () {
+            if (!isDesktop()) return;
+            try { window.localStorage.setItem(SB_KEY, sb.classList.contains('collapsed') ? '1' : '0'); } catch (e) { /* state just won't persist */ }
+        }).observe(sb, { attributes: true, attributeFilter: ['class'] });
+    }
+    function syncSidebar() {
+        var sb = byId('sidebar');
+        if (!sb) return false;
+        if (wantCollapsed) {
+            if (!sbDone.sb) { sb.classList.add('collapsed'); sbDone.sb = true; }
+            var mc = byId('mainContent'), anb = byId('att-notif-bar');
+            if (mc && !sbDone.mc)   { mc.style.marginLeft = '80px'; mc.style.width = 'calc(100% - 80px)'; sbDone.mc = true; }
+            if (anb && !sbDone.anb) { anb.classList.add('sidebar-collapsed'); sbDone.anb = true; }
+        }
+        watchSidebar(sb);
+        return !wantCollapsed || (sbDone.sb && sbDone.mc && sbDone.anb);
+    }
+    var sbObs = null;
+    if (!syncSidebar() && window.MutationObserver) {
+        sbObs = new MutationObserver(function () { if (syncSidebar() && sbObs) { sbObs.disconnect(); sbObs = null; } });
+        sbObs.observe(root, { childList: true, subtree: true });
+    }
+    document.addEventListener('DOMContentLoaded', function () {
+        syncSidebar();
+        if (sbObs) { sbObs.disconnect(); sbObs = null; }
+        var done = function () { root.classList.remove('cv-sb-restoring'); };
+        if (window.requestAnimationFrame) requestAnimationFrame(function () { requestAnimationFrame(done); }); else done();
+    });
+
+    /* ── 1b) ONE LOADING PAGE ACROSS PAGES — pick up where the previous page's loading page was ──────────────────── */
+    var KEY_EPOCH = 'cvLoaderEpoch', KEY_PHASE = 'cvLoaderPhase';
+    var carriedSince = -1, ringAt0 = null, dotsAt0 = null;
+    try {
+        var ep = parseInt(window.sessionStorage.getItem(KEY_EPOCH) || '', 10);
+        window.sessionStorage.removeItem(KEY_EPOCH);
+        var since = ep ? Date.now() - ep : -1;
+        if (since >= 0 && since < 15000) {
+            carriedSince = since;
+            try {
+                var ph = JSON.parse(window.sessionStorage.getItem(KEY_PHASE) || 'null');
+                if (ph && typeof ph.ring === 'number' && typeof ph.dots === 'number' && Date.now() - ph.t >= 0 && Date.now() - ph.t < 15000) {
+                    var gap = Date.now() - ph.t;
+                    ringAt0 = (ph.ring + gap) / 1000; dotsAt0 = (ph.dots + gap) / 1000;
+                }
+            } catch (e) { /* unreadable hand-over: fall back to the elapsed time */ }
+        }
+    } catch (e) { /* storage blocked: the loading page simply starts fresh */ }
+    try { window.sessionStorage.removeItem(KEY_PHASE); } catch (e) {}
+
+    var shownSince = null;
+    if (overlayShown()) {
+        shownSince = carriedSince >= 0 ? Date.now() - carriedSince : Date.now();
+        if (carriedSince >= 0) {
+            try {
+                var spinner = ov.querySelector('.global-loading-spinner');
+                var dots = ov.querySelectorAll('.global-loading-dots span');
+                var box = ov.querySelector('.global-loading-box');
+                var eRing = ringAt0 !== null ? ringAt0 : carriedSince / 1000;
+                var eDots = dotsAt0 !== null ? dotsAt0 : carriedSince / 1000;
+                if (spinner) spinner.style.animationDelay = (-(eRing % 1)).toFixed(3) + 's';
+                for (var i = 0; i < dots.length; i++) dots[i].style.animationDelay = (-(((eDots - i * 0.2) % 1.2) + 1.2) % 1.2).toFixed(3) + 's';
+                if (box) {
+                    box.style.animation = 'none';   // already on screen: no second pop-in
+                    if (window.MutationObserver) {
+                        var restore = new MutationObserver(function () {   // later showings get their pop-in back, as before
+                            if (!ov.classList.contains('hidden')) return;
+                            restore.disconnect();
+                            setTimeout(function () {
+                                box.style.animation = ''; if (spinner) spinner.style.animationDelay = '';
+                                for (var j = 0; j < dots.length; j++) dots[j].style.animationDelay = '';
+                            }, 400);
+                        });
+                        restore.observe(ov, { attributes: true, attributeFilter: ['class'] });
+                    }
+                }
+            } catch (e) { /* never affects the page */ }
+        }
+    }
+    if (ov && window.MutationObserver) {
+        new MutationObserver(function () {
+            var shown = !ov.classList.contains('hidden');
+            if (shown && shownSince === null) shownSince = Date.now();
+            if (!shown) shownSince = null;
+        }).observe(ov, { attributes: true, attributeFilter: ['class'] });
+    }
+    function animPhase(el, period) {   // ms into the current turn of an element's running CSS animation (null if unknown)
+        try {
+            if (!el || !el.getAnimations) return null;
+            var list = el.getAnimations();
+            for (var i = 0; i < list.length; i++) {
+                var a = list[i], ct = a.currentTime;
+                if (typeof ct !== 'number' || !a.effect || !a.effect.getComputedTiming) continue;
+                var delay = a.effect.getComputedTiming().delay || 0;
+                return (((ct - delay) % period) + period) % period;
+            }
+        } catch (e) {}
+        return null;
+    }
+    window.addEventListener('pagehide', function () {
+        try {
+            if (!ov || ov.classList.contains('hidden') || ov.classList.contains('success-state')) return;
+            window.sessionStorage.setItem(KEY_EPOCH, String(shownSince !== null ? shownSince : Date.now()));
+            var ringMs = animPhase(ov.querySelector('.global-loading-spinner'), 1000);
+            var dotsMs = animPhase(ov.querySelector('.global-loading-dots span'), 1200);
+            if (ringMs !== null && dotsMs !== null) window.sessionStorage.setItem(KEY_PHASE, JSON.stringify({ t: Date.now(), ring: ringMs, dots: dotsMs }));
+        } catch (e) {}
+    });
+
+    /* ── 1c) THIS PAGE'S OWN LOAD + ACTIONS (only when the page had no loading page of its own) ───────────────────── */
+    var initialPending = false, actions = 0, navActive = false;
+    var actionShownAt = 0, actionHideTimer = null, actionSafety = null, navTimer = null, navObs = null;
+    function hideIfIdle() {
+        if (!ov || initialPending || actions > 0 || navActive) return;
+        ov.classList.add('hidden');
+        ov.classList.remove('gl-instant');
+    }
+    if (!OWN_OVERLAY && ov) {
+        initialPending = true;
+        var startedAt = Date.now(), ending = false, MIN_MS = 450;
+        var endInitial = function () {
+            if (ending) return;
+            ending = true;
+            setTimeout(function () { initialPending = false; hideIfIdle(); }, Math.max(0, MIN_MS - (Date.now() - startedAt)));
+        };
+        if (document.readyState === 'complete') endInitial(); else window.addEventListener('load', endInitial);
+        setTimeout(endInitial, 4000);   // safety net if a slow asset holds up 'load'
+    }
+    // Action loading page for background saves: window.cvActionBusy('Saving') … window.cvActionIdle()
+    window.cvActionBusy = function (text) {
+        if (!ov) return;
+        actions++;
+        clearTimeout(actionHideTimer);
+        if (actions === 1) actionShownAt = Date.now();
+        if (label) label.textContent = text || 'Processing';
+        ov.classList.remove('success-state');
+        ov.classList.remove('hidden');
+        clearTimeout(actionSafety);
+        actionSafety = setTimeout(function () { actions = 0; window.cvActionIdle(); }, 60000);   // never leave the page covered
+    };
+    window.cvActionIdle = function () {
+        if (!ov) return;
+        actions = Math.max(0, actions - 1);
+        if (actions > 0) return;
+        clearTimeout(actionSafety);
+        clearTimeout(actionHideTimer);
+        actionHideTimer = setTimeout(function () {   // shown for at least 350 ms so it never just flickers
+            if (actions > 0) return;
+            hideIfIdle();
+            setTimeout(function () { if (label && actions === 0 && ov.classList.contains('hidden')) label.textContent = 'Loading'; }, 400);
+        }, Math.max(0, 350 - (Date.now() - actionShownAt)));
+    };
+
+    /* ── 1d) LEAVING THE PAGE — the loading page goes up at once and nothing may hide it until the next page opens ── */
+    var navShown = false, navWasHidden = false, navPrevLabel = null;
+    function navAttach() {
+        if (navObs || !ov || !window.MutationObserver) return;
+        navObs = new MutationObserver(function () {
+            if (navActive && ov.classList.contains('hidden')) { ov.classList.add('gl-instant'); ov.classList.remove('hidden'); }
+        });
+        navObs.observe(ov, { attributes: true, attributeFilter: ['class'] });
+    }
+    function navShow(stuckMs, text) {
+        if (!ov) return;
+        if (navShown) { if (text && label) label.textContent = text; return; }
+        navShown = true; navActive = true;
+        navAttach();
+        navWasHidden = ov.classList.contains('hidden');
+        if (navWasHidden) {
+            if (label) { navPrevLabel = label.textContent; label.textContent = text || 'Loading'; }
+            ov.classList.add('gl-instant');
+            ov.classList.remove('success-state');
+            ov.classList.remove('hidden');
+        } else if (text && label) {
+            label.textContent = text;
+        }
+        clearTimeout(navTimer);
+        navTimer = setTimeout(navReset, stuckMs || 10000);   // still here → navigation was cancelled / it was a download
+    }
+    function navReset() {
+        clearTimeout(navTimer);
+        if (!navShown) return;
+        navShown = false; navActive = false;
+        if (navWasHidden) {
+            if (actions === 0 && !initialPending) { ov.classList.add('hidden'); ov.classList.remove('gl-instant'); }
+            if (label && navPrevLabel !== null) label.textContent = navPrevLabel;
+        }
+        navWasHidden = false; navPrevLabel = null;
+    }
+    // file / export / preview URLs download or open a file instead of leaving the page — skip them
+    var FILE_RE  = /\.(pdf|xlsx?|csv|docx?|pptx?|zip|png|jpe?g|gif|webp|txt)$/i;
+    var PARAM_RE = /[?&][^=&]*(export|download|dtrdl|print|stream|pdf|preview|blob|file)[^=&]*=/i;
+    function isPageUrl(u) {
+        if (u.origin !== window.location.origin || !/^https?:$/.test(u.protocol)) return false;
+        if (FILE_RE.test(u.pathname) || PARAM_RE.test(u.search)) return false;
+        return true;
+    }
+    var lastFileClick = 0;
+    if (!OWN_NAV && ov) {
+        document.addEventListener('click', function (e) {
+            if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+            var a = e.target && e.target.closest ? e.target.closest('a[href]') : null;
+            if (!a || a.hasAttribute('download')) return;
+            var raw = (a.getAttribute('href') || '').trim();
+            if (!raw || raw.charAt(0) === '#' || /^(javascript|mailto|tel|blob|data):/i.test(raw)) return;
+            var t = (a.getAttribute('target') || '').toLowerCase();
+            if (t && t !== '_self') return;
+            var u; try { u = new URL(a.href, window.location.href); } catch (x) { return; }
+            if (!isPageUrl(u)) { lastFileClick = Date.now(); return; }
+            if (u.pathname === window.location.pathname && u.search === window.location.search && u.hash) return;   // same-page anchor
+            // decided after every other click handler has run, so links the page handles itself (unsaved-changes prompts…) are left alone
+            setTimeout(function () { if (!e.defaultPrevented) navShow(); }, 0);
+        });
+        document.addEventListener('submit', function (e) {
+            var f = e.target;
+            if (!f || f.tagName !== 'FORM') return;
+            var t = (f.getAttribute('target') || '').toLowerCase();
+            if (t && t !== '_self') return;
+            var u; try { u = new URL(f.getAttribute('action') || window.location.href, window.location.href); } catch (x) { return; }
+            if (!isPageUrl(u)) return;
+            setTimeout(function () { if (!e.defaultPrevented) navShow(); }, 0);   // AJAX forms prevent the submit — left alone
+        });
+        // reloads / redirects started by the page's own script (registered last, so a "leave without saving?" prompt is seen first)
+        document.addEventListener('DOMContentLoaded', function () {
+            window.addEventListener('beforeunload', function (e) {
+                if (e.defaultPrevented) return;                          // the browser is asking "leave this page?" — not leaving yet
+                if (Date.now() - lastFileClick < 2000) return;           // most likely a file download
+                navShow(8000);
+            });
+        });
+    }
+
+    /* Back / Forward restore: a page kept in the browser's memory is reloaded from the server, so a logged-out visitor
+       is sent to login.php instead of seeing the old page; the loading page covers the old view meanwhile. */
+    window.addEventListener('pageshow', function (e) {
+        if (!e.persisted) return;
+        navReset();
+        if (ov) { ov.classList.remove('success-state'); ov.classList.remove('hidden'); }
+        window.location.reload();
+    });
+
+    /* ── 2) LOGOUT CONFIRMATION POPUP + "LOGGING OUT" LOADING PAGE ───────────────────────────────────────────────── */
+    var LOGOUT_SELECTOR = '.logout-link a[href*="logout=1"]';
+    var pendingHref = null, loggingOut = false, lastFocus = null, stuckTimer = null;
+    var popup = document.createElement('div');
+    popup.className = 'cv-logout-overlay';
+    popup.id = 'cvLogoutConfirm';
+    popup.setAttribute('role', 'dialog');
+    popup.setAttribute('aria-modal', 'true');
+    popup.setAttribute('aria-labelledby', 'cvLogoutTitle');
+    popup.setAttribute('aria-describedby', 'cvLogoutMsg');
+    popup.innerHTML =
+        '<div class="cv-logout-box">' +
+            '<h3 id="cvLogoutTitle"><i class="fas fa-sign-out-alt"></i> Log Out</h3>' +
+            '<p id="cvLogoutMsg">Are you sure you want to Log out? You need to login again to access your Account.</p>' +
+            '<div class="cv-logout-actions">' +
+                '<button type="button" class="cv-logout-btn ghost" data-cv-logout="cancel">Cancel</button>' +
+                '<button type="button" class="cv-logout-btn" data-cv-logout="ok"><i class="fas fa-sign-out-alt"></i> Log out</button>' +
+            '</div>' +
+        '</div>';
+    (document.body || root).appendChild(popup);
+    var btnCancel = popup.querySelector('[data-cv-logout="cancel"]');
+    var btnOk     = popup.querySelector('[data-cv-logout="ok"]');
+
+    function isOpen() { return popup.classList.contains('show'); }
+    function openConfirm(href) {
+        pendingHref = href;
+        lastFocus = document.activeElement;
+        popup.classList.add('show');
+        setTimeout(function () { btnCancel.focus(); }, 30);
+    }
+    function closeConfirm() {
+        popup.classList.remove('show');
+        pendingHref = null;
+        if (lastFocus && lastFocus.focus) { try { lastFocus.focus(); } catch (e) {} }
+    }
+    function showLoggingOut() {
+        if (!ov) return;
+        ov.removeAttribute('data-initial');   // pages with a first-load cover: it must not hide this one
+        navShow(15000, 'Logging out');
+        if (label) label.textContent = 'Logging out';
+    }
+    function hideLoggingOut() {
+        navReset();
+        if (ov && ov.classList.contains('hidden') === false && actions === 0 && !initialPending) ov.classList.add('hidden');
+        if (label) label.textContent = 'Loading';
+    }
+    function confirmLogout() {
+        if (!pendingHref) return;
+        var href = pendingHref;
+        popup.classList.remove('show');
+        pendingHref = null;
+        loggingOut = true;
+        showLoggingOut();
+        // safety: if the browser never leaves (e.g. the server cannot be reached), give the page back
+        clearTimeout(stuckTimer);
+        stuckTimer = setTimeout(function () { if (loggingOut) { loggingOut = false; hideLoggingOut(); } }, 15000);
+        setTimeout(function () { window.location.href = href; }, 60);   // lets "Logging out" paint first
+    }
+    // Caught before any other click handler (capture phase). A page may veto it with window.cvLogoutGuard() === false
+    // (student_report.php does while the report has unsaved entries: its own "unsaved changes" prompt handles the click).
+    function intercept(e) {
+        var a = e.target && e.target.closest ? e.target.closest(LOGOUT_SELECTOR) : null;
+        if (!a) return;
+        if (e.type === 'auxclick' && e.button !== 1) return;
+        try { if (typeof window.cvLogoutGuard === 'function' && window.cvLogoutGuard() === false) return; } catch (x) {}
+        e.preventDefault();
+        if (loggingOut) return;
+        openConfirm(a.href);
+    }
+    document.addEventListener('click', intercept, true);
+    document.addEventListener('auxclick', intercept, true);
+    btnCancel.addEventListener('click', closeConfirm);
+    btnOk.addEventListener('click', confirmLogout);
+    popup.addEventListener('click', function (e) { if (e.target === popup) closeConfirm(); });
+    document.addEventListener('keydown', function (e) {
+        if (!isOpen()) return;
+        if (e.key === 'Escape') { e.preventDefault(); closeConfirm(); }
+        else if (e.key === 'Tab') {        // keep keyboard focus inside the popup
+            if (e.shiftKey && document.activeElement === btnCancel) { e.preventDefault(); btnOk.focus(); }
+            else if (!e.shiftKey && document.activeElement === btnOk) { e.preventDefault(); btnCancel.focus(); }
+        }
+    });
+    // While leaving, keep the label "Logging out" (the pages' own leave handlers reset it to "Loading")
+    document.addEventListener('DOMContentLoaded', function () {
+        window.addEventListener('beforeunload', function () { if (loggingOut) showLoggingOut(); });
+    });
+    window.addEventListener('pageshow', function (e) {
+        if (!e.persisted) return;
+        loggingOut = false; clearTimeout(stuckTimer);
+        popup.classList.remove('show'); pendingHref = null;
+    });
+})();
+</script>
 <div class="sidebar">
     <div class="sidebar-header">
         <div class="sidebar-user-info">
-            <span class="sidebar-user-name"><?php echo htmlspecialchars($full_name); ?></span>
+            <span class="sidebar-user-name"><?php echo htmlspecialchars(preg_replace('/\s+/', ' ', trim((string)$full_name)) ?: 'Student'); ?></span>
             <span class="sidebar-user-role">OJT Trainee</span>
         </div>
         <button class="toggle-btn"><i class="fas fa-bars"></i></button>
@@ -715,11 +1280,11 @@ if (!$res_company) {
         <a href="student_report.php" class="active"><i class="fas fa-chart-bar"></i>Reports</a>
         <a href="student_dashboard.php"><i class="fas fa-tachometer-alt"></i>Dashboard</a>
     </div>
-    <div class="logout-link"><a href="login.php"><i class="fas fa-sign-out-alt"></i><span style="margin-left:10px;">Logout</span></a></div>
+    <div class="logout-link"><a href="login.php?logout=1"><i class="fas fa-sign-out-alt"></i><span style="margin-left:10px;">Logout</span></a></div>
 </div>
 <div class="main-content">
     <nav class="navbar"><img src="logo.webp" alt="NEUST Logo"><div><div style="font-weight:bold;font-size:16px;">NEUST Atate Campus</div><div style="font-size:11px;color:var(--gold);">Web-Based Smart OJT Monitoring and Supervision Analytics System</div></div></nav>
-    <div class="error-wrap"><div class="error-box"><div class="error-icon"></div><h2>No Company Assigned</h2><p>Your account (<strong><?= htmlspecialchars($full_name) ?></strong>) does not have a company assignment yet.</p><div class="hint"><strong> What to do:</strong><br>Contact your OJT Coordinator to have your company assignment added.</div><a href="student_dashboard.php" class="btn-dash">🏠 Go to Dashboard</a></div></div>
+    <div class="error-wrap"><div class="error-box"><div class="error-icon"><i class="fas fa-building-circle-exclamation"></i></div><h2>No Company Assigned</h2><p>Your account (<strong><?= htmlspecialchars($full_name) ?></strong>) does not have a company assignment yet.</p><div class="hint"><strong> What to do:</strong><br>Contact your OJT Coordinator to have your company assignment added.</div><a href="student_dashboard.php" class="btn-dash"><i class="fas fa-house"></i> Go to Dashboard</a></div></div>
 </div>
 </body>
 </html>
@@ -789,90 +1354,156 @@ while (ob_get_level() > 0) { ob_end_clean(); }
     <link href="https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,400;0,500;0,600;1,400&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
     <style>
         :root {
-            --maroon:       #07145f;
+            /* NEUST sidebar / navbar colours (same as AccomForm.php) */
+            --neust-maroon: #07145fe5;
+            --neust-gold:   #FFD700;
+            --neust-active: #1a237e;
+            /* Field Ops Grid palette (same values as AccomForm.php) */
+            --grid-bg: #EEF1F6;
+            --grid-navy: #1B2A4A;
+            --grid-border: #C3CADA;
+            --grid-border-soft: #DCE1EC;
+            --grid-green: #2C5A2C;
+            --grid-green-bg: #EAF3EA;
+            --grid-red: #A02A2A;
+            --grid-red-bg: #F7E9E9;
+            --grid-amber: #A0850A;
+            --grid-amber-bg: #FAF3DC;
+            --grid-muted: #5A6272;
+
+            --maroon:       #1B2A4A;
             --gold:         #FFD700;
-            --active-nav:   #1a237e;
-            --ink:          #1a1a2e;
-            --ink-muted:    #4a4a6a;
-            --ink-faint:    #8888aa;
+            --active-nav:   #1B2A4A;
+            --ink:          #2d3748;
+            --ink-muted:    #5A6272;
+            --ink-faint:    #8A93A6;
             --surface:      #ffffff;
-            --surface-soft: #f7f6f3;
-            --surface-warm: #f0efe9;
-            --border:       #e4e2da;
-            --border-light: #eeede8;
-            --teal:         #0d8c6a;
-            --teal-light:   #e1f5ee;
-            --teal-dark:    #085041;
-            --blue:         #185fa5;
-            --blue-light:   #e6f1fb;
-            --amber:        #b45309;
-            --amber-light:  #fef3c7;
-            --red:          #991b1b;
-            --red-light:    #fee2e2;
-            --radius-sm:    6px;
-            --radius-md:    10px;
-            --radius-lg:    16px;
-            --shadow-card:  0 1px 3px rgba(0,0,0,.06), 0 4px 16px rgba(0,0,0,.04);
-            --shadow-lift:  0 4px 20px rgba(0,0,0,.10);
+            --surface-soft: #F3F5F9;
+            --surface-warm: #EEF1F6;
+            --border:       #C3CADA;
+            --border-light: #DCE1EC;
+            --teal:         #2C5A2C;
+            --teal-light:   #EAF3EA;
+            --teal-dark:    #2C5A2C;
+            --blue:         #1B2A4A;
+            --blue-light:   #E7ECF7;
+            --amber:        #A0850A;
+            --amber-light:  #FAF3DC;
+            --red:          #A02A2A;
+            --red-light:    #F7E9E9;
+            --radius-sm:    0;
+            --radius-md:    0;
+            --radius-lg:    0;
+            --shadow-card:  none;
+            --shadow-lift:  none;
         }
         * { box-sizing: border-box; margin: 0; padding: 0; }
-        body { font-family: 'DM Sans', 'Segoe UI', sans-serif; background: var(--surface-warm); color: var(--ink); line-height: 1.6; }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: var(--surface-warm); color: var(--ink); line-height: 1.6; }
 
         /* ══════════════════════════════════════════
            SIDEBAR
         ══════════════════════════════════════════ */
         .sidebar {
-            width: 260px; background: var(--maroon); height: 100vh;
-            position: fixed; top: 0; left: 0; display: flex; flex-direction: column;
-            transition: width 0.3s ease; z-index: 1000;
+            width: 260px;
+            background: var(--neust-maroon);
+            height: 100vh;
+            position: fixed;
+            display: flex;
+            flex-direction: column;
+            transition: width 0.3s ease;
+            z-index: 1000;
             box-shadow: 4px 0 10px rgba(0,0,0,0.1);
+            top: 0; left: 0;
         }
         .sidebar.collapsed { width: 80px; }
         .sidebar-header {
-            padding: 16px 20px; display: flex; align-items: center;
-            justify-content: space-between; border-bottom: 1px solid rgba(255,255,255,0.1);
-            flex-shrink: 0; min-height: 72px;
+            padding: 20px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+            flex-shrink: 0;
+            min-height: 72px;
         }
         .sidebar-user-info {
-            display: flex; flex-direction: column; gap: 1px;
-            overflow: hidden; transition: opacity 0.2s, width 0.3s; max-width: 180px;
+            display: flex;
+            flex-direction: column;
+            gap: 1px;
+            overflow: hidden;
+            transition: opacity 0.2s, width 0.3s;
+            max-width: 180px;
+            min-width: 0;
         }
         .sidebar-user-name {
-            color: var(--gold); font-size: 14px; font-weight: 700;
-            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-            line-height: 1.3; font-family: 'DM Sans', sans-serif;
+            color: var(--neust-gold);
+            font-size: 18px;
+            font-weight: bold;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            line-height: 1.3;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
         }
         .sidebar-user-role {
-            color: rgba(255,255,255,0.55); font-size: 10px; font-weight: 500;
-            text-transform: uppercase; letter-spacing: 0.08em; white-space: nowrap;
+            color: rgba(255,255,255,0.55);
+            font-size: 11px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.8px;
+            margin-top: 3px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
         }
-        .sidebar.collapsed .sidebar-user-info { opacity: 0; width: 0; overflow: hidden; }
+        .sidebar.collapsed .sidebar-user-info {
+            opacity: 0;
+            width: 0;
+            overflow: hidden;
+        }
         .sidebar-links { flex: 1; display: flex; flex-direction: column; padding: 10px 0; overflow: hidden; }
         .sidebar a {
-            padding: 15px 25px; color: #cbd5e0; text-decoration: none; font-size: 14px;
-            display: flex; align-items: center; transition: background 0.2s, color 0.2s;
-            white-space: nowrap; position: relative;
+            padding: 15px 25px;
+            color: #cbd5e0;
+            text-decoration: none;
+            font-size: 14px;
+            display: flex;
+            align-items: center;
+            transition: background 0.2s, color 0.2s;
+            white-space: nowrap;
+            position: relative;
         }
-        .sidebar a i { width: 30px; font-size: 18px; margin-right: 15px; text-align: center; flex-shrink: 0; }
+        .sidebar a i {
+            width: 30px;
+            font-size: 18px;
+            margin-right: 15px;
+            text-align: center;
+            flex-shrink: 0;
+        }
         .sidebar.collapsed .link-text { display: none; }
         .sidebar.collapsed a i { margin-right: 0; }
         .sidebar a:hover:not(.active) { background: rgba(255,255,255,0.07); color: white; }
-        .sidebar a.active { background: var(--active-nav); color: white; border-left: 4px solid var(--gold); }
+        .sidebar a.active {
+            background: var(--neust-active);
+            color: white;
+            border-left: 4px solid var(--neust-gold);
+        }
         .sidebar-badge-att {
-            background: #d97706; color: white; border-radius: 50%; width: 18px; height: 18px;
-            font-size: 10px; font-weight: 700; display: inline-flex; align-items: center;
-            justify-content: center; position: absolute; right: 18px; top: 50%;
-            transform: translateY(-50%); animation: badge-pulse-att 2s ease-in-out infinite;
+            background: #d97706; color: white; border-radius: 50%;
+            width: 18px; height: 18px; font-size: 10px; font-weight: 700;
+            display: inline-flex; align-items: center; justify-content: center;
+            position: absolute; right: 18px; top: 50%; transform: translateY(-50%);
+            animation: badge-pulse-att 2s ease-in-out infinite;
         }
         @keyframes badge-pulse-att {
             0%,100%{box-shadow:0 0 0 0 rgba(217,119,6,.55);}
             50%{box-shadow:0 0 0 6px rgba(217,119,6,0);}
         }
         .sidebar-badge-journal {
-            background: #f59e0b; color: #1c1917; border-radius: 50%; min-width: 18px; height: 18px;
-            font-size: 10px; font-weight: 800; display: inline-flex; align-items: center;
-            justify-content: center; position: absolute; right: 18px; top: 50%;
-            transform: translateY(-50%); padding: 0 3px; animation: badge-pulse-journal 2.4s ease-in-out infinite;
+            background: #f59e0b; color: #1c1917; border-radius: 50%;
+            min-width: 18px; height: 18px; font-size: 10px; font-weight: 800;
+            display: inline-flex; align-items: center; justify-content: center;
+            position: absolute; right: 18px; top: 50%; transform: translateY(-50%);
+            padding: 0 3px; animation: badge-pulse-journal 2.4s ease-in-out infinite;
         }
         @keyframes badge-pulse-journal {
             0%,100%{box-shadow:0 0 0 0 rgba(245,158,11,.5);}
@@ -880,126 +1511,212 @@ while (ob_get_level() > 0) { ob_end_clean(); }
         }
         .logout-link { margin-top: auto; padding: 20px; border-top: 1px solid rgba(255,255,255,0.1); }
         .logout-link a {
-            border: 1px solid var(--gold); color: var(--gold); border-radius: 6px;
-            justify-content: center; padding: 10px; display: flex; align-items: center;
-            text-decoration: none; font-size: 14px; transition: background 0.2s;
+            border: 1px solid var(--neust-gold); color: var(--neust-gold);
+            border-radius: 6px; justify-content: center; padding: 10px;
+            display: flex; align-items: center; text-decoration: none;
+            font-size: 14px; transition: background 0.2s;
         }
         .logout-link a:hover { background: rgba(255,215,0,0.08); }
-        .toggle-btn { background: transparent; border: none; color: white; cursor: pointer; font-size: 20px; outline: none; flex-shrink: 0; }
+        .toggle-btn {
+            background: transparent; border: none; color: white;
+            cursor: pointer; font-size: 20px; outline: none; flex-shrink: 0;
+        }
 
         /* MAIN CONTENT */
         .main-content { margin-left: 260px; width: calc(100% - 260px); transition: margin-left 0.3s, width 0.3s; display: flex; flex-direction: column; min-height: 100vh; }
 
         /* NAVBAR */
-        .navbar { background: var(--maroon); padding: 10px 30px; display: flex; align-items: center; color: white; height: 60px; flex-shrink: 0; box-shadow: 0 2px 8px rgba(0,0,0,0.15); position: relative; z-index: 99; }
+        .navbar { background: var(--neust-maroon); padding: 10px 30px; display: flex; align-items: center; color: white; height: 60px; flex-shrink: 0; box-shadow: none; position: relative; z-index: 99; }
         .navbar img { height: 40px; margin-right: 14px; }
 
         /* ══════════════════════════════════════════════════════
            ATTENDANCE NOTIFICATION BAR
         ══════════════════════════════════════════════════════ */
         #att-notif-bar {
-            position: fixed; top: 60px; left: 50%;
+            position: fixed;
+            top: 60px;
+            left: 50%;
             transform: translateX(-50%) translateY(-120%);
-            visibility: hidden; opacity: 0;
-            width: calc(100% - 300px); max-width: 820px;
-            background: #07145f;
-            border-radius: 0 0 12px 12px;
-            border: 1px solid rgba(255,255,255,.12); border-top: none;
+            visibility: hidden;
+            opacity: 0;
+            width: calc(100% - 300px);
+            max-width: 820px;
+            background: var(--grid-navy);
+            border-radius: 0;
+            border: 1px solid #55668C;
+            border-top: none;
+            box-shadow: 0 8px 24px rgba(27,42,74,0.30);
             padding: 10px 16px;
-            display: flex; align-items: center; gap: 12px;
-            transition: transform .4s cubic-bezier(.34,1.2,.64,1), opacity .3s ease, visibility 0s linear .4s;
-            z-index: 2000; pointer-events: none; overflow: hidden;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            transition: transform .4s cubic-bezier(.34,1.2,.64,1),
+                        opacity .3s ease,
+                        visibility 0s linear .4s;
+            z-index: 2000;
+            pointer-events: none;
+            overflow: hidden;
         }
         #att-notif-bar.anb-visible {
             transform: translateX(-50%) translateY(0);
-            visibility: visible; opacity: 1;
-            transition: transform .4s cubic-bezier(.34,1.2,.64,1), opacity .3s ease, visibility 0s linear 0s;
+            visibility: visible;
+            opacity: 1;
+            transition: transform .4s cubic-bezier(.34,1.2,.64,1),
+                        opacity .3s ease,
+                        visibility 0s linear 0s;
             pointer-events: auto;
         }
         #att-notif-bar.sidebar-collapsed { width: calc(100% - 120px); }
-        .anb-icon { width: 34px; height: 34px; border-radius: 8px; background: #FAEEDA; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
-        .anb-icon i { font-size: 16px; color: #854F0B; }
-        .anb-pulse { width: 8px; height: 8px; border-radius: 50%; background: #EF9F27; flex-shrink: 0; animation: anb-blink 1.4s ease-in-out infinite; }
+        .anb-icon {
+            width: 34px; height: 34px; border-radius: 0;
+            background: var(--grid-amber-bg);
+            display: flex; align-items: center; justify-content: center;
+            flex-shrink: 0;
+        }
+        .anb-icon i { font-size: 16px; color: var(--grid-amber); }
+        .anb-pulse {
+            width: 8px; height: 8px; border-radius: 50%;
+            background: #F7C600; flex-shrink: 0;
+            animation: anb-blink 1.4s ease-in-out infinite;
+        }
         @keyframes anb-blink { 0%,100%{opacity:1} 50%{opacity:.2} }
-        .anb-content { flex: 1; min-width: 0; display: flex; align-items: center; gap: 14px; flex-wrap: nowrap; overflow: hidden; }
-        .anb-text-group { display: flex; flex-direction: column; min-width: 0; }
-        .anb-label { font-size: 12px; font-weight: 700; color: #FAEEDA; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-        .anb-window { font-size: 11px; color: rgba(250,238,218,.65); margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .anb-content {
+            flex: 1;
+            min-width: 0;
+            display: flex;
+            align-items: center;
+            gap: 14px;
+            flex-wrap: nowrap;
+            overflow: hidden;
+        }
+        .anb-text-group {
+            display: flex;
+            flex-direction: column;
+            min-width: 0;
+        }
+        .anb-label {
+            font-size: 12px;
+            font-weight: 700;
+            color: #ffffff;
+            text-transform: uppercase;
+            letter-spacing: 0.4px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .anb-window {
+            font-size: 11px;
+            color: #E3E8F1;
+            opacity: .75;
+            margin-top: 1px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
         .anb-divider { width: 1px; height: 26px; background: rgba(255,255,255,.18); flex-shrink: 0; }
-        .anb-countdown { font-size: 11px; color: #FAC775; white-space: nowrap; background: rgba(250,199,117,.14); border-radius: 99px; padding: 3px 11px; border: 1px solid rgba(250,199,117,.28); font-family: 'DM Sans', monospace; font-variant-numeric: tabular-nums; flex-shrink: 0; min-width: 100px; text-align: center; }
-        .anb-btn { background: #EF9F27; color: #412402; border: none; border-radius: 7px; padding: 7px 15px; font-size: 11px; font-weight: 700; font-family: inherit; white-space: nowrap; flex-shrink: 0; transition: background .15s; cursor: pointer; }
-        .anb-btn:hover { background: #FAC775; }
-        .anb-close { background: rgba(255,255,255,.12); border: none; color: rgba(250,238,218,.75); width: 26px; height: 26px; border-radius: 50%; font-size: 13px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; transition: background .15s; cursor: pointer; }
-        .anb-close:hover { background: rgba(255,255,255,.24); color: #FAEEDA; }
-        .anb-progress { position: absolute; bottom: 0; left: 0; height: 2px; background: #EF9F27; border-radius: 0 0 0 12px; pointer-events: none; }
+        .anb-countdown {
+            font-size: 11px;
+            font-weight: 700;
+            color: #F7C600;
+            white-space: nowrap;
+            background: rgba(247,198,0,.10);
+            border-radius: 0;
+            padding: 3px 11px;
+            border: 1px solid rgba(247,198,0,.35);
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            font-variant-numeric: tabular-nums;
+            flex-shrink: 0;
+            min-width: 100px;
+            text-align: center;
+        }
+        .anb-btn {
+            background: #F7C600; color: var(--grid-navy); border: 1px solid #F7C600;
+            border-radius: 0; padding: 7px 15px; font-size: 11px; font-weight: 700;
+            text-transform: uppercase; letter-spacing: 0.4px;
+            font-family: inherit; white-space: nowrap; flex-shrink: 0;
+            transition: opacity .15s; cursor: pointer;
+        }
+        .anb-btn:hover { opacity: .88; }
+        .anb-close {
+            background: rgba(255,255,255,.10); border: 1px solid rgba(255,255,255,.18);
+            color: #E3E8F1; width: 26px; height: 26px;
+            border-radius: 0; font-size: 13px;
+            display: flex; align-items: center; justify-content: center;
+            flex-shrink: 0; transition: background .15s; cursor: pointer;
+        }
+        .anb-close:hover { background: rgba(255,255,255,.22); color: #ffffff; }
+        .anb-progress {
+            position: absolute; bottom: 0; left: 0;
+            height: 2px; background: #F7C600; border-radius: 0;
+            pointer-events: none;
+        }
 
         /* TOOLBAR */
-        .page-toolbar { background: var(--surface); border-bottom: 1px solid var(--border); padding: 10px 28px; display: flex; align-items: center; justify-content: flex-end; gap: 10px; position: sticky; top: 0; z-index: 100; box-shadow: 0 1px 6px rgba(0,0,0,0.06); }
-        .history-btn { background: var(--maroon); color: white; border: none; border-radius: var(--radius-md); padding: 8px 16px; cursor: pointer; font-size: 0.83rem; font-family: inherit; font-weight: 600; display: flex; align-items: center; gap: 7px; transition: background 0.2s, transform 0.15s; }
-        .history-btn:hover { background: var(--active-nav); transform: translateY(-1px); }
-        .history-btn .badge { background: #f05252; border-radius: 50%; width: 19px; height: 19px; font-size: 0.68rem; display: flex; align-items: center; justify-content: center; font-weight: 800; }
-        .dtr-btn { background: #065f46; color: white; border: none; border-radius: var(--radius-md); padding: 8px 16px; cursor: pointer; font-size: 0.83rem; font-family: inherit; font-weight: 600; display: flex; align-items: center; gap: 7px; transition: background 0.2s, transform 0.15s; }
-        .dtr-btn:hover { background: #047857; transform: translateY(-1px); }
+        .page-toolbar { background: var(--surface); border-bottom: 1px solid var(--border); padding: 10px 28px; display: flex; align-items: center; justify-content: flex-end; gap: 10px; position: sticky; top: 0; z-index: 100; box-shadow: none; }
+        .history-btn { background: var(--maroon); color: white; border: none; border-radius: 0; padding: 8px 16px; cursor: pointer; font-size: 0.83rem; font-family: inherit; font-weight: 600; display: flex; align-items: center; gap: 7px; transition: background 0.2s, transform 0.15s; }
+        .history-btn:hover { background: var(--active-nav); transform: none; }
+        .history-btn .badge { background: #A02A2A; border-radius: 50%; width: 19px; height: 19px; font-size: 0.68rem; display: flex; align-items: center; justify-content: center; font-weight: 800; }
+        .dtr-btn { background: #2C5A2C; color: white; border: none; border-radius: 0; padding: 8px 16px; cursor: pointer; font-size: 0.83rem; font-family: inherit; font-weight: 600; display: flex; align-items: center; gap: 7px; transition: background 0.2s, transform 0.15s; }
+        .dtr-btn:hover { background: #2C5A2C; transform: none; }
 
         /* FLASH */
         .flash { padding: 14px 28px 0; }
-        .flash-msg { background: var(--teal-light); border: 1.5px solid var(--teal); border-radius: var(--radius-md); padding: 11px 16px; color: var(--teal-dark); font-size: 0.87rem; font-weight: 500; display: flex; align-items: center; gap: 10px; transition: opacity 0.6s; }
-        .flash-msg::before { content: '✓'; font-weight: 700; font-size: 1rem; }
+        .flash-msg { background: var(--teal-light); border: 1.5px solid var(--teal); border-radius: 0; padding: 11px 16px; color: var(--teal-dark); font-size: 0.87rem; font-weight: 500; display: flex; align-items: center; gap: 10px; transition: opacity 0.6s; }
+        .flash-msg::before { content: '\f00c'; font-family: 'Font Awesome 6 Free'; font-weight: 900; font-size: 0.9rem; }
 
         /* CONTAINER */
         .container { max-width: 960px; margin: 24px auto 80px; padding: 0 28px; width: 100%; }
 
         /* WEEK CARD */
-        .week-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 16px 22px; margin-bottom: 24px; display: flex; align-items: center; justify-content: space-between; box-shadow: var(--shadow-card); }
+        .week-card { background: var(--surface); border: 1px solid var(--border); border-radius: 0; padding: 16px 22px; margin-bottom: 24px; display: flex; align-items: center; justify-content: space-between; box-shadow: var(--shadow-card); }
         .week-card-left { display: flex; align-items: center; gap: 14px; }
-        .week-icon { width: 44px; height: 44px; background: var(--blue-light); border-radius: var(--radius-md); display: flex; align-items: center; justify-content: center; color: var(--blue); font-size: 1.2rem; flex-shrink: 0; }
+        .week-icon { width: 44px; height: 44px; background: var(--blue-light); border-radius: 0; display: flex; align-items: center; justify-content: center; color: var(--blue); font-size: 1.2rem; flex-shrink: 0; }
         .week-label { font-size: 0.72rem; color: var(--ink-faint); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 3px; }
-        .week-date  { font-size: 1rem; font-weight: 600; color: var(--ink); font-family: 'Lora', serif; }
-        .week-pill { font-size: 0.72rem; font-weight: 600; padding: 5px 14px; border-radius: 99px; letter-spacing: 0.02em; }
-        .week-pill.open   { background: var(--teal-light); color: var(--teal-dark); border: 1px solid #9FE1CB; }
-        .week-pill.locked { background: var(--amber-light); color: var(--amber); border: 1px solid #fcd34d; }
-        .week-pill.done   { background: var(--blue-light);  color: var(--blue);  border: 1px solid #B5D4F4; }
+        .week-date  { font-size: 1rem; font-weight: 600; color: var(--ink); font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        .week-pill { font-size: 0.72rem; font-weight: 600; padding: 5px 14px; border-radius: 0; letter-spacing: 0.02em; }
+        .week-pill.open   { background: var(--teal-light); color: var(--teal-dark); border: 1px solid #BFE0BF; }
+        .week-pill.locked { background: var(--amber-light); color: var(--amber); border: 1px solid #E6D9A8; }
+        .week-pill.done   { background: var(--blue-light);  color: var(--blue);  border: 1px solid #C3CADA; }
 
         /* TRAINING STATION CARD (NEW) — mirrors the week-card visual
            language above; sits inside the report form so its value is
            submitted along with the day-by-day entries. */
-        .training-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 16px 22px; margin-bottom: 24px; box-shadow: var(--shadow-card); }
+        .training-card { background: var(--surface); border: 1px solid var(--border); border-radius: 0; padding: 16px 22px; margin-bottom: 24px; box-shadow: var(--shadow-card); }
         .training-card-label { display: flex; align-items: center; gap: 7px; font-size: 0.75rem; font-weight: 600; color: var(--ink-muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 8px; }
         .training-card-label i { color: var(--blue); font-size: 0.78rem; }
-        .training-input { width: 100%; border: 1.5px solid var(--border); border-radius: var(--radius-md); padding: 10px 14px; font-size: 0.9rem; font-family: 'DM Sans', sans-serif; background: var(--surface-soft); color: var(--ink); transition: border-color 0.2s, box-shadow 0.2s, background 0.2s; }
-        .training-input:focus { outline: none; border-color: var(--teal); background: white; box-shadow: 0 0 0 3px rgba(13,140,106,0.10); }
+        .training-input { width: 100%; border: 1.5px solid var(--border); border-radius: 0; padding: 10px 14px; font-size: 0.9rem; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: var(--surface-soft); color: var(--ink); transition: border-color 0.2s, box-shadow 0.2s, background 0.2s; }
+        .training-input:focus { outline: none; border-color: var(--teal); background: white; box-shadow: 0 0 0 3px rgba(27,42,74,0.10); }
         .training-input:disabled { background: var(--surface-warm); color: var(--ink-faint); cursor: not-allowed; border-style: dashed; }
         .training-input::placeholder { color: var(--ink-faint); font-style: italic; }
+        .training-req { color: var(--grid-red); font-weight: 800; margin-left: -2px; }
+        .training-input.invalid, .training-input.invalid:focus { border-color: var(--grid-red); background: var(--grid-red-bg); box-shadow: 0 0 0 3px rgba(160,42,42,0.10); }
+        .training-error { display: none; margin-top: 7px; font-size: 0.8rem; font-weight: 600; color: var(--grid-red); line-height: 1.5; }
+        .training-error i { margin-right: 5px; }
 
         /* TIMELINE */
         .timeline-wrap { position: relative; }
-        .timeline-line { position: absolute; left: 17px; top: 12px; bottom: 12px; width: 2px; background: linear-gradient(to bottom, var(--teal) 0%, var(--border) 100%); border-radius: 99px; z-index: 0; }
-        .tl-item { position: relative; display: flex; gap: 20px; padding-bottom: 18px; align-items: flex-start; }
+        .tl-item { position: relative; display: flex; padding-bottom: 18px; align-items: flex-start; }
         .tl-item:last-child { padding-bottom: 0; }
-        .tl-dot { width: 36px; height: 36px; border-radius: 50%; flex-shrink: 0; display: flex; align-items: center; justify-content: center; font-size: 0.8rem; font-weight: 700; position: relative; z-index: 1; transition: transform 0.2s; }
-        .tl-dot.present   { background: var(--teal); color: white; box-shadow: 0 0 0 4px var(--teal-light); }
-        .tl-dot.absent    { background: var(--surface); color: var(--ink-faint); border: 2px solid var(--border); box-shadow: 0 0 0 3px var(--surface-warm); }
-        .tl-dot.submitted { background: var(--blue); color: white; box-shadow: 0 0 0 4px var(--blue-light); }
-        .tl-card { flex: 1; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); overflow: hidden; box-shadow: var(--shadow-card); transition: box-shadow 0.2s, transform 0.2s; min-width: 0; }
-        .tl-card:hover { box-shadow: var(--shadow-lift); transform: translateY(-1px); }
+        .tl-card { flex: 1; background: var(--surface); border: 1px solid var(--border); border-radius: 0; overflow: hidden; box-shadow: var(--shadow-card); transition: box-shadow 0.2s, transform 0.2s; min-width: 0; }
+        .tl-card:hover { box-shadow: var(--shadow-lift); transform: none; }
         .tl-card.absent-card { opacity: 0.55; }
         .tl-card.absent-card:hover { transform: none; box-shadow: var(--shadow-card); }
         .tl-card-head { display: flex; align-items: center; justify-content: space-between; padding: 13px 20px; border-bottom: 1px solid var(--border-light); background: var(--surface-soft); }
         .tl-card-head-left { display: flex; flex-direction: column; gap: 2px; }
         .tl-card-head-right { display: flex; align-items: center; gap: 12px; }
-        .tl-day-name { font-size: 1rem; font-weight: 600; color: var(--ink); font-family: 'Lora', serif; font-style: italic; }
+        .tl-day-name { font-size: 1rem; font-weight: 600; color: var(--ink); font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; font-style: italic; }
         .tl-day-date { font-size: 0.72rem; color: var(--ink-faint); }
         .tl-shift-info { font-size: 0.72rem; color: var(--ink-faint); display: flex; align-items: center; gap: 4px; }
         .tl-shift-info i { font-size: 0.72rem; }
-        .tl-att-badge { font-size: 0.68rem; font-weight: 700; padding: 3px 11px; border-radius: 99px; text-transform: uppercase; letter-spacing: 0.04em; }
+        .tl-att-badge { font-size: 0.68rem; font-weight: 700; padding: 3px 11px; border-radius: 0; text-transform: uppercase; letter-spacing: 0.04em; }
         .tl-att-badge.present { background: var(--teal-light); color: var(--teal-dark); }
         .tl-att-badge.absent  { background: var(--surface-warm); color: var(--ink-faint); border: 1px solid var(--border); }
         .tl-att-badge.done    { background: var(--blue-light);   color: var(--blue); }
         .tl-card-body { padding: 16px 20px; }
         .field-label { display: flex; align-items: center; gap: 7px; font-size: 0.75rem; font-weight: 600; color: var(--ink-muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 8px; }
         .field-label i { color: var(--blue); font-size: 0.78rem; }
-        .tl-textarea { width: 100%; border: 1.5px solid var(--border); border-radius: var(--radius-md); padding: 12px 16px; font-size: 0.9rem; font-family: 'DM Sans', sans-serif; resize: vertical; min-height: 100px; background: var(--surface-soft); color: var(--ink); line-height: 1.65; transition: border-color 0.2s, box-shadow 0.2s, background 0.2s; }
-        .tl-textarea:focus { outline: none; border-color: var(--teal); background: white; box-shadow: 0 0 0 3px rgba(13,140,106,0.10); }
+        .tl-textarea { width: 100%; border: 1.5px solid var(--border); border-radius: 0; padding: 12px 16px; font-size: 0.9rem; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; resize: vertical; min-height: 100px; background: var(--surface-soft); color: var(--ink); line-height: 1.65; transition: border-color 0.2s, box-shadow 0.2s, background 0.2s; }
+        .tl-textarea:focus { outline: none; border-color: var(--teal); background: white; box-shadow: 0 0 0 3px rgba(27,42,74,0.10); }
         .tl-textarea:disabled { background: var(--surface-warm); color: var(--ink-faint); cursor: not-allowed; border-style: dashed; }
         .tl-textarea::placeholder { color: var(--ink-faint); font-style: italic; }
         .counter-row { display: flex; justify-content: space-between; font-size: 0.68rem; color: var(--ink-faint); margin-top: 6px; padding: 0 2px; }
@@ -1008,25 +1725,25 @@ while (ob_get_level() > 0) { ob_end_clean(); }
         .draft-row { display: flex; align-items: center; gap: 6px; font-size: 0.72rem; color: var(--ink-faint); font-style: italic; margin-top: 6px; }
         .draft-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--amber); flex-shrink: 0; }
         .draft-dot.saved { background: var(--teal); animation: pulse-teal 2s ease-in-out; }
-        @keyframes pulse-teal { 0%,100%{box-shadow:0 0 0 0 rgba(13,140,106,.4);} 50%{box-shadow:0 0 0 6px rgba(13,140,106,0);} }
+        @keyframes pulse-teal { 0%,100%{box-shadow:0 0 0 0 rgba(27,42,74,.4);} 50%{box-shadow:0 0 0 6px rgba(27,42,74,0);} }
 
         /* SUBMIT SECTION */
-        .submit-section { margin-top: 24px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); padding: 18px 22px; box-shadow: var(--shadow-card); display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 14px; }
+        .submit-section { margin-top: 24px; background: var(--surface); border: 1px solid var(--border); border-radius: 0; padding: 18px 22px; box-shadow: var(--shadow-card); display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 14px; }
         .submit-note { font-size: 0.83rem; color: var(--ink-muted); line-height: 1.55; }
         .submit-note strong { color: var(--ink); }
-        .submitted-msg { display: flex; align-items: center; gap: 8px; background: var(--teal-light); border: 1.5px solid #9FE1CB; border-radius: var(--radius-md); padding: 9px 16px; color: var(--teal-dark); font-size: 0.85rem; font-weight: 600; }
-        .submitted-msg::before { content: '✓'; font-size: 1rem; }
-        .rejected-msg { display: flex; align-items: center; gap: 8px; background: var(--red-light); border: 1.5px solid #FCA5A5; border-radius: var(--radius-md); padding: 9px 16px; color: var(--red); font-size: 0.85rem; font-weight: 600; }
+        .submitted-msg { display: flex; align-items: center; gap: 8px; background: var(--teal-light); border: 1.5px solid #BFE0BF; border-radius: 0; padding: 9px 16px; color: var(--teal-dark); font-size: 0.85rem; font-weight: 600; }
+        .submitted-msg::before { content: '\f00c'; font-family: 'Font Awesome 6 Free'; font-weight: 900; font-size: 0.9rem; }
+        .rejected-msg { display: flex; align-items: center; gap: 8px; background: var(--red-light); border: 1.5px solid #E3BCBC; border-radius: 0; padding: 9px 16px; color: var(--red); font-size: 0.85rem; font-weight: 600; }
         .btn-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-        .btn-save-draft { background: var(--surface); color: var(--blue); border: 1.5px solid var(--blue); border-radius: var(--radius-md); padding: 10px 20px; font-size: 0.87rem; font-weight: 600; cursor: pointer; font-family: inherit; transition: background 0.2s, transform 0.15s; }
-        .btn-save-draft:hover { background: var(--blue-light); transform: translateY(-1px); }
-        .btn-submit { background: linear-gradient(135deg, var(--teal), var(--blue)); color: white; border: none; border-radius: var(--radius-md); padding: 11px 26px; font-size: 0.9rem; font-weight: 700; cursor: pointer; font-family: inherit; transition: opacity 0.2s, transform 0.15s, box-shadow 0.2s; }
-        .btn-submit:hover:not(:disabled) { opacity: 0.88; transform: translateY(-1px); box-shadow: 0 4px 14px rgba(13,140,106,0.3); }
-        .btn-submit:disabled { background: #d1d5db; color: #9ca3af; cursor: not-allowed; }
+        .btn-save-draft { background: var(--surface); color: var(--blue); border: 1.5px solid var(--blue); border-radius: 0; padding: 10px 20px; font-size: 0.87rem; font-weight: 600; cursor: pointer; font-family: inherit; transition: background 0.2s, transform 0.15s; }
+        .btn-save-draft:hover { background: var(--blue-light); transform: none; }
+        .btn-submit { background: var(--grid-navy); color: white; border: none; border-radius: 0; padding: 11px 26px; font-size: 0.9rem; font-weight: 700; cursor: pointer; font-family: inherit; transition: opacity 0.2s, transform 0.15s, box-shadow 0.2s; }
+        .btn-submit:hover:not(:disabled) { opacity: 0.88; transform: none; box-shadow: none; }
+        .btn-submit:disabled { background: #8A93A6; color: #8A93A6; cursor: not-allowed; }
         .btn-submit.loading { opacity: 0.7; cursor: not-allowed; }
 
         /* REFRESH INDICATOR */
-        .refresh-indicator { position: fixed; bottom: 14px; right: 16px; background: rgba(26,26,46,0.82); color: white; border-radius: 20px; padding: 5px 13px; font-size: 0.72rem; display: flex; align-items: center; gap: 7px; opacity: 0; transition: opacity 0.4s; pointer-events: none; z-index: 500; }
+        .refresh-indicator { position: fixed; bottom: 14px; right: 16px; background: rgba(26,26,46,0.82); color: white; border-radius: 0; padding: 5px 13px; font-size: 0.72rem; display: flex; align-items: center; gap: 7px; opacity: 0; transition: opacity 0.4s; pointer-events: none; z-index: 500; }
         .refresh-indicator.show { opacity: 1; }
         .refresh-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--teal); animation: pulse-dot 1s ease-in-out infinite; }
         @keyframes pulse-dot { 0%,100%{opacity:1;} 50%{opacity:0.3;} }
@@ -1042,31 +1759,31 @@ while (ob_get_level() > 0) { ob_end_clean(); }
         .hist-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.72); z-index: 1200; overflow: hidden; flex-direction: column; }
         .hist-overlay.open { display: flex; }
 
-        .hist-doc-toolbar { background: var(--maroon); padding: 0.6rem 1.5rem; display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; box-shadow: 0 2px 10px rgba(0,0,0,0.3); gap: 1rem; flex-wrap: wrap; }
+        .hist-doc-toolbar { background: var(--maroon); padding: 0.6rem 1.5rem; display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; box-shadow: none; gap: 1rem; flex-wrap: wrap; }
         .hist-doc-toolbar-left { display: flex; align-items: center; gap: 10px; min-width: 0; }
         .hist-doc-toolbar-left i { color: var(--gold); font-size: 1.05rem; flex-shrink: 0; }
         .hist-doc-toolbar-title { font-size: 0.92rem; font-weight: 700; color: #fff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         .hist-doc-toolbar-sub { font-size: 0.72rem; color: rgba(255,255,255,0.6); margin-top: 1px; }
         .hist-doc-toolbar-right { display: flex; align-items: center; gap: 8px; flex-shrink: 0; flex-wrap: wrap; }
-        .hist-tbtn { display: inline-flex; align-items: center; gap: 0.4rem; padding: 8px 16px; border-radius: 8px; font-size: 0.8rem; font-weight: 600; cursor: pointer; border: none; font-family: inherit; transition: background 0.15s, opacity 0.15s; }
+        .hist-tbtn { display: inline-flex; align-items: center; gap: 0.4rem; padding: 8px 16px; border-radius: 0; font-size: 0.8rem; font-weight: 600; cursor: pointer; border: none; font-family: inherit; transition: background 0.15s, opacity 0.15s; }
         .hist-tbtn-close { background: rgba(255,255,255,0.13); color: rgba(255,255,255,0.85); border: 1px solid rgba(255,255,255,0.2); }
         .hist-tbtn-close:hover { background: rgba(255,255,255,0.22); color: #fff; }
 
         /* Summary strip — compliance-style stat cards (no grading) */
         .hist-summary-bar { background: white; border-bottom: 1px solid var(--border); padding: 8px 20px; display: flex; gap: 28px; flex-shrink: 0; flex-wrap: wrap; }
         .hist-stats-row { display: flex; gap: 12px; flex-wrap: wrap; flex: 1; }
-        .hist-stat-card { flex: 1 1 150px; min-width: 140px; display: flex; align-items: center; gap: 12px; background: #fff; border: 1px solid var(--border-light); border-radius: 14px; padding: 10px 14px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
-        .hist-stat-icon { width: 38px; height: 38px; border-radius: 12px; display: flex; align-items: center; justify-content: center; font-size: 15px; flex-shrink: 0; }
+        .hist-stat-card { flex: 1 1 150px; min-width: 140px; display: flex; align-items: center; gap: 12px; background: #fff; border: 1px solid var(--border-light); border-radius: 0; padding: 10px 14px; box-shadow: none; }
+        .hist-stat-icon { width: 38px; height: 38px; border-radius: 0; display: flex; align-items: center; justify-content: center; font-size: 15px; flex-shrink: 0; }
         .hist-stat-icon.total     { background: var(--blue-light); color: var(--blue); }
-        .hist-stat-icon.feedback  { background: #fef3c7; color: #b45309; }
+        .hist-stat-icon.feedback  { background: #FAF3DC; color: #A0850A; }
         .hist-stat-icon.flagged   { background: var(--red-light); color: var(--red); }
-        .hist-stat-icon.submitted { background: #d1fae5; color: #059669; }
+        .hist-stat-icon.submitted { background: #EAF3EA; color: #2C5A2C; }
         .hist-stat-icon.missed    { background: var(--red-light); color: var(--red); }
         .hist-stat-text { display: flex; flex-direction: column; min-width: 0; }
         .hist-stat-num { font-size: 1.3rem; font-weight: 800; line-height: 1.1; color: var(--ink); }
-        .hist-stat-num.feedback-num { color: #b45309; }
+        .hist-stat-num.feedback-num { color: #A0850A; }
         .hist-stat-num.flagged-num  { color: var(--red); }
-        .hist-stat-num.submitted-num { color: #059669; }
+        .hist-stat-num.submitted-num { color: #2C5A2C; }
         .hist-stat-num.missed-num    { color: var(--red); }
         .hist-stat-lbl2 { font-size: 0.62rem; font-weight: 700; color: var(--ink-faint); text-transform: uppercase; letter-spacing: 0.06em; margin-top: 2px; }
 
@@ -1078,29 +1795,29 @@ while (ob_get_level() > 0) { ob_end_clean(); }
         .hist-list-empty { padding: 40px 16px; text-align: center; color: var(--ink-faint); font-size: 0.82rem; }
         .hist-list-item { padding: 10px 12px; border-bottom: 1px solid var(--border-light); cursor: pointer; transition: background 0.12s; display: flex; flex-direction: column; gap: 5px; }
         .hist-list-item:hover { background: var(--surface-soft); }
-        .hist-list-item.active { background: var(--blue-light); border-left: 3px solid var(--blue); padding-left: 9px; }
+        .hist-list-item.active { background: var(--blue-light); box-shadow: inset 0 0 0 1px var(--grid-navy); }
         .hist-list-week { font-size: 0.8rem; font-weight: 700; color: var(--ink); }
         .hist-list-sub  { font-size: 0.68rem; color: var(--ink-faint); }
-        .hist-list-badge { display: inline-flex; align-items: center; font-size: 0.65rem; font-weight: 700; padding: 2px 8px; border-radius: 99px; width: fit-content; }
+        .hist-list-badge { display: inline-flex; align-items: center; font-size: 0.65rem; font-weight: 700; padding: 2px 8px; border-radius: 0; width: fit-content; }
         .hist-list-badge.pending         { background: var(--blue-light); color: var(--blue); }
         .hist-list-badge.wrong-document  { background: var(--red-light); color: var(--red); }
         .hist-list-badge.lack-of-details { background: var(--amber-light); color: var(--amber); }
-        .hist-list-badge.inaccurate      { background: #ede9fe; color: #5b21b6; }
+        .hist-list-badge.inaccurate      { background: #EFEBF7; color: #5B4A8A; }
         .hist-list-badge.good            { background: var(--teal-light); color: var(--teal-dark); }
 
         .hist-detail-pane { overflow-y: auto; padding: 0; display: flex; flex-direction: column; background: var(--surface-warm); }
         .hist-detail-empty { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; color: var(--ink-faint); font-size: 0.85rem; gap: 10px; padding: 40px; }
-        .hist-detail-empty i { font-size: 2rem; color: #c4b5fd; }
+        .hist-detail-empty i { font-size: 2rem; color: #D5CCE8; }
 
         .hist-detail-header { padding: 14px 20px 10px; border-bottom: 1px solid var(--border); background: white; flex-shrink: 0; }
         .hist-detail-week { font-size: 0.97rem; font-weight: 800; color: var(--ink); }
         .hist-detail-sub  { font-size: 0.72rem; color: var(--ink-faint); margin-top: 4px; text-align: center; }
         .hist-detail-badges { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; align-items: center; }
-        .hist-dpill { font-size: 0.72rem; font-weight: 700; padding: 3px 10px; border-radius: 99px; }
+        .hist-dpill { font-size: 0.72rem; font-weight: 700; padding: 3px 10px; border-radius: 0; }
         .hist-dpill.pending         { background: var(--blue-light); color: var(--blue); }
         .hist-dpill.wrong-document  { background: var(--red-light); color: var(--red); }
         .hist-dpill.lack-of-details { background: var(--amber-light); color: var(--amber); }
-        .hist-dpill.inaccurate      { background: #ede9fe; color: #5b21b6; }
+        .hist-dpill.inaccurate      { background: #EFEBF7; color: #5B4A8A; }
         .hist-dpill.good            { background: var(--teal-light); color: var(--teal-dark); }
 
         /* Report action buttons (Print / Save as PDF / Feedback) — sit
@@ -1108,24 +1825,24 @@ while (ob_get_level() > 0) { ob_end_clean(); }
            was moved here from the top toolbar so all three report-level
            actions are aligned together in one row. */
         .hist-detail-actions { display: flex; align-items: center; justify-content: center; gap: 10px; margin-top: 10px; flex-wrap: wrap; }
-        .hist-report-action-btn { display: inline-flex; align-items: center; gap: 7px; padding: 8px 18px; border-radius: 8px; font-size: 0.8rem; font-weight: 700; cursor: pointer; border: none; font-family: inherit; transition: background 0.15s, opacity 0.15s, transform 0.15s; }
-        .hist-report-action-print { background: #1a4a8a; color: #fff; }
-        .hist-report-action-print:hover:not(:disabled) { background: #153c6f; transform: translateY(-1px); }
-        .hist-report-action-pdf { background: #2563eb; color: #fff; }
-        .hist-report-action-pdf:hover:not(:disabled) { background: #1d4ed8; transform: translateY(-1px); }
+        .hist-report-action-btn { display: inline-flex; align-items: center; gap: 7px; padding: 8px 18px; border-radius: 0; font-size: 0.8rem; font-weight: 700; cursor: pointer; border: none; font-family: inherit; transition: background 0.15s, opacity 0.15s, transform 0.15s; }
+        .hist-report-action-print { background: #1B2A4A; color: #fff; }
+        .hist-report-action-print:hover:not(:disabled) { background: #2A3D66; transform: none; }
+        .hist-report-action-pdf { background: #1B2A4A; color: #fff; }
+        .hist-report-action-pdf:hover:not(:disabled) { background: #1B2A4A; transform: none; }
         .hist-report-action-feedback { background: var(--surface-soft); color: var(--ink-muted); border: 1.5px solid var(--border); }
-        .hist-report-action-feedback:hover:not(:disabled) { background: #eceae3; transform: translateY(-1px); }
-        .hist-report-action-feedback.has-feedback { background: var(--amber-light); border-color: #fcd34d; color: #92400e; }
+        .hist-report-action-feedback:hover:not(:disabled) { background: #DCE1EC; transform: none; }
+        .hist-report-action-feedback.has-feedback { background: var(--amber-light); border-color: #E6D9A8; color: #A0850A; }
         .hist-report-action-btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
 
         .hist-detail-body { padding: 16px 20px; display: flex; flex-direction: column; gap: 14px; flex: 1; min-height: 0; }
-        .hist-preview-section { background: white; border-radius: 10px; border: 1px solid var(--border); padding: 14px 16px; flex: 1; display: flex; flex-direction: column; min-height: 0; }
+        .hist-preview-section { background: white; border-radius: 0; border: 1px solid var(--border); padding: 14px 16px; flex: 1; display: flex; flex-direction: column; min-height: 0; }
         .hist-preview-title { font-size: 0.72rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.07em; color: var(--ink-faint); margin-bottom: 10px; flex-shrink: 0; }
-        .hist-report-preview { border: 1px solid var(--border); border-radius: 8px; overflow: hidden; background: var(--surface-soft); flex: 1; display: flex; min-height: 0; }
+        .hist-report-preview { border: 1px solid var(--border); border-radius: 0; overflow: hidden; background: var(--surface-soft); flex: 1; display: flex; min-height: 0; }
         .hist-report-preview-frame { width: 100%; height: 100%; min-height: 60vh; border: none; display: block; background: #fff; }
         .hist-report-preview-loading { display: flex; align-items: center; justify-content: center; gap: 10px; width: 100%; min-height: 320px; color: var(--ink-faint); font-size: 0.85rem; }
         .hist-report-preview-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; width: 100%; min-height: 200px; color: var(--ink-faint); font-size: 0.85rem; padding: 30px; text-align: center; }
-        .hist-report-preview-empty i { font-size: 1.8rem; color: #d1d5db; }
+        .hist-report-preview-empty i { font-size: 1.8rem; color: #8A93A6; }
         .hist-spinner { width: 22px; height: 22px; border: 3px solid var(--border); border-top-color: var(--blue); border-radius: 50%; animation: hist-spin 0.7s linear infinite; }
         @keyframes hist-spin { to { transform: rotate(360deg); } }
 
@@ -1140,7 +1857,7 @@ while (ob_get_level() > 0) { ob_end_clean(); }
         }
         .hist-comment-drawer.open { right: 0; }
         .hist-comment-drawer-header {
-            background: linear-gradient(135deg, var(--maroon), var(--active-nav));
+            background: var(--grid-navy);
             color: white; padding: 14px 18px;
             display: flex; align-items: center; justify-content: space-between;
             font-weight: 700; font-size: 0.88rem; flex-shrink: 0;
@@ -1154,9 +1871,9 @@ while (ob_get_level() > 0) { ob_end_clean(); }
         .hist-comment-drawer-header button:hover { background: rgba(255,255,255,0.26); }
         .hist-comment-drawer-body { padding: 16px 18px; overflow-y: auto; flex: 1; }
         .hist-comment-drawer-empty { color: var(--ink-faint); font-size: 0.85rem; text-align: center; padding: 40px 10px; }
-        .hist-comment-section { background: white; border-radius: 10px; border: 1px solid var(--border); padding: 14px 16px; }
+        .hist-comment-section { background: white; border-radius: 0; border: 1px solid var(--border); padding: 14px 16px; }
         .hist-comment-title { font-size: 0.72rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.07em; color: var(--ink-faint); margin-bottom: 8px; }
-        .hist-comment-display { font-size: 0.82rem; color: var(--ink-muted); background: var(--surface-soft); border-radius: 6px; padding: 8px 10px; line-height: 1.55; min-height: 36px; }
+        .hist-comment-display { font-size: 0.82rem; color: var(--ink-muted); background: var(--surface-soft); border-radius: 0; padding: 8px 10px; line-height: 1.55; min-height: 36px; }
         .hist-comment-display.empty { color: var(--ink-faint); font-style: italic; }
 
         @media (max-width: 700px) {
@@ -1170,16 +1887,16 @@ while (ob_get_level() > 0) { ob_end_clean(); }
         /* DTR PREVIEW MODAL */
         #dtrPreviewModal {
             display: none; position: fixed; inset: 0; z-index: 20000;
-            background: rgba(7,20,95,0.65); backdrop-filter: blur(4px);
+            background: rgba(27,42,74,0.65); backdrop-filter: blur(4px);
             align-items: center; justify-content: center; padding: 16px;
         }
         #dtrPreviewModal.open { display: flex; }
         .dtr-modal-box {
-            background: #f0f4f8; border-radius: 16px;
+            background: #EEF1F6; border-radius: 0;
             width: calc(100% - 32px); max-width: 1100px;
             height: calc(100vh - 32px); max-height: 96vh;
             display: flex; flex-direction: column;
-            box-shadow: 0 24px 80px rgba(7,20,95,0.28); overflow: hidden;
+            box-shadow: none; overflow: hidden;
             animation: dtrModalPop 0.3s cubic-bezier(.34,1.56,.64,1) both;
         }
         @keyframes dtrModalPop {
@@ -1187,7 +1904,7 @@ while (ob_get_level() > 0) { ob_end_clean(); }
             to   { opacity:1; transform:scale(1)    translateY(0); }
         }
         .dtr-modal-head {
-            background: #065f46; padding: 13px 18px;
+            background: #2C5A2C; padding: 13px 18px;
             display: flex; align-items: center; justify-content: space-between;
             gap: 12px; flex-shrink: 0; flex-wrap: wrap;
         }
@@ -1197,7 +1914,7 @@ while (ob_get_level() > 0) { ob_end_clean(); }
         .dtr-mh-info span   { color:rgba(255,255,255,0.72); font-size:11px; display:block; margin-top:1px; }
         .dtr-modal-head-right { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
         .dtr-month-select {
-            border: 1.5px solid rgba(255,255,255,0.35); border-radius: 7px;
+            border: 1.5px solid rgba(255,255,255,0.35); border-radius: 0;
             padding: 6px 28px 6px 10px; font-size: 12px; font-family: inherit;
             background: rgba(255,255,255,0.15); color: #fff; cursor: pointer;
             font-weight: 600; min-width: 150px;
@@ -1205,95 +1922,637 @@ while (ob_get_level() > 0) { ob_end_clean(); }
             background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10'%3E%3Cpath fill='%23ffffff' d='M5 7L1 3h8z'/%3E%3C/svg%3E");
             background-repeat: no-repeat; background-position: right 10px center;
         }
-        .dtr-month-select option { background: #065f46; color: #fff; }
+        .dtr-month-select option { background: #2C5A2C; color: #fff; }
         .dtr-month-select:focus { outline: none; box-shadow: 0 0 0 2px rgba(255,255,255,0.4); }
         .dtr-mh-btn {
-            padding: 7px 14px; border-radius: 7px; font-size: 12px; font-weight: 700;
+            padding: 7px 14px; border-radius: 0; font-size: 12px; font-weight: 700;
             cursor: pointer; border: none; font-family: inherit;
             display: inline-flex; align-items: center; gap: 5px; transition: opacity 0.2s;
             white-space: nowrap;
         }
         .dtr-mh-btn:hover { opacity: 0.88; }
-        .dtr-mh-btn-close { background: rgba(255,255,255,0.13); color: #e2e8f0; border: 1px solid rgba(255,255,255,0.18); }
+        .dtr-mh-btn-close { background: rgba(255,255,255,0.13); color: #DCE1EC; border: 1px solid rgba(255,255,255,0.18); }
         .dtr-iframe-wrap { flex: 1; overflow: hidden; background: #eef1f8; position: relative; }
         #dtrPreviewIframe { width: 100%; height: 100%; border: none; display: block; min-height: 0; }
         .dtr-loading-overlay {
             position: absolute; inset: 0;
             display: flex; flex-direction: column; align-items: center; justify-content: center;
             background: #eef1f8; gap: 14px; font-size: 0.88rem;
-            color: #4a5568; pointer-events: none; transition: opacity 0.3s;
+            color: #5A6272; pointer-events: none; transition: opacity 0.3s;
         }
         .dtr-loading-overlay.hidden { opacity: 0; }
-        .dtr-spinner { width: 36px; height: 36px; border: 4px solid #c6d4e3; border-top-color: #065f46; border-radius: 50%; animation: dtr-spin 0.75s linear infinite; }
+        .dtr-spinner { width: 36px; height: 36px; border: 4px solid #c6d4e3; border-top-color: #2C5A2C; border-radius: 50%; animation: dtr-spin 0.75s linear infinite; }
         @keyframes dtr-spin { to { transform: rotate(360deg); } }
 
         /* SUBMISSION RESULT POPUP */
         .submit-popup-overlay { display: none; position: fixed; inset: 0; z-index: 4000; background: rgba(0,0,0,0.55); align-items: center; justify-content: center; padding: 20px; }
         .submit-popup-overlay.open { display: flex; }
-        .submit-popup-box { background: white; border-radius: 20px; width: 100%; max-width: 480px; box-shadow: 0 16px 60px rgba(0,0,0,0.25); overflow: hidden; animation: popupSlideUp 0.28s cubic-bezier(.34,1.56,.64,1); }
+        .submit-popup-box { background: white; border-radius: 0; width: 100%; max-width: 480px; box-shadow: none; overflow: hidden; animation: popupSlideUp 0.28s cubic-bezier(.34,1.56,.64,1); }
         @keyframes popupSlideUp { from{transform:translateY(32px) scale(0.95);opacity:0;} to{transform:translateY(0) scale(1);opacity:1;} }
         .submit-popup-icon { display: flex; align-items: center; justify-content: center; padding: 32px 0 24px; font-size: 3.2rem; }
         .submit-popup-icon.success { background: var(--teal-light); }
         .submit-popup-icon.error   { background: var(--red-light); }
         .submit-popup-content { padding: 0 28px 28px; text-align: center; }
-        .submit-popup-content h3 { font-size: 1.15rem; font-weight: 800; color: var(--ink); margin-bottom: 10px; font-family: 'Lora', serif; }
+        .submit-popup-content h3 { font-size: 1.15rem; font-weight: 800; color: var(--ink); margin-bottom: 10px; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
         .submit-popup-content p  { font-size: 0.9rem; color: var(--ink-muted); line-height: 1.65; margin-bottom: 16px; }
-        .submit-popup-detail { background: var(--surface-soft); border: 1px solid var(--border); border-radius: var(--radius-md); padding: 10px 14px; margin-bottom: 16px; text-align: left; font-size: 0.78rem; color: var(--ink-faint); font-family: monospace; word-break: break-all; max-height: 120px; overflow-y: auto; display: none; }
+        .submit-popup-detail { background: var(--surface-soft); border: 1px solid var(--border); border-radius: 0; padding: 10px 14px; margin-bottom: 16px; text-align: left; font-size: 0.78rem; color: var(--ink-faint); font-family: monospace; word-break: break-all; max-height: 120px; overflow-y: auto; display: none; }
         .submit-popup-detail.visible { display: block; }
         .btn-toggle-detail { background: none; border: none; color: var(--blue); font-size: 0.78rem; cursor: pointer; font-family: inherit; text-decoration: underline; margin-bottom: 16px; display: none; }
         .btn-toggle-detail.visible { display: inline-block; }
         .submit-popup-actions { display: flex; gap: 10px; }
-        .btn-popup-ok { flex: 1; padding: 13px; background: linear-gradient(135deg, var(--teal), var(--blue)); color: white; border: none; border-radius: var(--radius-md); font-size: 0.95rem; font-weight: 700; cursor: pointer; font-family: inherit; }
+        .btn-popup-ok { flex: 1; padding: 13px; background: var(--grid-navy); color: white; border: none; border-radius: 0; font-size: 0.95rem; font-weight: 700; cursor: pointer; font-family: inherit; }
         .btn-popup-ok:hover { opacity: 0.88; }
-        .btn-popup-ok.error-btn { background: linear-gradient(135deg, #ef4444, #dc2626); }
-        .btn-popup-retry { flex: 1; padding: 13px; background: white; color: var(--blue); border: 1.5px solid var(--blue); border-radius: var(--radius-md); font-size: 0.95rem; font-weight: 700; cursor: pointer; font-family: inherit; }
+        .btn-popup-ok.error-btn { background: var(--grid-red); }
+        .btn-popup-retry { flex: 1; padding: 13px; background: white; color: var(--blue); border: 1.5px solid var(--blue); border-radius: 0; font-size: 0.95rem; font-weight: 700; cursor: pointer; font-family: inherit; }
         .btn-popup-retry:hover { background: var(--blue-light); }
 
-        /* SUBMIT CONFIRM MODAL */
+        /* SUBMIT CONFIRM MODAL — summary-card design
+           Light card, gold top accent, navy icon tile (same as the "Current Week" tile),
+           icon-labelled summary rows, optional amber heads-up, firm "cannot be edited" note. */
         .confirm-overlay { display: none; position: fixed; inset: 0; z-index: 5000; background: rgba(0,0,0,0.58); align-items: center; justify-content: center; padding: 20px; }
         .confirm-overlay.open { display: flex; }
-        .confirm-box { background: white; border-radius: 20px; width: 100%; max-width: 440px; box-shadow: 0 20px 64px rgba(0,0,0,0.28); overflow: hidden; animation: popupSlideUp 0.26s cubic-bezier(.34,1.56,.64,1); }
-        .confirm-header { background: var(--maroon); padding: 22px 24px 18px; display: flex; flex-direction: column; gap: 6px; }
-        .confirm-header-icon { font-size: 2rem; line-height: 1; }
-        .confirm-header-title { font-size: 1.05rem; font-weight: 700; color: white; font-family: 'Lora', serif; }
-        .confirm-body { padding: 18px 24px; }
-        .confirm-body p { font-size: 0.88rem; color: var(--ink-muted); line-height: 1.65; margin-bottom: 12px; }
-        .confirm-warning { background: var(--amber-light); border: 1.5px solid #fcd34d; border-radius: var(--radius-md); padding: 11px 14px; font-size: 0.83rem; color: #78350f; line-height: 1.55; display: flex; align-items: flex-start; gap: 8px; }
-        .confirm-warning-icon { font-size: 1rem; flex-shrink: 0; margin-top: 1px; }
-        .confirm-footer { display: flex; gap: 10px; padding: 0 24px 22px; }
-        .btn-confirm-cancel { flex: 1; padding: 12px; background: var(--surface-soft); color: var(--ink-muted); border: 1.5px solid var(--border); border-radius: var(--radius-md); font-size: 0.9rem; font-weight: 600; cursor: pointer; font-family: inherit; transition: background 0.2s; }
-        .btn-confirm-cancel:hover { background: #e5e7eb; }
-        .btn-confirm-submit { flex: 1; padding: 12px; background: linear-gradient(135deg, var(--teal), var(--blue)); color: white; border: none; border-radius: var(--radius-md); font-size: 0.9rem; font-weight: 700; cursor: pointer; font-family: inherit; transition: opacity 0.2s, transform 0.15s; }
-        .btn-confirm-submit:hover { opacity: 0.88; transform: translateY(-1px); }
-
+        .confirm-box { background: white; border-radius: 0; width: 100%; max-width: 480px; max-height: calc(100vh - 40px); display: flex; flex-direction: column; box-shadow: none; overflow: hidden; animation: popupSlideUp 0.26s cubic-bezier(.34,1.56,.64,1); }
+        .confirm-box::before { content: ''; display: block; height: 4px; flex-shrink: 0; background: #F7C600; }
+        .cf-head { display: flex; align-items: center; gap: 14px; padding: 18px 24px 16px; border-bottom: 1px solid var(--grid-border-soft); flex-shrink: 0; }
+        .cf-head-icon { width: 46px; height: 46px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; background: var(--grid-navy); color: #F7C600; font-size: 1.15rem; }
+        .cf-head-text { min-width: 0; }
+        .cf-head-title { font-size: 1.08rem; font-weight: 700; line-height: 1.25; color: var(--grid-navy); font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        .cf-head-sub { margin-top: 2px; font-size: 0.78rem; color: var(--grid-muted); }
+        .cf-head-sub:empty { display: none; }
+        .confirm-body { padding: 18px 24px 4px; overflow-y: auto; flex: 1 1 auto; }
+        .confirm-body p { font-size: 0.88rem; color: var(--ink-muted); line-height: 1.65; margin-bottom: 14px; }
+        .cf-summary { border: 1px solid var(--grid-border); margin-bottom: 14px; }
+        .cf-summary:empty { display: none; }
+        .cf-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 10px 14px; border-bottom: 1px solid var(--grid-border-soft); font-size: 0.84rem; }
+        .cf-row:last-child { border-bottom: none; }
+        .cf-row-label { display: flex; align-items: center; gap: 9px; flex-shrink: 0; font-weight: 600; color: var(--grid-muted); }
+        .cf-row-label i { width: 14px; text-align: center; font-size: 0.8rem; color: var(--grid-navy); }
+        .cf-row-value { min-width: 0; text-align: right; font-weight: 700; color: var(--grid-navy); overflow-wrap: anywhere; }
+        .cf-row-value i { margin-left: 6px; }
+        .cf-row-value.ok   { color: var(--grid-green); }
+        .cf-row-value.warn { color: var(--grid-amber); }
+        .cf-notice { display: flex; align-items: flex-start; gap: 9px; padding: 10px 14px; margin-bottom: 14px; font-size: 0.82rem; line-height: 1.55; border: 1px solid #E6D9A8; background: var(--grid-amber-bg); color: var(--grid-amber); }
+        .cf-notice i { margin-top: 3px; flex-shrink: 0; }
+        .cf-note { display: flex; align-items: center; gap: 10px; padding: 10px 14px; margin-bottom: 18px; background: var(--surface-soft); border-left: 3px solid var(--grid-navy); font-size: 0.83rem; line-height: 1.5; color: var(--grid-navy); }
+        .cf-note i { flex-shrink: 0; }
+        .confirm-footer { display: flex; justify-content: flex-end; gap: 10px; padding: 14px 24px; flex-shrink: 0; background: var(--surface-soft); border-top: 1px solid var(--grid-border-soft); }
+        .btn-confirm-cancel, .btn-confirm-submit { display: inline-flex; align-items: center; justify-content: center; gap: 8px; padding: 11px 20px; border-radius: 0; font-weight: 700; cursor: pointer; font-family: inherit; transition: background 0.2s, opacity 0.2s; }
+        .btn-confirm-cancel { background: #fff; color: var(--grid-navy); border: 1px solid var(--grid-border); }
+        .btn-confirm-cancel:hover { background: #EEF1F6; }
+        .btn-confirm-submit { background: var(--grid-navy); color: white; border: none; }
+        .btn-confirm-submit:hover { opacity: 0.88; transform: none; }
+        .btn-confirm-submit:disabled, .btn-confirm-cancel:disabled { opacity: 0.6; cursor: not-allowed; }
+        @media (max-width: 520px) {
+            .cf-head, .confirm-body, .confirm-footer { padding-left: 18px; padding-right: 18px; }
+            .confirm-footer { flex-direction: column-reverse; }
+            .btn-confirm-cancel, .btn-confirm-submit { width: 100%; }
+            .cf-row { flex-direction: column; align-items: flex-start; gap: 3px; }
+            .cf-row-value { text-align: left; }
+        }
         /* UNSAVED MODAL */
         .unsaved-overlay { display: none; position: fixed; inset: 0; z-index: 3000; background: rgba(0,0,0,0.55); align-items: center; justify-content: center; padding: 20px; }
         .unsaved-overlay.open { display: flex; }
-        .unsaved-box { background: white; border-radius: 18px; width: 100%; max-width: 400px; box-shadow: 0 12px 48px rgba(0,0,0,0.22); overflow: hidden; animation: slideUp 0.22s ease; }
+        .unsaved-box { background: white; border-radius: 0; width: 100%; max-width: 400px; box-shadow: none; overflow: hidden; animation: slideUp 0.22s ease; }
         @keyframes slideUp { from{transform:translateY(20px);opacity:0;} to{transform:translateY(0);opacity:1;} }
         .unsaved-icon { background: var(--amber-light); display: flex; align-items: center; justify-content: center; padding: 24px 0 20px; font-size: 2.4rem; }
         .unsaved-content { padding: 20px 24px 24px; text-align: center; }
-        .unsaved-content h3 { font-size: 1.05rem; font-weight: 700; color: var(--ink); margin-bottom: 8px; font-family: 'Lora', serif; }
+        .unsaved-content h3 { font-size: 1.05rem; font-weight: 700; color: var(--ink); margin-bottom: 8px; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
         .unsaved-content p  { font-size: 0.86rem; color: var(--ink-muted); line-height: 1.6; margin-bottom: 20px; }
         .unsaved-actions { display: flex; flex-direction: column; gap: 10px; }
-        .btn-unsaved-save { background: linear-gradient(135deg, var(--teal), var(--blue)); color: white; border: none; border-radius: var(--radius-md); padding: 12px; font-size: 0.9rem; font-weight: 700; cursor: pointer; font-family: inherit; }
-        .btn-unsaved-discard { background: var(--surface-soft); color: var(--ink-muted); border: 1.5px solid var(--border); border-radius: var(--radius-md); padding: 11px; font-size: 0.88rem; font-weight: 600; cursor: pointer; font-family: inherit; }
+        .btn-unsaved-save { background: var(--grid-navy); color: white; border: none; border-radius: 0; padding: 12px; font-size: 0.9rem; font-weight: 700; cursor: pointer; font-family: inherit; }
+        .btn-unsaved-discard { background: var(--surface-soft); color: var(--ink-muted); border: 1.5px solid var(--border); border-radius: 0; padding: 11px; font-size: 0.88rem; font-weight: 600; cursor: pointer; font-family: inherit; }
         .btn-unsaved-cancel { background: none; border: none; color: var(--ink-faint); font-size: 0.82rem; cursor: pointer; font-family: inherit; padding: 6px; text-decoration: underline; }
+        /* ══ Field Ops Grid (AccomForm.php) — shared additions ══
+           Responsive attendance bar + visible keyboard focus + reduced
+           motion, exactly as AccomForm.php defines them. */
+        @media (max-width: 768px) {
+            #att-notif-bar,
+            #att-notif-bar.sidebar-collapsed {
+                left: 50% !important;
+                width: calc(100% - 20px) !important;
+                max-width: none !important;
+            }
+        }
+        .sidebar.collapsed .logout-link a { border-color: transparent; }
+        .anb-btn:focus-visible, .anb-close:focus-visible, .ndm-close-btn:focus-visible,
+        .toggle-btn:focus-visible { outline: 2px solid #F7C600; outline-offset: 2px; }
+        @media (prefers-reduced-motion: reduce) {
+            .ndm-box, .anb-pulse, .sidebar-badge-att, .sidebar-badge-journal { animation: none; }
+        }
+        /* ══ Field Ops Grid (AccomForm.php) — page typography ══
+           Square corners, thin slate borders instead of soft shadows,
+           navy actions, small uppercase labels, flat status colours.
+           Only the look changes; every class/id the scripts use is kept. */
+        body { background: var(--grid-bg); color: #2d3748; }
+        .page-toolbar { border-bottom: 1px solid var(--grid-border); }
+        .history-btn, .dtr-btn, .btn-save-draft, .btn-submit, .btn-popup-ok, .btn-popup-retry,
+        .btn-confirm-cancel, .btn-confirm-submit, .btn-unsaved-save, .btn-unsaved-discard,
+        .hist-tbtn, .hist-report-action-btn, .dtr-mh-btn {
+            font-size: 12px; text-transform: uppercase; letter-spacing: 0.4px;
+        }
+        .history-btn { background: var(--grid-navy); border: 1px solid var(--grid-navy); }
+        .dtr-btn { background: #fff; color: var(--grid-navy); border: 1px solid var(--grid-border); }
+        .dtr-btn:hover { background: #f3f4f7; }
+        .btn-save-draft { border: 1px solid var(--grid-navy); color: var(--grid-navy); }
+        .btn-submit, .btn-confirm-submit, .btn-unsaved-save, .btn-popup-ok { border: 1px solid var(--grid-navy); }
+        .btn-popup-retry, .btn-confirm-cancel, .btn-unsaved-discard { border-width: 1px; }
+        .history-btn:focus-visible, .dtr-btn:focus-visible, .btn-save-draft:focus-visible, .btn-submit:focus-visible,
+        .btn-popup-ok:focus-visible, .btn-confirm-submit:focus-visible, .btn-confirm-cancel:focus-visible,
+        .hist-tbtn:focus-visible, .hist-report-action-btn:focus-visible { outline: 2px solid var(--grid-navy); outline-offset: 2px; }
+        .flash-msg, .submitted-msg, .rejected-msg { border-width: 1px; }
+        .week-card, .training-card, .tl-card, .submit-section { border: 1px solid var(--grid-border); }
+        .week-icon { background: var(--grid-navy); color: #F7C600; }
+        .week-label, .training-card-label, .field-label { color: var(--grid-navy); letter-spacing: 0.5px; }
+        .week-date, .tl-day-name { color: var(--grid-navy); font-style: normal; text-transform: uppercase; letter-spacing: 0.4px; font-size: 0.9rem; font-weight: 700; }
+        .week-pill, .tl-att-badge, .hist-list-badge, .hist-dpill { text-transform: uppercase; letter-spacing: 0.3px; border: 1px solid transparent; }
+        .tl-att-badge.present, .hist-list-badge.good, .hist-dpill.good { border-color: #BFE0BF; }
+        .tl-att-badge.done, .hist-list-badge.pending, .hist-dpill.pending { border-color: var(--grid-border); }
+        .hist-list-badge.lack-of-details, .hist-dpill.lack-of-details { border-color: #E6D9A8; }
+        .hist-list-badge.wrong-document, .hist-dpill.wrong-document { border-color: #E3BCBC; }
+        .tl-card-head { border-bottom: 1px solid var(--grid-border-soft); }
+        .tl-textarea, .training-input { border: 1px solid var(--grid-border); background: #fff; }
+        .tl-textarea:focus, .training-input:focus { border-color: var(--grid-navy); box-shadow: 0 0 0 3px rgba(27,42,74,0.08); }
+        .hist-doc-toolbar { background: var(--grid-navy); border-bottom: 1px solid #55668C; }
+        .hist-doc-toolbar-title { text-transform: uppercase; letter-spacing: 0.5px; font-size: 13px; }
+        .hist-doc-toolbar-left i { color: #F7C600; }
+        .hist-stat-card { border: 1px solid var(--grid-border); }
+        .hist-stat-icon.submitted { background: var(--grid-green-bg); color: var(--grid-green); }
+        .hist-stat-icon.feedback  { background: var(--grid-amber-bg); color: var(--grid-amber); }
+        .hist-stat-num.submitted-num { color: var(--grid-green); }
+        .hist-stat-num.feedback-num  { color: var(--grid-amber); }
+        .hist-list-week, .hist-detail-week { color: var(--grid-navy); text-transform: uppercase; letter-spacing: 0.3px; }
+        .hist-report-action-print, .hist-report-action-pdf { background: var(--grid-navy); border: 1px solid var(--grid-navy); }
+        .hist-report-action-pdf { background: #fff; color: var(--grid-navy); border-color: var(--grid-border); }
+        .hist-report-action-print:hover:not(:disabled), .hist-report-action-pdf:hover:not(:disabled),
+        .hist-report-action-feedback:hover:not(:disabled) { transform: none; opacity: 0.9; }
+        .hist-report-action-pdf:hover:not(:disabled) { background: #f3f4f7; }
+        .hist-preview-section, .hist-comment-section { border: 1px solid var(--grid-border); }
+        .hist-comment-drawer-header { text-transform: uppercase; letter-spacing: 0.4px; font-size: 13px; }
+        .hist-comment-drawer-header button { border-radius: 0; border: 1px solid rgba(255,255,255,0.25); background: transparent; }
+        .hist-detail-empty i { color: var(--grid-border); }
+        .dtr-modal-box { border: 1px solid var(--grid-border); }
+        .dtr-modal-head { background: var(--grid-navy); }
+        .dtr-month-select option { background: var(--grid-navy); }
+        .dtr-spinner { border-top-color: var(--grid-navy); }
+        .submit-popup-box, .confirm-box, .unsaved-box { border: 1px solid var(--grid-border); }
+        .submit-popup-icon { font-size: 2.6rem; }
+        .submit-popup-icon.success { color: var(--grid-green); }
+        .submit-popup-icon.error   { color: var(--grid-red); }
+        .submit-popup-content h3, .unsaved-content h3 { color: #1e293b; text-transform: uppercase; letter-spacing: 0.3px; }
+        .unsaved-icon { color: var(--grid-amber); font-size: 2rem; }
+        .refresh-indicator { border: 1px solid #55668C; background: var(--grid-navy); }
+        @media (prefers-reduced-motion: reduce) {
+            .submit-popup-box, .confirm-box, .unsaved-box, .dtr-modal-box { animation: none; }
+        }
     </style>
 </head>
 <body>
+<!-- STUDENT PAGE SHELL (self-contained): side-menu loading page + sync, logout popup, sidebar state, action loading page. -->
+<style>
+    /* the overlay appears with no fade while the page is being left (same as the admin pages) */
+    #globalLoadingOverlay.gl-instant { transition: none; }
+    /* the saved menu state is applied before the first paint — nothing animates while it is restored */
+    html.cv-sb-restoring .sidebar, html.cv-sb-restoring .main-content, html.cv-sb-restoring #att-notif-bar { transition: none !important; }
+
+    /* LOGOUT CONFIRMATION POPUP — same square navy look as the admin pages' */
+    .cv-logout-overlay { position: fixed; inset: 0; z-index: 100050; display: flex; align-items: center; justify-content: center; padding: 20px;
+        background: rgba(27, 42, 74, 0.45); opacity: 0; visibility: hidden; transition: opacity 0.2s ease, visibility 0.2s ease; }
+    .cv-logout-overlay.show { opacity: 1; visibility: visible; }
+    .cv-logout-box { background: #ffffff; width: 420px; max-width: 100%; border-top: 3px solid #1B2A4A; box-shadow: 0 20px 60px rgba(0, 0, 0, 0.25);
+        padding: 26px 24px 22px; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; transform: translateY(8px); transition: transform 0.2s ease; }
+    .cv-logout-overlay.show .cv-logout-box { transform: translateY(0); }
+    .cv-logout-box h3 { margin: 0 0 10px; font-size: 16px; color: #1B2A4A; display: flex; align-items: center; gap: 10px; }
+    .cv-logout-box h3 i { color: #1B2A4A; }
+    .cv-logout-box p { margin: 0 0 22px; font-size: 13.5px; color: #4A5568; line-height: 1.6; }
+    .cv-logout-actions { display: flex; justify-content: flex-end; gap: 8px; }
+    .cv-logout-btn { display: inline-flex; align-items: center; gap: 8px; border: 1px solid #1B2A4A; cursor: pointer; font-family: inherit; font-size: 12px;
+        font-weight: 600; letter-spacing: 0.4px; text-transform: uppercase; padding: 11px 18px; border-radius: 0; background: #1B2A4A; color: #ffffff; transition: opacity 0.2s ease; }
+    .cv-logout-btn:hover { opacity: 0.88; }
+    .cv-logout-btn:focus-visible { outline: 2px solid #F7C600; outline-offset: 2px; }
+    .cv-logout-btn.ghost { background: #ffffff; color: #1B2A4A; border-color: #D5DBE6; }
+    @media (prefers-reduced-motion: reduce) { .cv-logout-overlay, .cv-logout-box { transition: none; } }
+</style>
+<!-- Loading page for pages that had none — same markup / look as company_list.php's and the admin pages'.
+     Visible from the first paint, hidden by the script below once the page has loaded. -->
+<style>
+    #globalLoadingOverlay {
+        position: fixed; inset: 0; z-index: 100000;
+        display: flex; align-items: center; justify-content: center;
+        background: rgba(238, 241, 246, 0.92);
+        opacity: 1; visibility: visible;
+        transition: opacity 0.35s ease, visibility 0.35s ease;
+    }
+    #globalLoadingOverlay.hidden { opacity: 0; visibility: hidden; pointer-events: none; }
+    .global-loading-box { display: flex; flex-direction: column; align-items: center; gap: 16px; animation: globalLoadingPop 0.35s ease; }
+    .global-loading-spinner {
+        width: 64px; height: 64px; border: 0; border-radius: 50%; box-sizing: border-box;
+        background: conic-gradient(from 0deg, rgba(27,42,74,0.12) 0deg, rgba(27,42,74,0.35) 120deg, rgba(27,42,74,0.7) 240deg, #1B2A4A 330deg, #1B2A4A 360deg);
+        -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 9px), #000 calc(100% - 8px)),
+                      repeating-conic-gradient(from 5deg, #000 0deg 20deg, transparent 20deg 30deg);
+        -webkit-mask-composite: source-in;
+                mask: radial-gradient(farthest-side, transparent calc(100% - 9px), #000 calc(100% - 8px)),
+                      repeating-conic-gradient(from 5deg, #000 0deg 20deg, transparent 20deg 30deg);
+                mask-composite: intersect;
+        will-change: transform;
+        animation: cvRingSpin 1s steps(12, end) infinite;
+    }
+    @keyframes cvRingSpin { to { transform: rotate(360deg); } }
+    .global-loading-text { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; font-size: 13px; font-weight: 700; color: #1B2A4A; text-transform: uppercase; letter-spacing: 0.6px; display: flex; align-items: center; gap: 8px; }
+    .global-loading-dots span { animation: globalLoadingDots 1.2s infinite; opacity: 0; }
+    .global-loading-dots span:nth-child(2) { animation-delay: 0.2s; }
+    .global-loading-dots span:nth-child(3) { animation-delay: 0.4s; }
+    @keyframes globalLoadingPop { from { transform: scale(0.9); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+    @keyframes globalLoadingDots { 0%, 20% { opacity: 0; } 50% { opacity: 1; } 100% { opacity: 0; } }
+    @media (prefers-reduced-motion: reduce) { .global-loading-box, .global-loading-spinner { animation: none; } }
+</style>
+<div id="globalLoadingOverlay" aria-live="polite">
+    <div class="global-loading-box">
+        <div class="global-loading-spinner"></div>
+        <div class="global-loading-text">
+            <span id="globalLoadingLabel">Loading</span>
+            <span class="global-loading-dots"><span>.</span><span>.</span><span>.</span></span>
+        </div>
+    </div>
+</div>
+<!-- Without JavaScript nothing could ever close the overlay — never leave the page covered. -->
+<noscript><style>#globalLoadingOverlay { display: none !important; }</style></noscript>
+<script>
+(function () {
+    'use strict';
+    if (window._cvShellReady) return;
+    window._cvShellReady = true;
+
+    var OWN_OVERLAY = false;
+    var OWN_NAV     = false;
+    var root  = document.documentElement;
+    var ov    = document.getElementById('globalLoadingOverlay');
+    var label = document.getElementById('globalLoadingLabel');
+    var byId  = function (id) { return document.getElementById(id); };
+    var isDesktop = function () { return !(window.matchMedia && window.matchMedia('(max-width: 768px)').matches); };
+
+    function overlayShown() {
+        try { return !!ov && !ov.classList.contains('hidden') && !ov.classList.contains('success-state') && window.getComputedStyle(ov).display !== 'none'; }
+        catch (e) { return false; }
+    }
+
+    /* ── 1a) SIDEBAR STATE SYNC — restore (before the first paint) + save ───────────────────────────────────────────
+       Applies exactly what the pages' own toggle button does (the .collapsed class, the main content's margin / width
+       and the attendance notification bar's .sidebar-collapsed), so the page's toggle code carries on unchanged.
+       Phones (768px and narrower) are left alone: some pages collapse the menu there on their own. */
+    var SB_KEY = 'neustSidebarCollapsed';
+    var wantCollapsed = false;
+    try { wantCollapsed = isDesktop() && window.localStorage.getItem(SB_KEY) === '1'; } catch (e) { /* storage blocked: default state */ }
+    var sbDone = { sb: false, mc: false, anb: false }, sbWatching = false;
+    if (wantCollapsed) root.classList.add('cv-sb-restoring');
+    function watchSidebar(sb) {
+        if (sbWatching || !window.MutationObserver) return;
+        sbWatching = true;
+        new MutationObserver(function () {
+            if (!isDesktop()) return;
+            try { window.localStorage.setItem(SB_KEY, sb.classList.contains('collapsed') ? '1' : '0'); } catch (e) { /* state just won't persist */ }
+        }).observe(sb, { attributes: true, attributeFilter: ['class'] });
+    }
+    function syncSidebar() {
+        var sb = byId('sidebar');
+        if (!sb) return false;
+        if (wantCollapsed) {
+            if (!sbDone.sb) { sb.classList.add('collapsed'); sbDone.sb = true; }
+            var mc = byId('mainContent'), anb = byId('att-notif-bar');
+            if (mc && !sbDone.mc)   { mc.style.marginLeft = '80px'; mc.style.width = 'calc(100% - 80px)'; sbDone.mc = true; }
+            if (anb && !sbDone.anb) { anb.classList.add('sidebar-collapsed'); sbDone.anb = true; }
+        }
+        watchSidebar(sb);
+        return !wantCollapsed || (sbDone.sb && sbDone.mc && sbDone.anb);
+    }
+    var sbObs = null;
+    if (!syncSidebar() && window.MutationObserver) {
+        sbObs = new MutationObserver(function () { if (syncSidebar() && sbObs) { sbObs.disconnect(); sbObs = null; } });
+        sbObs.observe(root, { childList: true, subtree: true });
+    }
+    document.addEventListener('DOMContentLoaded', function () {
+        syncSidebar();
+        if (sbObs) { sbObs.disconnect(); sbObs = null; }
+        var done = function () { root.classList.remove('cv-sb-restoring'); };
+        if (window.requestAnimationFrame) requestAnimationFrame(function () { requestAnimationFrame(done); }); else done();
+    });
+
+    /* ── 1b) ONE LOADING PAGE ACROSS PAGES — pick up where the previous page's loading page was ──────────────────── */
+    var KEY_EPOCH = 'cvLoaderEpoch', KEY_PHASE = 'cvLoaderPhase';
+    var carriedSince = -1, ringAt0 = null, dotsAt0 = null;
+    try {
+        var ep = parseInt(window.sessionStorage.getItem(KEY_EPOCH) || '', 10);
+        window.sessionStorage.removeItem(KEY_EPOCH);
+        var since = ep ? Date.now() - ep : -1;
+        if (since >= 0 && since < 15000) {
+            carriedSince = since;
+            try {
+                var ph = JSON.parse(window.sessionStorage.getItem(KEY_PHASE) || 'null');
+                if (ph && typeof ph.ring === 'number' && typeof ph.dots === 'number' && Date.now() - ph.t >= 0 && Date.now() - ph.t < 15000) {
+                    var gap = Date.now() - ph.t;
+                    ringAt0 = (ph.ring + gap) / 1000; dotsAt0 = (ph.dots + gap) / 1000;
+                }
+            } catch (e) { /* unreadable hand-over: fall back to the elapsed time */ }
+        }
+    } catch (e) { /* storage blocked: the loading page simply starts fresh */ }
+    try { window.sessionStorage.removeItem(KEY_PHASE); } catch (e) {}
+
+    var shownSince = null;
+    if (overlayShown()) {
+        shownSince = carriedSince >= 0 ? Date.now() - carriedSince : Date.now();
+        if (carriedSince >= 0) {
+            try {
+                var spinner = ov.querySelector('.global-loading-spinner');
+                var dots = ov.querySelectorAll('.global-loading-dots span');
+                var box = ov.querySelector('.global-loading-box');
+                var eRing = ringAt0 !== null ? ringAt0 : carriedSince / 1000;
+                var eDots = dotsAt0 !== null ? dotsAt0 : carriedSince / 1000;
+                if (spinner) spinner.style.animationDelay = (-(eRing % 1)).toFixed(3) + 's';
+                for (var i = 0; i < dots.length; i++) dots[i].style.animationDelay = (-(((eDots - i * 0.2) % 1.2) + 1.2) % 1.2).toFixed(3) + 's';
+                if (box) {
+                    box.style.animation = 'none';   // already on screen: no second pop-in
+                    if (window.MutationObserver) {
+                        var restore = new MutationObserver(function () {   // later showings get their pop-in back, as before
+                            if (!ov.classList.contains('hidden')) return;
+                            restore.disconnect();
+                            setTimeout(function () {
+                                box.style.animation = ''; if (spinner) spinner.style.animationDelay = '';
+                                for (var j = 0; j < dots.length; j++) dots[j].style.animationDelay = '';
+                            }, 400);
+                        });
+                        restore.observe(ov, { attributes: true, attributeFilter: ['class'] });
+                    }
+                }
+            } catch (e) { /* never affects the page */ }
+        }
+    }
+    if (ov && window.MutationObserver) {
+        new MutationObserver(function () {
+            var shown = !ov.classList.contains('hidden');
+            if (shown && shownSince === null) shownSince = Date.now();
+            if (!shown) shownSince = null;
+        }).observe(ov, { attributes: true, attributeFilter: ['class'] });
+    }
+    function animPhase(el, period) {   // ms into the current turn of an element's running CSS animation (null if unknown)
+        try {
+            if (!el || !el.getAnimations) return null;
+            var list = el.getAnimations();
+            for (var i = 0; i < list.length; i++) {
+                var a = list[i], ct = a.currentTime;
+                if (typeof ct !== 'number' || !a.effect || !a.effect.getComputedTiming) continue;
+                var delay = a.effect.getComputedTiming().delay || 0;
+                return (((ct - delay) % period) + period) % period;
+            }
+        } catch (e) {}
+        return null;
+    }
+    window.addEventListener('pagehide', function () {
+        try {
+            if (!ov || ov.classList.contains('hidden') || ov.classList.contains('success-state')) return;
+            window.sessionStorage.setItem(KEY_EPOCH, String(shownSince !== null ? shownSince : Date.now()));
+            var ringMs = animPhase(ov.querySelector('.global-loading-spinner'), 1000);
+            var dotsMs = animPhase(ov.querySelector('.global-loading-dots span'), 1200);
+            if (ringMs !== null && dotsMs !== null) window.sessionStorage.setItem(KEY_PHASE, JSON.stringify({ t: Date.now(), ring: ringMs, dots: dotsMs }));
+        } catch (e) {}
+    });
+
+    /* ── 1c) THIS PAGE'S OWN LOAD + ACTIONS (only when the page had no loading page of its own) ───────────────────── */
+    var initialPending = false, actions = 0, navActive = false;
+    var actionShownAt = 0, actionHideTimer = null, actionSafety = null, navTimer = null, navObs = null;
+    function hideIfIdle() {
+        if (!ov || initialPending || actions > 0 || navActive) return;
+        ov.classList.add('hidden');
+        ov.classList.remove('gl-instant');
+    }
+    if (!OWN_OVERLAY && ov) {
+        initialPending = true;
+        var startedAt = Date.now(), ending = false, MIN_MS = 450;
+        var endInitial = function () {
+            if (ending) return;
+            ending = true;
+            setTimeout(function () { initialPending = false; hideIfIdle(); }, Math.max(0, MIN_MS - (Date.now() - startedAt)));
+        };
+        if (document.readyState === 'complete') endInitial(); else window.addEventListener('load', endInitial);
+        setTimeout(endInitial, 4000);   // safety net if a slow asset holds up 'load'
+    }
+    // Action loading page for background saves: window.cvActionBusy('Saving') … window.cvActionIdle()
+    window.cvActionBusy = function (text) {
+        if (!ov) return;
+        actions++;
+        clearTimeout(actionHideTimer);
+        if (actions === 1) actionShownAt = Date.now();
+        if (label) label.textContent = text || 'Processing';
+        ov.classList.remove('success-state');
+        ov.classList.remove('hidden');
+        clearTimeout(actionSafety);
+        actionSafety = setTimeout(function () { actions = 0; window.cvActionIdle(); }, 60000);   // never leave the page covered
+    };
+    window.cvActionIdle = function () {
+        if (!ov) return;
+        actions = Math.max(0, actions - 1);
+        if (actions > 0) return;
+        clearTimeout(actionSafety);
+        clearTimeout(actionHideTimer);
+        actionHideTimer = setTimeout(function () {   // shown for at least 350 ms so it never just flickers
+            if (actions > 0) return;
+            hideIfIdle();
+            setTimeout(function () { if (label && actions === 0 && ov.classList.contains('hidden')) label.textContent = 'Loading'; }, 400);
+        }, Math.max(0, 350 - (Date.now() - actionShownAt)));
+    };
+
+    /* ── 1d) LEAVING THE PAGE — the loading page goes up at once and nothing may hide it until the next page opens ── */
+    var navShown = false, navWasHidden = false, navPrevLabel = null;
+    function navAttach() {
+        if (navObs || !ov || !window.MutationObserver) return;
+        navObs = new MutationObserver(function () {
+            if (navActive && ov.classList.contains('hidden')) { ov.classList.add('gl-instant'); ov.classList.remove('hidden'); }
+        });
+        navObs.observe(ov, { attributes: true, attributeFilter: ['class'] });
+    }
+    function navShow(stuckMs, text) {
+        if (!ov) return;
+        if (navShown) { if (text && label) label.textContent = text; return; }
+        navShown = true; navActive = true;
+        navAttach();
+        navWasHidden = ov.classList.contains('hidden');
+        if (navWasHidden) {
+            if (label) { navPrevLabel = label.textContent; label.textContent = text || 'Loading'; }
+            ov.classList.add('gl-instant');
+            ov.classList.remove('success-state');
+            ov.classList.remove('hidden');
+        } else if (text && label) {
+            label.textContent = text;
+        }
+        clearTimeout(navTimer);
+        navTimer = setTimeout(navReset, stuckMs || 10000);   // still here → navigation was cancelled / it was a download
+    }
+    function navReset() {
+        clearTimeout(navTimer);
+        if (!navShown) return;
+        navShown = false; navActive = false;
+        if (navWasHidden) {
+            if (actions === 0 && !initialPending) { ov.classList.add('hidden'); ov.classList.remove('gl-instant'); }
+            if (label && navPrevLabel !== null) label.textContent = navPrevLabel;
+        }
+        navWasHidden = false; navPrevLabel = null;
+    }
+    // file / export / preview URLs download or open a file instead of leaving the page — skip them
+    var FILE_RE  = /\.(pdf|xlsx?|csv|docx?|pptx?|zip|png|jpe?g|gif|webp|txt)$/i;
+    var PARAM_RE = /[?&][^=&]*(export|download|dtrdl|print|stream|pdf|preview|blob|file)[^=&]*=/i;
+    function isPageUrl(u) {
+        if (u.origin !== window.location.origin || !/^https?:$/.test(u.protocol)) return false;
+        if (FILE_RE.test(u.pathname) || PARAM_RE.test(u.search)) return false;
+        return true;
+    }
+    var lastFileClick = 0;
+    if (!OWN_NAV && ov) {
+        document.addEventListener('click', function (e) {
+            if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+            var a = e.target && e.target.closest ? e.target.closest('a[href]') : null;
+            if (!a || a.hasAttribute('download')) return;
+            var raw = (a.getAttribute('href') || '').trim();
+            if (!raw || raw.charAt(0) === '#' || /^(javascript|mailto|tel|blob|data):/i.test(raw)) return;
+            var t = (a.getAttribute('target') || '').toLowerCase();
+            if (t && t !== '_self') return;
+            var u; try { u = new URL(a.href, window.location.href); } catch (x) { return; }
+            if (!isPageUrl(u)) { lastFileClick = Date.now(); return; }
+            if (u.pathname === window.location.pathname && u.search === window.location.search && u.hash) return;   // same-page anchor
+            // decided after every other click handler has run, so links the page handles itself (unsaved-changes prompts…) are left alone
+            setTimeout(function () { if (!e.defaultPrevented) navShow(); }, 0);
+        });
+        document.addEventListener('submit', function (e) {
+            var f = e.target;
+            if (!f || f.tagName !== 'FORM') return;
+            var t = (f.getAttribute('target') || '').toLowerCase();
+            if (t && t !== '_self') return;
+            var u; try { u = new URL(f.getAttribute('action') || window.location.href, window.location.href); } catch (x) { return; }
+            if (!isPageUrl(u)) return;
+            setTimeout(function () { if (!e.defaultPrevented) navShow(); }, 0);   // AJAX forms prevent the submit — left alone
+        });
+        // reloads / redirects started by the page's own script (registered last, so a "leave without saving?" prompt is seen first)
+        document.addEventListener('DOMContentLoaded', function () {
+            window.addEventListener('beforeunload', function (e) {
+                if (e.defaultPrevented) return;                          // the browser is asking "leave this page?" — not leaving yet
+                if (Date.now() - lastFileClick < 2000) return;           // most likely a file download
+                navShow(8000);
+            });
+        });
+    }
+
+    /* Back / Forward restore: a page kept in the browser's memory is reloaded from the server, so a logged-out visitor
+       is sent to login.php instead of seeing the old page; the loading page covers the old view meanwhile. */
+    window.addEventListener('pageshow', function (e) {
+        if (!e.persisted) return;
+        navReset();
+        if (ov) { ov.classList.remove('success-state'); ov.classList.remove('hidden'); }
+        window.location.reload();
+    });
+
+    /* ── 2) LOGOUT CONFIRMATION POPUP + "LOGGING OUT" LOADING PAGE ───────────────────────────────────────────────── */
+    var LOGOUT_SELECTOR = '.logout-link a[href*="logout=1"]';
+    var pendingHref = null, loggingOut = false, lastFocus = null, stuckTimer = null;
+    var popup = document.createElement('div');
+    popup.className = 'cv-logout-overlay';
+    popup.id = 'cvLogoutConfirm';
+    popup.setAttribute('role', 'dialog');
+    popup.setAttribute('aria-modal', 'true');
+    popup.setAttribute('aria-labelledby', 'cvLogoutTitle');
+    popup.setAttribute('aria-describedby', 'cvLogoutMsg');
+    popup.innerHTML =
+        '<div class="cv-logout-box">' +
+            '<h3 id="cvLogoutTitle"><i class="fas fa-sign-out-alt"></i> Log Out</h3>' +
+            '<p id="cvLogoutMsg">Are you sure you want to Log out? You need to login again to access your Account.</p>' +
+            '<div class="cv-logout-actions">' +
+                '<button type="button" class="cv-logout-btn ghost" data-cv-logout="cancel">Cancel</button>' +
+                '<button type="button" class="cv-logout-btn" data-cv-logout="ok"><i class="fas fa-sign-out-alt"></i> Log out</button>' +
+            '</div>' +
+        '</div>';
+    (document.body || root).appendChild(popup);
+    var btnCancel = popup.querySelector('[data-cv-logout="cancel"]');
+    var btnOk     = popup.querySelector('[data-cv-logout="ok"]');
+
+    function isOpen() { return popup.classList.contains('show'); }
+    function openConfirm(href) {
+        pendingHref = href;
+        lastFocus = document.activeElement;
+        popup.classList.add('show');
+        setTimeout(function () { btnCancel.focus(); }, 30);
+    }
+    function closeConfirm() {
+        popup.classList.remove('show');
+        pendingHref = null;
+        if (lastFocus && lastFocus.focus) { try { lastFocus.focus(); } catch (e) {} }
+    }
+    function showLoggingOut() {
+        if (!ov) return;
+        ov.removeAttribute('data-initial');   // pages with a first-load cover: it must not hide this one
+        navShow(15000, 'Logging out');
+        if (label) label.textContent = 'Logging out';
+    }
+    function hideLoggingOut() {
+        navReset();
+        if (ov && ov.classList.contains('hidden') === false && actions === 0 && !initialPending) ov.classList.add('hidden');
+        if (label) label.textContent = 'Loading';
+    }
+    function confirmLogout() {
+        if (!pendingHref) return;
+        var href = pendingHref;
+        popup.classList.remove('show');
+        pendingHref = null;
+        loggingOut = true;
+        showLoggingOut();
+        // safety: if the browser never leaves (e.g. the server cannot be reached), give the page back
+        clearTimeout(stuckTimer);
+        stuckTimer = setTimeout(function () { if (loggingOut) { loggingOut = false; hideLoggingOut(); } }, 15000);
+        setTimeout(function () { window.location.href = href; }, 60);   // lets "Logging out" paint first
+    }
+    // Caught before any other click handler (capture phase). A page may veto it with window.cvLogoutGuard() === false
+    // (student_report.php does while the report has unsaved entries: its own "unsaved changes" prompt handles the click).
+    function intercept(e) {
+        var a = e.target && e.target.closest ? e.target.closest(LOGOUT_SELECTOR) : null;
+        if (!a) return;
+        if (e.type === 'auxclick' && e.button !== 1) return;
+        try { if (typeof window.cvLogoutGuard === 'function' && window.cvLogoutGuard() === false) return; } catch (x) {}
+        e.preventDefault();
+        if (loggingOut) return;
+        openConfirm(a.href);
+    }
+    document.addEventListener('click', intercept, true);
+    document.addEventListener('auxclick', intercept, true);
+    btnCancel.addEventListener('click', closeConfirm);
+    btnOk.addEventListener('click', confirmLogout);
+    popup.addEventListener('click', function (e) { if (e.target === popup) closeConfirm(); });
+    document.addEventListener('keydown', function (e) {
+        if (!isOpen()) return;
+        if (e.key === 'Escape') { e.preventDefault(); closeConfirm(); }
+        else if (e.key === 'Tab') {        // keep keyboard focus inside the popup
+            if (e.shiftKey && document.activeElement === btnCancel) { e.preventDefault(); btnOk.focus(); }
+            else if (!e.shiftKey && document.activeElement === btnOk) { e.preventDefault(); btnCancel.focus(); }
+        }
+    });
+    // While leaving, keep the label "Logging out" (the pages' own leave handlers reset it to "Loading")
+    document.addEventListener('DOMContentLoaded', function () {
+        window.addEventListener('beforeunload', function () { if (loggingOut) showLoggingOut(); });
+    });
+    window.addEventListener('pageshow', function (e) {
+        if (!e.persisted) return;
+        loggingOut = false; clearTimeout(stuckTimer);
+        popup.classList.remove('show'); pendingHref = null;
+    });
+})();
+</script>
 
 <!-- SIDEBAR -->
 <div id="sidebar" class="sidebar">
     <div class="sidebar-header">
+        <?php $sidebarFullName = preg_replace('/\s+/', ' ', trim((string)$full_name)) ?: 'Student'; ?>
         <div class="sidebar-user-info">
-            <span class="sidebar-user-name" title="<?php echo htmlspecialchars($full_name); ?>"><?php echo htmlspecialchars($full_name); ?></span>
+            <span class="sidebar-user-name" title="<?php echo htmlspecialchars($sidebarFullName); ?>"><?php echo htmlspecialchars($sidebarFullName); ?></span>
             <span class="sidebar-user-role">OJT Trainee</span>
         </div>
         <button id="toggleBtn" class="toggle-btn"><i class="fas fa-bars"></i></button>
     </div>
     <div class="sidebar-links">
-        <a href="student_profile.php"><i class="fas fa-user-circle"></i><span class="link-text">My Profile</span></a>
+        <a href="student_profile.php" style="position:relative;"><i class="fas fa-user-circle"></i><span class="link-text">My Profile</span><!-- NEW (OJT trainee group chat): unread messages in the group chat with the company --><span class="sidebar-badge-chat" id="sidebarChatBadge" style="display:none"></span></a>
         <a href="company_list.php"><i class="fas fa-building"></i><span class="link-text">Company List</span></a>
         <a href="AccomForm.php"><i class="fas fa-file-contract"></i><span class="link-text">Requirements</span></a>
         <a href="student_attendance.php">
@@ -1307,7 +2566,7 @@ while (ob_get_level() > 0) { ob_end_clean(); }
         <a href="student_dashboard.php"><i class="fas fa-tachometer-alt"></i><span class="link-text">Dashboard</span></a>
     </div>
     <div class="logout-link">
-        <a href="login.php"><i class="fas fa-sign-out-alt"></i><span class="link-text" style="margin-left:10px;">Logout</span></a>
+        <a href="login.php?logout=1"><i class="fas fa-sign-out-alt"></i><span class="link-text" style="margin-left:10px;">Logout</span></a>
     </div>
 </div>
 
@@ -1328,23 +2587,32 @@ while (ob_get_level() > 0) { ob_end_clean(); }
     <div id="anb-progress" class="anb-progress" style="width:100%;"></div>
 </div>
 
-<!-- SUBMIT CONFIRM MODAL -->
-<div class="confirm-overlay" id="confirmOverlay">
+<!-- SUBMIT CONFIRM MODAL
+     Summary-card design: header (icon tile + title + week), friendly intro, summary rows
+     (Training Station / Entries / Words), optional amber heads-up for blank present days,
+     and the "cannot be edited" note. IDs confirmOverlay / confirmSubmitBtn / confirmCancelBtn
+     and the showConfirmModal() Promise contract are unchanged. -->
+<div class="confirm-overlay" id="confirmOverlay" role="dialog" aria-modal="true" aria-labelledby="confirmTitle" aria-describedby="confirmIntro">
     <div class="confirm-box">
-        <div class="confirm-header">
-            <div class="confirm-header-icon"></div>
-            <div class="confirm-header-title">Submit Weekly Report?</div>
+        <div class="cf-head">
+            <div class="cf-head-icon"><i class="fas fa-paper-plane"></i></div>
+            <div class="cf-head-text">
+                <div class="cf-head-title" id="confirmTitle">Submit your weekly report?</div>
+                <div class="cf-head-sub" id="confirmWeekLabel"></div>
+            </div>
         </div>
         <div class="confirm-body">
-            <p>You are about to submit your report for this week. Please make sure all your entries are complete and accurate.</p>
-            <div class="confirm-warning">
-                <span class="confirm-warning-icon"></span>
-                <span>This <strong>cannot be edited</strong> after submission. Review all entries before confirming.</span>
+            <p id="confirmIntro">Almost there! Here&rsquo;s a quick summary of your report. Please make sure everything looks right.</p>
+            <div class="cf-summary" id="confirmSummary"></div>
+            <div class="cf-notice" id="confirmNotice" style="display:none;"></div>
+            <div class="cf-note">
+                <i class="fas fa-lock"></i>
+                <span>Once submitted, your report <strong>cannot be edited</strong>.</span>
             </div>
         </div>
         <div class="confirm-footer">
-            <button class="btn-confirm-cancel" id="confirmCancelBtn">Cancel</button>
-            <button class="btn-confirm-submit" id="confirmSubmitBtn">Yes, Submit</button>
+            <button type="button" class="btn-confirm-cancel" id="confirmCancelBtn"><i class="fas fa-arrow-left"></i> Go Back</button>
+            <button type="button" class="btn-confirm-submit" id="confirmSubmitBtn"><i class="fas fa-paper-plane"></i> Submit Report</button>
         </div>
     </div>
 </div>
@@ -1409,7 +2677,7 @@ while (ob_get_level() > 0) { ob_end_clean(); }
         </div>
 
         <!-- Report Form -->
-        <form method="POST" action="student_report.php" id="journalForm">
+        <form method="POST" action="student_report.php" id="journalForm" novalidate>
             <input type="hidden" name="submit_journal" value="1">
             <input type="hidden" name="week_start"     value="<?php echo $week_start; ?>">
             <input type="hidden" name="company_id"     value="<?php echo $company_id; ?>">
@@ -1420,7 +2688,7 @@ while (ob_get_level() > 0) { ob_end_clean(); }
             <div class="training-card">
                 <div class="training-card-label">
                     <i class="fas fa-map-marker-alt"></i>
-                    Training Station
+                    Training Station <span class="training-req" aria-hidden="true">*</span>
                 </div>
                 <input
                     type="text"
@@ -1430,11 +2698,14 @@ while (ob_get_level() > 0) { ob_end_clean(); }
                     placeholder="e.g. IT Department, 3rd Floor Admin Building"
                     autocomplete="off"
                     maxlength="150"
+                    required
+                    aria-required="true"
+                    aria-describedby="trainingStationError"
                     <?php echo $disableSubmit ? 'disabled' : ''; ?>>
+                <div class="training-error" id="trainingStationError" role="alert"></div>
             </div>
 
             <div class="timeline-wrap">
-                <div class="timeline-line"></div>
 
                 <?php foreach ($days as $i => $date):
                     $att        = $attendance[$date] ?? null;
@@ -1447,19 +2718,8 @@ while (ob_get_level() > 0) { ob_end_clean(); }
                     }
                     $disabled   = (!$is_present || $disableSubmit) ? 'disabled' : '';
                     $day_key    = strtolower($day_labels[$i]);
-                    $day_abbr   = strtoupper(substr($day_labels[$i], 0, 1));
                 ?>
                 <div class="tl-item">
-                    <div class="tl-dot <?php echo $disableSubmit ? 'submitted' : ($is_present ? 'present' : 'absent'); ?>">
-                        <?php if ($disableSubmit): ?>
-                            <i class="fas fa-check" style="font-size:.7rem;"></i>
-                        <?php elseif ($is_present): ?>
-                            <?php echo $day_abbr; ?>
-                        <?php else: ?>
-                            <i class="fas fa-minus" style="font-size:.65rem;"></i>
-                        <?php endif; ?>
-                    </div>
-
                     <div class="tl-card <?php echo !$is_present ? 'absent-card' : ''; ?>">
                         <div class="tl-card-head">
                             <div class="tl-card-head-left">
@@ -1667,7 +2927,7 @@ while (ob_get_level() > 0) { ob_end_clean(); }
 <!-- UNSAVED DRAFT MODAL -->
 <div class="unsaved-overlay" id="unsavedOverlay">
     <div class="unsaved-box">
-        <div class="unsaved-icon"></div>
+        <div class="unsaved-icon"><i class="fas fa-floppy-disk"></i></div>
         <div class="unsaved-content">
             <h3>You have unsaved entries!</h3>
             <p>You've typed in one or more report fields but haven't saved a draft yet. Save your progress before leaving?</p>
@@ -1719,7 +2979,7 @@ function saveDraft() {
     localStorage.setItem(DRAFT_KEY, JSON.stringify(draft));
     _isDirty = false;
     setDraftStatus('saved');
-    showSubmitPopup('success', 'Draft Saved', 'Your report entries have been saved locally. You can continue editing anytime.', false, null);
+    showSubmitPopup('success', 'Draft Saved!', 'Nice work \u2014 your progress is safely saved. You can pick up right where you left off whenever you\u2019re ready.', false, null);
 }
 function loadDraft() {
     if (IS_SUBMITTED) return;
@@ -1770,7 +3030,7 @@ let _pendingNavUrl = null;
 function hasUnsavedContent() { return !IS_SUBMITTED && _isDirty; }
 function showUnsavedModal(targetUrl) { _pendingNavUrl = targetUrl || null; document.getElementById('unsavedOverlay').classList.add('open'); }
 function hideUnsavedModal() { document.getElementById('unsavedOverlay').classList.remove('open'); }
-function unsavedSaveAndStay() { saveDraftSilent(); hideUnsavedModal(); showSubmitPopup('success', 'Draft Saved', 'Your entries have been saved. You can continue editing.', false, null); }
+function unsavedSaveAndStay() { saveDraftSilent(); hideUnsavedModal(); showSubmitPopup('success', 'Draft Saved!', 'Your entries are safely saved. Take your time and continue whenever you\u2019re ready.', false, null); }
 function unsavedDiscard() { _allowNavigation = true; hideUnsavedModal(); if (_pendingNavUrl) window.location.href = _pendingNavUrl; else history.back(); }
 function unsavedCancel() { _pendingNavUrl = null; hideUnsavedModal(); }
 document.addEventListener('click', function(e) {
@@ -1780,12 +3040,14 @@ document.addEventListener('click', function(e) {
     if (!_allowNavigation && hasUnsavedContent()) { e.preventDefault(); showUnsavedModal(anchor.href); }
 });
 window.addEventListener('beforeunload', function(e) { if (!_allowNavigation && hasUnsavedContent()) { e.preventDefault(); e.returnValue = 'You have unsaved report entries. Leave without saving?'; return e.returnValue; } });
+/* Logout popup: while the report has unsaved entries the "unsaved changes" prompt above handles the Logout click instead. */
+window.cvLogoutGuard = function() { return !( !_allowNavigation && hasUnsavedContent() ); };
 
 /* ── SUBMISSION POPUP ── */
 function togglePopupDetail() { const d = document.getElementById('submitPopupDetail'); const b = document.getElementById('submitPopupDetailToggle'); d.classList.toggle('visible'); b.textContent = d.classList.contains('visible') ? 'Hide technical details' : 'Show technical details'; }
 function showSubmitPopup(type, title, message, showRetry, errorDetail) {
     const overlay = document.getElementById('submitPopupOverlay'); const iconEl = document.getElementById('submitPopupIcon'); const titleEl = document.getElementById('submitPopupTitle'); const msgEl = document.getElementById('submitPopupMessage'); const actionsEl = document.getElementById('submitPopupActions'); const okBtn = document.getElementById('submitPopupOkBtn'); const detailEl = document.getElementById('submitPopupDetail'); const detailBtn = document.getElementById('submitPopupDetailToggle');
-    iconEl.className = 'submit-popup-icon ' + type; iconEl.textContent = type === 'success' ? '' : ''; titleEl.textContent = title; msgEl.innerHTML = message;
+    iconEl.className = 'submit-popup-icon ' + type; iconEl.innerHTML = type === 'success' ? '<i class="fas fa-circle-check"></i>' : '<i class="fas fa-circle-exclamation"></i>'; titleEl.textContent = title; msgEl.innerHTML = message;
     if (errorDetail) { detailEl.textContent = errorDetail; detailEl.classList.remove('visible'); detailBtn.classList.add('visible'); detailBtn.textContent = 'Show technical details'; } else { detailEl.classList.remove('visible'); detailBtn.classList.remove('visible'); }
     if (showRetry) {
         okBtn.className = 'btn-popup-ok error-btn'; okBtn.textContent = 'Close';
@@ -1799,26 +3061,144 @@ function showSubmitPopup(type, title, message, showRetry, errorDetail) {
 function closeSubmitPopup() { document.getElementById('submitPopupOverlay').classList.remove('open'); }
 document.getElementById('submitPopupOverlay').addEventListener('click', function(e) { if (e.target === this) closeSubmitPopup(); });
 
-/* ── SUBMIT CONFIRM MODAL ── */
+/* ── SUBMIT CONFIRM MODAL ──
+   Same Promise contract as before: showConfirmModal() resolves when the
+   student confirms and rejects when they cancel / press Esc / click outside.
+   Enhanced to render a live summary of the form before confirming. */
 let _confirmResolve = null;
 let _confirmReject  = null;
+let _confirmLastFocus = null;
+const _CONFIRM_SUBMIT_LABEL = (function() { const b = document.getElementById('submitBtn'); return b ? (b.textContent || '').trim() : ''; })();
+
+function _cfWordCount(text) { const t = (text || '').trim(); return t === '' ? 0 : t.split(/\s+/).length; }
+function _cfEl(tag, cls, text) { const el = document.createElement(tag); if (cls) el.className = cls; if (text !== undefined) el.textContent = text; return el; }
+function _cfJoinNames(names) { if (names.length <= 1) return names.join(''); if (names.length === 2) return names.join(' and '); return names.slice(0, -1).join(', ') + ', and ' + names[names.length - 1]; }
+
+/* Reads the form's current state. Never throws — returns null on failure so
+   the modal can still open with its generic text. */
+function buildConfirmSummary() {
+    try {
+        const days = [];
+        dayKeys.forEach(function(d) {
+            const ta = document.getElementById('tasks_' + d);
+            if (!ta) return;
+            const item = ta.closest('.tl-item');
+            const nameEl = item ? item.querySelector('.tl-day-name') : null;
+            const dateEl = item ? item.querySelector('.tl-day-date') : null;
+            const value  = ta.value || '';
+            const present = !ta.disabled;
+            days.push({
+                name: nameEl ? nameEl.textContent.trim() : (d.charAt(0).toUpperCase() + d.slice(1)),
+                date: dateEl ? dateEl.textContent.trim() : '',
+                present: present,
+                text: value.trim(),
+                words: present ? _cfWordCount(value) : 0
+            });
+        });
+        if (!days.length) return null;
+        const present = days.filter(function(x) { return x.present; });
+        const written = present.filter(function(x) { return x.text !== ''; });
+        const tsEl = document.getElementById('trainingStationInput');
+        return {
+            days: days,
+            station: tsEl ? (tsEl.value || '').trim() : '',
+            presentCount: present.length,
+            writtenCount: written.length,
+            totalWords: written.reduce(function(sum, x) { return sum + x.words; }, 0),
+            missing: present.filter(function(x) { return x.text === ''; }).map(function(x) { return x.name; }),
+            weekLabel: (days[0].date && days[days.length - 1].date) ? days[0].date + ' \u2013 ' + days[days.length - 1].date : '',
+            isResubmit: /^resubmit/i.test(_CONFIRM_SUBMIT_LABEL)
+        };
+    } catch (err) { return null; }
+}
+
+function renderConfirmSummary() {
+    const sum = buildConfirmSummary();
+    const $ = function(id) { return document.getElementById(id); };
+    const summaryEl = $('confirmSummary'), notice = $('confirmNotice');
+    const weekEl = $('confirmWeekLabel'), titleEl = $('confirmTitle'), introEl = $('confirmIntro'), yesBtn = $('confirmSubmitBtn');
+    if (summaryEl) summaryEl.innerHTML = '';
+    if (notice) { notice.innerHTML = ''; notice.style.display = 'none'; }
+    if (!sum) { if (weekEl) weekEl.textContent = ''; return; } /* graceful fallback: generic text only */
+    if (weekEl) weekEl.textContent = sum.weekLabel ? 'Week of ' + sum.weekLabel : '';
+    if (titleEl) titleEl.textContent = sum.isResubmit ? 'Resubmit your weekly report?' : 'Submit your weekly report?';
+    if (introEl) introEl.textContent = sum.isResubmit
+        ? 'Thanks for making the corrections! This will replace the report that was returned to you.'
+        : 'Almost there! Here\u2019s a quick summary of your report. Please make sure everything looks right.';
+    if (yesBtn) yesBtn.innerHTML = '<i class="fas fa-paper-plane"></i> ' + (sum.isResubmit ? 'Resubmit Report' : 'Submit Report');
+
+    function addRow(icon, label, value, cls, trailingIcon) {
+        if (!summaryEl) return;
+        const row = _cfEl('div', 'cf-row');
+        const lab = _cfEl('div', 'cf-row-label'); lab.appendChild(_cfEl('i', 'fas ' + icon)); lab.appendChild(document.createTextNode(label));
+        const val = _cfEl('div', 'cf-row-value' + (cls ? ' ' + cls : ''), value);
+        if (trailingIcon) val.appendChild(_cfEl('i', 'fas ' + trailingIcon));
+        row.appendChild(lab); row.appendChild(val); summaryEl.appendChild(row);
+    }
+    const complete = sum.presentCount > 0 && sum.writtenCount === sum.presentCount;
+    addRow('fa-location-dot', 'Training Station', sum.station || 'Not provided');
+    addRow('fa-list-check', 'Entries written', sum.writtenCount + ' of ' + sum.presentCount + (sum.presentCount === 1 ? ' day' : ' days'), complete ? 'ok' : 'warn', complete ? 'fa-circle-check' : 'fa-circle-exclamation');
+    addRow('fa-font', 'Total words', sum.totalWords + (sum.totalWords === 1 ? ' word' : ' words'));
+
+    if (notice && sum.missing.length) {
+        const names = _cfJoinNames(sum.missing).replace(/[&<>"']/g, '');
+        notice.innerHTML = '<i class="fas fa-circle-info"></i><span></span>';
+        notice.querySelector('span').innerHTML = '<strong>Heads up:</strong> you were present on <strong>' + names + '</strong> but ' + (sum.missing.length === 1 ? 'there is no entry for that day' : 'there are no entries for those days') + '. Go back to add ' + (sum.missing.length === 1 ? 'it' : 'them') + ', or continue if that\u2019s intentional.';
+        notice.style.display = 'flex';
+    }
+}
+
+function _cfFocusables() {
+    const box = document.querySelector('#confirmOverlay .confirm-box');
+    return box ? Array.prototype.slice.call(box.querySelectorAll('button:not([disabled])')) : [];
+}
+function _cfSettle(accepted) {
+    const resolve = _confirmResolve, reject = _confirmReject;
+    _confirmResolve = null; _confirmReject = null;
+    closeConfirmModal();
+    if (accepted) { if (resolve) resolve(); } else if (reject) { reject(); }
+}
 function showConfirmModal() {
     return new Promise(function(resolve, reject) {
+        const overlay = document.getElementById('confirmOverlay');
+        if (!overlay) { /* markup missing — fall back to the browser dialog so submit still works */
+            if (window.confirm('Submit your weekly report? It cannot be edited after submission.')) resolve(); else reject();
+            return;
+        }
+        if (_confirmReject) { try { _confirmReject(); } catch (e) {} } /* settle any stale pending promise */
         _confirmResolve = resolve; _confirmReject = reject;
-        document.getElementById('confirmOverlay').classList.add('open');
+        try { renderConfirmSummary(); } catch (err) { /* summary is optional — never block the confirm */ }
+        _confirmLastFocus = document.activeElement;
+        const yes = document.getElementById('confirmSubmitBtn'), no = document.getElementById('confirmCancelBtn');
+        if (yes) yes.disabled = false; if (no) no.disabled = false;
+        overlay.classList.add('open');
+        const body = overlay.querySelector('.confirm-body'); if (body) body.scrollTop = 0;
+        if (no) { try { no.focus(); } catch (e) {} } /* safest default: focus the non-destructive action */
     });
 }
-function closeConfirmModal() { document.getElementById('confirmOverlay').classList.remove('open'); }
+function closeConfirmModal() {
+    const overlay = document.getElementById('confirmOverlay');
+    if (overlay) overlay.classList.remove('open');
+    if (_confirmLastFocus && typeof _confirmLastFocus.focus === 'function') { try { _confirmLastFocus.focus(); } catch (e) {} }
+    _confirmLastFocus = null;
+}
 document.getElementById('confirmSubmitBtn').addEventListener('click', function() {
-    closeConfirmModal();
-    if (_confirmResolve) { _confirmResolve(); _confirmResolve = null; _confirmReject = null; }
+    this.disabled = true; /* guard against double-clicks; re-enabled on next open */
+    _cfSettle(true);
 });
-document.getElementById('confirmCancelBtn').addEventListener('click', function() {
-    closeConfirmModal();
-    if (_confirmReject) { _confirmReject(); _confirmResolve = null; _confirmReject = null; }
-});
-document.getElementById('confirmOverlay').addEventListener('click', function(e) {
-    if (e.target === this) { closeConfirmModal(); if (_confirmReject) { _confirmReject(); _confirmResolve = null; _confirmReject = null; } }
+document.getElementById('confirmCancelBtn').addEventListener('click', function() { _cfSettle(false); });
+document.getElementById('confirmOverlay').addEventListener('click', function(e) { if (e.target === this) _cfSettle(false); });
+document.addEventListener('keydown', function(e) {
+    const overlay = document.getElementById('confirmOverlay');
+    if (!overlay || !overlay.classList.contains('open')) return;
+    if (e.key === 'Escape') { e.preventDefault(); _cfSettle(false); return; }
+    if (e.key === 'Tab') { /* keep keyboard focus inside the dialog */
+        const f = _cfFocusables(); if (!f.length) return;
+        const first = f[0], last = f[f.length - 1];
+        if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+        else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+        else if (f.indexOf(document.activeElement) === -1) { e.preventDefault(); first.focus(); }
+    }
 });
 
 /* ══════════════════════════════════════════════════════════════
@@ -2147,10 +3527,37 @@ function closeDTRModalOnOverlay(e) {
 }
 function onDTRMonthChange() { _updateDTRMonthLabel(); loadDTRIntoModal(); }
 
+/* ── TRAINING STATION (required) ── */
+function setTrainingStationError(msg) {
+    const input = document.getElementById('trainingStationInput'), err = document.getElementById('trainingStationError');
+    if (!input) return;
+    if (msg) {
+        input.classList.add('invalid'); input.setAttribute('aria-invalid', 'true');
+        if (err) { err.innerHTML = '<i class="fas fa-circle-exclamation"></i>'; err.appendChild(document.createTextNode(msg)); err.style.display = 'block'; }
+    } else {
+        input.classList.remove('invalid'); input.removeAttribute('aria-invalid');
+        if (err) { err.textContent = ''; err.style.display = 'none'; }
+    }
+}
+/* Returns true when OK (or when the field isn't applicable, e.g. already submitted). */
+function validateTrainingStation(focusOnError) {
+    const input = document.getElementById('trainingStationInput');
+    if (!input || input.disabled) return true;
+    if (input.value.trim() !== '') { setTrainingStationError(''); return true; }
+    setTrainingStationError('Training Station is required. Please enter where you are assigned (e.g. IT Department, 3rd Floor Admin Building).');
+    if (focusOnError) {
+        try { input.scrollIntoView({ behavior: 'smooth', block: 'center' }); input.focus({ preventScroll: true }); }
+        catch (err) { try { input.focus(); } catch (err2) {} }
+    }
+    return false;
+}
+(function() { const ti = document.getElementById('trainingStationInput'); if (ti) ti.addEventListener('input', function() { if (this.value.trim() !== '') setTrainingStationError(''); }); })();
+
 /* ── FORM SUBMISSION ── */
 document.getElementById('journalForm').addEventListener('submit', function(e) {
     e.preventDefault();
     const form = this;
+    if (!validateTrainingStation(true)) return;
     const active = form.querySelectorAll('textarea:not([disabled])'); let filled = false;
     active.forEach(t => { if (t.value.trim()) filled = true; });
     if (!filled) { showSubmitPopup('error', 'Empty Report', 'Please fill in at least one day entry before submitting.', false, null); return; }
@@ -2158,7 +3565,9 @@ document.getElementById('journalForm').addEventListener('submit', function(e) {
         const submitBtn = document.getElementById('submitBtn');
         if (submitBtn) { submitBtn.disabled = true; submitBtn.classList.add('loading'); submitBtn.textContent = 'Submitting...'; }
         const formData = new FormData(form);
+        if (window.cvActionBusy) window.cvActionBusy('Submitting report');   /* action loading page */
         fetch('student_report.php?ajax=1', { method: 'POST', body: formData, headers: { 'X-Requested-With': 'XMLHttpRequest', 'Accept': 'application/json' } })
+        .finally(function() { if (window.cvActionIdle) window.cvActionIdle(); })
         .then(function(response) { const status = response.status; return response.text().then(text => ({ status, text })); })
         .then(function({ status, text: rawText }) {
             let data;
@@ -2169,7 +3578,7 @@ document.getElementById('journalForm').addEventListener('submit', function(e) {
             }
             if (data.success) {
                 _isDirty = false; _allowNavigation = true; clearDraft(); showFlash(data.message);
-                showSubmitPopup('success', 'Report Submitted!', '<strong>Your weekly report has been submitted successfully!</strong><br><br>You can view your submission in the Report History.', false, null);
+                showSubmitPopup('success', 'Great Job \u2014 Report Submitted!', '<strong>Thank you! Your weekly report has been submitted successfully.</strong><br><br>We appreciate your hard work this week. You can review your submission anytime in the Report History.', false, null);
                 silentPoll(true);
             } else {
                 if (submitBtn) { submitBtn.disabled = false; submitBtn.classList.remove('loading'); submitBtn.textContent = 'Submit Weekly Report'; }
@@ -2322,7 +3731,7 @@ function _anbShow(info) {
         if (rem <= 0) { _anbHide(_anb.currentType); return; }
         const m = Math.floor(rem / 60);
         const s = rem % 60;
-        document.getElementById('anb-countdown').textContent = '⏳ ' + m + 'm ' + String(s).padStart(2, '0') + 's left';
+        document.getElementById('anb-countdown').textContent = m + 'm ' + String(s).padStart(2, '0') + 's left';
     }
     tick();
     _anb.tickInterval = setInterval(tick, 1000);
@@ -2383,6 +3792,125 @@ function _anbWatch() {
     }
 })();
 setInterval(_anbWatch, 30000);
+</script>
+
+<script>
+/* NEW (registration guard): the company removed this student → back to student_profile.php (side menu locked again).
+   Asked every few seconds; two "not registered" answers in a row are needed, so a registration being written
+   (assignment first, status a moment later) can never bounce the student. */
+(function () {
+    var misses = 0, busy = false, going = false;
+    function check() {
+        if (busy || going) return;
+        busy = true;
+        fetch('student_report.php?poll_registration=1', { credentials: 'same-origin', cache: 'no-store' })
+            .then(function (r) { return r.ok ? r.json() : null; })
+            .then(function (d) {
+                if (!d) return;
+                if (d.registered === false) {
+                    misses++;
+                    if (misses >= 2) { going = true; window.location.replace('student_profile.php?unregistered=1'); }
+                    else setTimeout(check, 1200);
+                } else { misses = 0; }
+            })
+            .catch(function () { /* silent - retried on the next interval */ })
+            .then(function () { busy = false; });
+    }
+    setInterval(check, 5000);
+    document.addEventListener('visibilitychange', function () { if (!document.hidden) check(); });
+})();
+</script>
+<!-- ══════════════════════════════════════════════════════════════════════
+     NEW (OJT trainee group chat) — NEW-MESSAGE POPUP + SIDE-MENU INDICATOR (same as student_profile.php)
+     ------------------------------------------------------------------------
+     When someone writes in the group chat with the student's company (the chat itself lives on student_profile.php),
+     this page shows:
+       • the same navy popup ("<Name> sent a message in OJT Trainee Group Chat") — clicking it opens the chat on
+         student_profile.php;
+       • a live red count on the "My Profile" side-menu link.
+     The counts come from student_profile.php?gc_load=1&peek=1 (read-only; only while the student is registered to a
+     company). Same rules as the other popups: messages already waiting when the page opens are the baseline (no
+     popup); seen ids are kept briefly in sessionStorage (shared with student_profile.php, so moving between pages
+     never repeats a popup); checked right away, then every 5 s (paused while the tab is hidden).
+     Self-contained: no existing function, poller or style is changed.
+     ══════════════════════════════════════════════════════════════════════ -->
+<style>
+    .sidebar-badge-chat { background:#dc2626; color:#fff; font-weight:800; text-align:center; box-sizing:border-box; min-width:18px; height:18px; padding:0 3px; border-radius:50%; font-size:10px; line-height:18px; display:inline-flex; align-items:center; justify-content:center; position:absolute; right:18px; top:50%; transform:translateY(-50%); animation:ccBadgePulse 2s ease-in-out infinite; }
+    .sidebar.collapsed .sidebar-badge-chat { right:14px; top:10px; transform:none; }
+    @keyframes ccBadgePulse { 0%, 100% { box-shadow:0 0 0 0 rgba(220,38,38,0.55); } 50% { box-shadow:0 0 0 6px rgba(220,38,38,0); } }
+    .cv-top-toast.cc-go { position:fixed; top:30px; left:50%; transform:translateX(-50%); background:#1B2A4A; color:#E3E8F1; border:1px solid #55668C; border-radius:0; padding:14px 20px; box-shadow:0 8px 24px rgba(27,42,74,0.30); display:flex; align-items:center; gap:12px; font-family:'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; font-size:12.5px; line-height:1.45; z-index:10020; max-width:440px; opacity:0; transition:opacity 0.35s, top 0.3s ease, background-color 0.15s ease; pointer-events:auto; cursor:pointer; }
+    .cv-top-toast.cc-go.show { opacity:1; }
+    .cv-top-toast.cc-go:hover { background:#24375E; }
+    .cv-top-toast.cc-go:focus-visible { outline:2px solid #F7C600; outline-offset:2px; }
+    .cv-top-toast.cc-go i { color:#8FD18F; font-size:18px; flex-shrink:0; }
+    .cv-top-toast.cc-go strong { color:#ffffff; font-weight:700; }
+    .cv-top-toast.cc-go .cv-toast-go { flex-shrink:0; margin-left:6px; color:#F7C600; font-size:10.5px; font-weight:700; text-transform:uppercase; letter-spacing:0.4px; white-space:nowrap; }
+    .cv-top-toast.cc-go .cv-toast-go i { color:inherit; font-size:9px; margin-left:3px; }
+</style>
+<script>
+(function () {
+    'use strict';
+    if (window._cvStudentChatNotifyReady) return;
+    window._cvStudentChatNotifyReady = true;
+    var ENDPOINT = 'student_profile.php?gc_load=1&peek=1', POLL_MS = 5000, TOAST_MS = 7000, STORE_KEY = 'cvStudentGroupChatKnownIds', STORE_FRESH = 45000;
+    var known = null, inFlight = false;
+
+    function esc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
+    function readStore() { try { var o = JSON.parse(sessionStorage.getItem(STORE_KEY) || 'null'); if (o && Array.isArray(o.ids) && Date.now() - (o.ts || 0) <= STORE_FRESH) return new Set(o.ids.map(String)); } catch (e) {} return null; }
+    function writeStore() { if (!known) return; try { sessionStorage.setItem(STORE_KEY, JSON.stringify({ ids: Array.from(known), ts: Date.now() })); } catch (e) {} }
+    function layoutToasts() {
+        var top = 30, undo = document.getElementById('undoToast');
+        if (undo && undo.classList && undo.classList.contains('show')) top = Math.max(top, undo.getBoundingClientRect().bottom + 12);
+        document.querySelectorAll('.cv-top-toast').forEach(function (el) { el.style.top = top + 'px'; top += el.offsetHeight + 12; });
+    }
+    function goChat() { window.location.href = 'student_profile.php?open_chat=1'; }
+    function popup(who, text) {
+        var div = document.createElement('div');
+        div.className = 'cv-top-toast cc-go'; div.setAttribute('role', 'status'); div.setAttribute('tabindex', '0');
+        div.innerHTML = '<i class="fas fa-comment-dots"></i><span><strong>' + esc(who) + '</strong> ' + esc(text) + '</span><span class="cv-toast-go">View <i class="fas fa-chevron-right"></i></span>';
+        div.addEventListener('click', goChat);
+        div.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); goChat(); } });
+        document.body.appendChild(div); layoutToasts();
+        requestAnimationFrame(function () { div.classList.add('show'); });
+        setTimeout(function () { div.classList.remove('show'); setTimeout(function () { div.remove(); layoutToasts(); }, 400); }, TOAST_MS);
+    }
+    function setBadge(n) {
+        n = parseInt(n, 10) || 0;
+        var b = document.getElementById('sidebarChatBadge');
+        if (b) { b.textContent = n > 99 ? '99+' : n; b.style.display = n > 0 ? '' : 'none'; }
+    }
+    function poll() {
+        if (inFlight || document.hidden) return;
+        inFlight = true;
+        fetch(ENDPOINT, { credentials: 'same-origin', cache: 'no-store' })
+            .then(function (r) { return r.json(); })
+            .then(function (d) {
+                inFlight = false;
+                if (!d || !d.success) return;
+                if (d.registered === false) { setBadge(0); return; }   // not registered to a company: no chat
+                var rows = d.unread_rows || [], ids = new Set(rows.map(function (r) { return String(r.id); }));
+                setBadge(d.unread);
+                if (known === null) {
+                    var st = readStore();
+                    if (!st) { known = ids; writeStore(); return; }   // baseline: nothing pops up
+                    known = st;
+                }
+                var fresh = rows.filter(function (r) { return !known.has(String(r.id)); });
+                known = ids; writeStore();
+                if (!fresh.length) return;
+                var names = Array.from(new Set(fresh.map(function (r) { return r.name; })));
+                if (names.length === 1) popup(names[0], fresh.length > 1 ? 'sent ' + fresh.length + ' messages in OJT Trainee Group Chat.' : 'sent a message in OJT Trainee Group Chat.');
+                else popup(fresh.length + ' new messages', 'in OJT Trainee Group Chat.');
+            })
+            .catch(function () { inFlight = false; });
+    }
+    poll();
+    setInterval(poll, POLL_MS);
+    document.addEventListener('visibilitychange', function () { if (!document.hidden && known !== null) poll(); });
+    window.addEventListener('focus', function () { if (known !== null) poll(); });
+    window.addEventListener('pageshow', function (e) { if (e.persisted) poll(); });
+    window.addEventListener('pagehide', writeStore);
+})();
 </script>
 </body>
 </html>
