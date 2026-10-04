@@ -2099,6 +2099,20 @@ while (ob_get_level() > 0) { ob_end_clean(); }
         .submit-popup-icon.success { color: var(--grid-green); }
         .submit-popup-icon.error   { color: var(--grid-red); }
         .submit-popup-content h3, .unsaved-content h3 { color: #1e293b; text-transform: uppercase; letter-spacing: 0.3px; }
+        /* ADJUSTMENT: the result pop-up (Draft Saved / Report Submitted / errors) now uses the same look as the submit-confirmation
+           and log-out dialogs — gold top bar, navy square icon beside a left-aligned title, left-aligned message, and a light button
+           strip along the bottom. Only the pop-up's layout/colours changed; its ids, buttons and script are untouched. */
+        .submit-popup-box::before { content: ''; display: block; height: 4px; background: #F7C600; }
+        .submit-popup-head { display: flex; align-items: center; gap: 14px; padding: 18px 24px 16px; border-bottom: 1px solid var(--grid-border-soft); }
+        .submit-popup-head-text { min-width: 0; }
+        .submit-popup-head h3 { margin: 0; font-size: 1.08rem; font-weight: 700; line-height: 1.25; color: var(--grid-navy); text-transform: none; letter-spacing: 0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        .submit-popup-icon, .submit-popup-icon.success, .submit-popup-icon.error { width: 46px; height: 46px; flex-shrink: 0; padding: 0; font-size: 1.3rem; display: flex; align-items: center; justify-content: center; background: var(--grid-navy); color: #F7C600; }
+        .submit-popup-icon.error { background: var(--grid-red); color: #ffffff; }
+        .submit-popup-content { padding: 18px 24px 6px; text-align: left; }
+        .submit-popup-content p { margin: 0 0 14px; }
+        .submit-popup-content p strong { color: var(--grid-navy); }
+        .submit-popup-actions { justify-content: flex-end; padding: 14px 24px; background: var(--surface-soft); border-top: 1px solid var(--grid-border-soft); }
+        .submit-popup-actions .btn-popup-ok, .submit-popup-actions .btn-popup-retry { flex: 0 0 auto; padding: 11px 28px; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.4px; }
         .unsaved-icon { color: var(--grid-amber); font-size: 2rem; }
         .refresh-indicator { border: 1px solid #55668C; background: var(--grid-navy); }
         @media (prefers-reduced-motion: reduce) {
@@ -2620,15 +2634,17 @@ while (ob_get_level() > 0) { ob_end_clean(); }
 <!-- SUBMISSION RESULT POPUP -->
 <div class="submit-popup-overlay" id="submitPopupOverlay">
     <div class="submit-popup-box" id="submitPopupBox">
-        <div class="submit-popup-icon" id="submitPopupIcon"></div>
+        <div class="submit-popup-head">
+            <div class="submit-popup-icon" id="submitPopupIcon"></div>
+            <div class="submit-popup-head-text"><h3 id="submitPopupTitle">Report Submitted!</h3></div>
+        </div>
         <div class="submit-popup-content">
-            <h3 id="submitPopupTitle">Report Submitted!</h3>
             <p id="submitPopupMessage">Your weekly report was submitted successfully!</p>
             <button class="btn-toggle-detail" id="submitPopupDetailToggle" onclick="togglePopupDetail()">Show technical details</button>
             <div class="submit-popup-detail" id="submitPopupDetail"></div>
-            <div class="submit-popup-actions" id="submitPopupActions">
-                <button class="btn-popup-ok" id="submitPopupOkBtn" onclick="closeSubmitPopup()">Done</button>
-            </div>
+        </div>
+        <div class="submit-popup-actions" id="submitPopupActions">
+            <button class="btn-popup-ok" id="submitPopupOkBtn" onclick="closeSubmitPopup()">Done</button>
         </div>
     </div>
 </div>
