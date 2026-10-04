@@ -1,6 +1,129 @@
 <?php
 session_start();
+// LOGOUT + BACK BUTTON — never let the browser keep a copy of this page (same as the admin pages): after logging
+// out, the Back arrow asks the server again and a logged-out visitor is sent to login.php. Only for the page
+// itself (a top-level page load), not for files / images / AJAX it serves.
+if (($_SERVER['HTTP_SEC_FETCH_DEST'] ?? 'document') === 'document' && !headers_sent()) {
+    header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+    header('Pragma: no-cache');
+    header('Expires: Sat, 01 Jan 2000 00:00:00 GMT');
+}
 include "db.php";
+require_once __DIR__ . "/placement_hold.php"; // ADJUSTMENT: preferred-placement match / hold helpers
+
+/* ============================================================
+   ADJUSTMENT: VERIFY-TOAST GATE (reader side)
+   ------------------------------------------------------------
+   administrator.php writes "Verified" at once and keeps an Undo
+   toast up for up to 5 minutes (recorded in verify_toast_gate
+   under the toast's undo token, removed when the toast ends or is
+   undone). A held application (placement replaced) must not be
+   applied while that toast is still active, so the two release
+   points below call cv_vt_release_if_ready(), which waits until
+   the student has no live entry and then runs the original
+   ph_release_if_ready(). Entries expire by themselves after the
+   5-minute undo window. While the toast is active administrator.php
+   also moves the held row out of placement_hold_applications into
+   verify_toast_hold_stash, so NOTHING can release it; it is put back
+   when the toast ends / is undone / expires, and this page keeps
+   showing it as "On hold" meanwhile. Any error here falls back to
+   the old behaviour (the release simply runs).
+   ============================================================ */
+if (!defined('CV_VT_WINDOW_SECONDS')) define('CV_VT_WINDOW_SECONDS', 305);
+function cv_vt_gate_ensure($conn) {
+    static $done = false;
+    if ($done) return true;
+    try {
+        $conn->query("CREATE TABLE IF NOT EXISTS verify_toast_gate ( undo_token VARCHAR(64) NOT NULL PRIMARY KEY, student_id INT NOT NULL, created_ts BIGINT NOT NULL, KEY idx_vtg_student (student_id) )");
+        $done = true;
+    } catch (\Throwable $e) { error_log('verify_toast_gate ensure: ' . $e->getMessage()); }
+    return $done;
+}
+function cv_vt_table_exists($conn, $table) {
+    $r = $conn->query("SHOW TABLES LIKE '" . $conn->real_escape_string($table) . "'");
+    return ($r && $r->num_rows > 0);
+}
+function cv_vt_shared_cols($conn, $from, $to) {   // the columns both tables have (so a later schema change cannot break the move)
+    $cols = [];
+    foreach ([$from, $to] as $i => $t) {
+        $c = [];
+        $r = $conn->query("SHOW COLUMNS FROM `" . $t . "`");
+        if ($r) while ($x = $r->fetch_assoc()) $c[] = $x['Field'];
+        $cols[$i] = $c;
+    }
+    $shared = array_values(array_intersect($cols[0], $cols[1]));
+    return (in_array('student_id', $shared, true) && in_array('company_id', $shared, true)) ? '`' . implode('`,`', $shared) . '`' : '';
+}
+// moves a student's row(s) between the hold table and its stash; the source row is only deleted once the copy is confirmed
+function cv_vt_move_rows($conn, $from, $to, $student_id) {
+    $sid = (int)$student_id;
+    if ($sid <= 0 || !cv_vt_table_exists($conn, $from) || !cv_vt_table_exists($conn, $to)) return false;
+    $r = $conn->query("SELECT 1 FROM `" . $from . "` WHERE student_id = " . $sid . " LIMIT 1");
+    if (!$r || $r->num_rows === 0) return true;   // nothing to move
+    $cols = cv_vt_shared_cols($conn, $from, $to);
+    if ($cols === '') return false;
+    $conn->query("INSERT IGNORE INTO `" . $to . "` (" . $cols . ") SELECT " . $cols . " FROM `" . $from . "` WHERE student_id = " . $sid);
+    $chk = $conn->query("SELECT 1 FROM `" . $to . "` WHERE student_id = " . $sid . " LIMIT 1");
+    if (!$chk || $chk->num_rows === 0) return false;
+    $conn->query("DELETE FROM `" . $from . "` WHERE student_id = " . $sid);
+    return true;
+}
+function cv_vt_live_count($conn, $student_id, $exclude = '') {   // live toasts of this student (fails open: 0)
+    try {
+        if (!cv_vt_gate_ensure($conn)) return 0;
+        $since = time() - (int)CV_VT_WINDOW_SECONDS; $sid = (int)$student_id; $ex = (string)$exclude;
+        $st = $conn->prepare("SELECT COUNT(*) FROM verify_toast_gate WHERE student_id = ? AND created_ts >= ? AND undo_token <> ?");
+        $st->bind_param('iis', $sid, $since, $ex);
+        $st->execute(); $n = (int)($st->get_result()->fetch_row()[0] ?? 0); $st->close();
+        return $n;
+    } catch (\Throwable $e) { return 0; }
+}
+// puts the student's held application back once NO toast of theirs is live any more (ended / undone / expired)
+function cv_vt_restore_if_idle($conn, $student_id, $exclude = '') {
+    try {
+        if (!cv_vt_table_exists($conn, 'verify_toast_hold_stash')) return;
+        if (cv_vt_live_count($conn, $student_id, $exclude) > 0) return;
+        cv_vt_move_rows($conn, 'verify_toast_hold_stash', 'placement_hold_applications', $student_id);
+    } catch (\Throwable $e) { error_log('verify_toast_gate restore: ' . $e->getMessage()); }
+}
+// the companies of this student's application that is out of sight while the admin's Verified toast is active
+function cv_vt_stashed_company_ids($conn, $student_id) {
+    $ids = [];
+    try {
+        if (!cv_vt_table_exists($conn, 'verify_toast_hold_stash')) return $ids;
+        $sid = (int)$student_id;
+        $r = $conn->query("SELECT company_id FROM verify_toast_hold_stash WHERE student_id = " . $sid);
+        if ($r) while ($x = $r->fetch_assoc()) $ids[] = (int)$x['company_id'];
+    } catch (\Throwable $e) {}
+    return $ids;
+}
+function cv_vt_stash_delete($conn, $student_id, $company_id) {   // cancelling an application while it waits behind the toast
+    try {
+        if (!cv_vt_table_exists($conn, 'verify_toast_hold_stash')) return 0;
+        $st = $conn->prepare("DELETE FROM verify_toast_hold_stash WHERE student_id = ? AND company_id = ?");
+        $sid = (int)$student_id; $cid = (int)$company_id;
+        $st->bind_param('ii', $sid, $cid); $st->execute(); $n = $st->affected_rows; $st->close();
+        return max(0, (int)$n);
+    } catch (\Throwable $e) { return 0; }
+}
+function cv_vt_pending($conn, $student_id) {
+    try {
+        $student_id = (int)$student_id;
+        if ($student_id <= 0 || !cv_vt_gate_ensure($conn)) return false;
+        $since = time() - (int)CV_VT_WINDOW_SECONDS;
+        $st = $conn->prepare("SELECT 1 FROM verify_toast_gate WHERE student_id = ? AND created_ts >= ? LIMIT 1");
+        $st->bind_param('ii', $student_id, $since);
+        $st->execute();
+        $found = (bool)$st->get_result()->fetch_row();
+        $st->close();
+        return $found;
+    } catch (\Throwable $e) { error_log('verify_toast_gate check: ' . $e->getMessage()); return false; }
+}
+function cv_vt_release_if_ready($conn, $student_id) {
+    cv_vt_restore_if_idle($conn, $student_id);   // the toast is over (ended / undone / expired): the held application is back
+    if (cv_vt_pending($conn, $student_id)) return;
+    ph_release_if_ready($conn, (int)$student_id);
+}
 
 /* ================= SESSION CHECK ================= */
 if (!isset($_SESSION['user_id']) || $_SESSION['role'] != "student") {
@@ -10,6 +133,316 @@ if (!isset($_SESSION['user_id']) || $_SESSION['role'] != "student") {
 
 $user_id = $_SESSION['user_id'];
 date_default_timezone_set("Asia/Manila");
+// NEW (company invitations): a company's request to register this student
+// (self-contained: these helpers live in this file; each is defined only if not already defined)
+if (!defined('CI_ACTIVE_STATUSES')) define('CI_ACTIVE_STATUSES', ['admin_review', 'allowed', 'accepted']);
+if (!function_exists('ci_ensure_table')) {
+function ci_ensure_table($conn) {
+    static $done = null;
+    if ($done !== null) return $done;
+    try {
+        $conn->query("CREATE TABLE IF NOT EXISTS company_invitations (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            company_id INT NOT NULL,
+            student_id INT NOT NULL,
+            status VARCHAR(20) NOT NULL DEFAULT 'admin_review',
+            decline_reason TEXT NULL,
+            notif_invite_id INT NULL,
+            notif_accepted_id INT NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            registered_at DATETIME NULL,
+            KEY idx_ci_company (company_id),
+            KEY idx_ci_student (student_id),
+            KEY idx_ci_status (status)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+        // the admin notification tables (same definitions as administrator.php's cv_sru_ensure)
+        $conn->query("CREATE TABLE IF NOT EXISTS student_requirement_upload_notifications (
+            id INT AUTO_INCREMENT PRIMARY KEY, user_id INT NOT NULL, detail TEXT NULL,
+            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            admin_viewed TINYINT(1) NOT NULL DEFAULT 0, KEY idx_sru_viewed (admin_viewed), KEY idx_sru_user (user_id))");
+        return $done = true;
+    } catch (\Throwable $e) {
+        error_log('company_list.php: ensure table failed: ' . $e->getMessage());
+        return $done = false;
+    }
+}
+}
+if (!function_exists('ci_full_name')) {
+function ci_full_name($first, $middle, $last) {
+    return trim(preg_replace('/\s+/', ' ', (string)$first . ' ' . (string)$middle . ' ' . (string)$last));
+}
+}
+if (!function_exists('ci_company_name')) {
+function ci_company_name($conn, $company_id) {
+    try {
+        $q = $conn->prepare("SELECT ci.company, u.first_name, u.last_name FROM users u LEFT JOIN company_information ci ON ci.user_id = u.id WHERE u.id = ?");
+        $q->bind_param("i", $company_id);
+        $q->execute();
+        $r = $q->get_result()->fetch_assoc();
+        $q->close();
+        if ($r) {
+            $n = trim((string)($r['company'] ?? ''));
+            if ($n !== '') return $n;
+            $n = trim(($r['first_name'] ?? '') . ' ' . ($r['last_name'] ?? ''));
+            if ($n !== '') return $n;
+        }
+    } catch (\Throwable $e) {}
+    return 'Company';
+}
+}
+if (!function_exists('ci_active_for_student')) {
+/* The student's active invitation (any company), or null. */
+function ci_active_for_student($conn, $student_id) {
+    try {
+        ci_ensure_table($conn);
+        $active = "'" . implode("','", CI_ACTIVE_STATUSES) . "'";
+        $q = $conn->prepare("SELECT * FROM company_invitations WHERE student_id = ? AND status IN ($active) ORDER BY id DESC LIMIT 1");
+        $q->bind_param("i", $student_id);
+        $q->execute();
+        $r = $q->get_result()->fetch_assoc();
+        $q->close();
+        return $r ?: null;
+    } catch (\Throwable $e) { return null; }
+}
+}
+if (!function_exists('ci_sit_toast_active')) {
+/* ── Application SIT state: 'verified' | 'toast' (verified, but administrator.php's undo toast is still live) | 'unverified' ── */
+function ci_sit_toast_active($conn, $student_id) {
+    try {
+        $t = $conn->query("SHOW TABLES LIKE 'verify_toast_gate'");
+        if (!$t || $t->num_rows === 0) return false;
+        $typeOk = false;
+        $c = $conn->query("SHOW COLUMNS FROM verify_toast_gate LIKE 'requirement_type'");
+        if ($c && $c->num_rows > 0) $typeOk = true;
+        $since = time() - 305;
+        $sid = (int)$student_id;
+        $sql = "SELECT 1 FROM verify_toast_gate WHERE student_id = ? AND created_ts >= ?"
+             . ($typeOk ? " AND (requirement_type IS NULL OR requirement_type = 'application_sit')" : "") . " LIMIT 1";
+        $q = $conn->prepare($sql);
+        $q->bind_param("ii", $sid, $since);
+        $q->execute();
+        $live = (bool)$q->get_result()->fetch_row();
+        $q->close();
+        return $live;
+    } catch (\Throwable $e) {
+        error_log('company_list.php: toast check failed: ' . $e->getMessage());
+        return false;
+    }
+}
+}
+if (!function_exists('ci_sit_state')) {
+function ci_sit_state($conn, $student_id) {
+    try {
+        $q = $conn->prepare("SELECT 1 FROM requirements WHERE user_id = ? AND requirement_type = 'application_sit'
+                             AND status = 'Verified' AND file_name IS NOT NULL AND LENGTH(file_name) > 0 LIMIT 1");
+        $q->bind_param("i", $student_id);
+        $q->execute();
+        $ok = (bool)$q->get_result()->fetch_row();
+        $q->close();
+        if (!$ok) return 'unverified';
+        return ci_sit_toast_active($conn, (int)$student_id) ? 'toast' : 'verified';
+    } catch (\Throwable $e) { return 'unverified'; }
+}
+}
+if (!function_exists('ci_requirements_verified')) {
+/* The same rule the old direct register used: the student must have requirements on file and ALL of them Verified. */
+function ci_requirements_verified($conn, $student_id) {
+    try {
+        $q = $conn->prepare("SELECT COUNT(*) AS total, SUM(CASE WHEN status='Verified' THEN 1 ELSE 0 END) AS ok FROM requirements WHERE user_id = ?");
+        $q->bind_param("i", $student_id);
+        $q->execute();
+        $r = $q->get_result()->fetch_assoc();
+        $q->close();
+        return ((int)($r['total'] ?? 0) > 0) && ((int)$r['total'] === (int)($r['ok'] ?? 0));
+    } catch (\Throwable $e) { return false; }
+}
+}
+if (!function_exists('ci_notify_admin')) {
+/* ── Admin notifications (student_requirement_upload_notifications) ── */
+function ci_notify_admin($conn, $student_id, $key, $label, $invite_id, $reason = '') {
+    try {
+        ci_ensure_table($conn);
+        $item = ['key' => $key, 'label' => $label, 'invite_id' => (int)$invite_id];
+            if ($reason !== '') $item['reason'] = $reason;
+            $json = json_encode([$item], JSON_UNESCAPED_UNICODE);
+        $q = $conn->prepare("INSERT INTO student_requirement_upload_notifications (user_id, detail, admin_viewed) VALUES (?, ?, 0)");
+        $q->bind_param("is", $student_id, $json);
+        $q->execute();
+        $nid = (int)$conn->insert_id;
+        $q->close();
+        return $nid;
+    } catch (\Throwable $e) {
+        error_log('company_list.php: admin notification failed: ' . $e->getMessage());
+        return 0;
+    }
+}
+}
+if (!function_exists('ci_drop_notification')) {
+function ci_drop_notification($conn, $notif_id) {
+    try {
+        $notif_id = (int)$notif_id;
+        if ($notif_id <= 0) return;
+        $q = $conn->prepare("DELETE FROM student_requirement_upload_notifications WHERE id = ? AND admin_viewed = 0");
+        $q->bind_param("i", $notif_id);
+        $q->execute();
+        $q->close();
+    } catch (\Throwable $e) {}
+}
+}
+if (!function_exists('ci_set_notif')) {
+function ci_set_notif($conn, $invite_id, $column, $notif_id) {
+    if (!in_array($column, ['notif_invite_id', 'notif_accepted_id'], true)) return;
+    try {
+        $q = $conn->prepare("UPDATE company_invitations SET $column = ? WHERE id = ?");
+        $q->bind_param("ii", $notif_id, $invite_id);
+        $q->execute();
+        $q->close();
+    } catch (\Throwable $e) {}
+}
+}
+if (!function_exists('ci_drop_invite_notifications')) {
+/* Removes whatever notifications this invitation still has waiting in the administrator's inbox. */
+function ci_drop_invite_notifications($conn, array $inv) {
+    ci_drop_notification($conn, $inv['notif_invite_id'] ?? 0);
+    ci_drop_notification($conn, $inv['notif_accepted_id'] ?? 0);
+}
+}
+if (!function_exists('ci_reconcile_validation')) {
+/* Puts students whose invitation was accepted (their Application SIT is waiting to be validated again) back in
+   the administrator's "pending" list — same idea as cv_sc_reconcile() for schedule changes. */
+function ci_reconcile_validation($conn) {
+    try {
+        ci_ensure_table($conn);
+        $conn->query("UPDATE users u
+                      INNER JOIN company_invitations ci ON ci.student_id = u.id AND ci.status = 'accepted'
+                      SET u.validation_status = 'Pending'
+                      WHERE u.role = 'student' AND COALESCE(u.is_archived, 0) = 0 AND u.validation_status = 'Verified'
+                        AND NOT EXISTS (SELECT 1 FROM requirements r WHERE r.user_id = u.id AND r.requirement_type = 'application_sit'
+                                        AND r.file_name IS NOT NULL AND r.file_name <> '' AND r.status IN ('Verified', 'Denied'))");
+    } catch (\Throwable $e) { /* never affects the page */ }
+}
+}
+if (!function_exists('ci_send_email')) {
+/* ── Mail (same look as mail.php's application emails) ── */
+function ci_send_email($toEmail, $toName, $subject, $heading, array $paragraphs, $reasonLabel = '', $reason = '', $theme = 'success') {
+    try {
+        if (!filter_var((string)$toEmail, FILTER_VALIDATE_EMAIL)) return false;
+        if (!class_exists('PHPMailer\\PHPMailer\\PHPMailer', false)) {
+            require_once __DIR__ . '/phpmailer/src/Exception.php';
+            require_once __DIR__ . '/phpmailer/src/PHPMailer.php';
+            require_once __DIR__ . '/phpmailer/src/SMTP.php';
+        }
+        $h = fn($s) => htmlspecialchars((string)$s, ENT_QUOTES, 'UTF-8');
+        $themes = ['success' => ['#16a34a', '#f0fdf4', '#bbf7d0'], 'danger' => ['#dc2626', '#fff1f1', '#fecaca'], 'warning' => ['#b45309', '#fffbeb', '#fde68a']];
+        [$color, $bg, $border] = $themes[$theme] ?? $themes['success'];
+        $body = "<p style='margin:0 0 14px; font-size:15px; color:#374151;'>Dear <strong>" . $h($toName) . "</strong>,</p>";
+        foreach ($paragraphs as $p) $body .= "<p style='margin:0 0 14px; font-size:14px; color:#4b5563; line-height:1.7;'>" . $p . "</p>";
+        if (trim((string)$reason) !== '') {
+            $body .= "<p style='margin:0 0 14px; font-size:14px; color:#4b5563; line-height:1.7;'><strong style='color:#374151;'>" . $h($reasonLabel ?: 'Reason') . ":</strong> " . nl2br($h($reason)) . "</p>";
+        }
+        $html = "<div style='font-family:Arial,sans-serif; background:#f4f4f4; padding:30px 0; margin:0;'><table width='100%' cellpadding='0' cellspacing='0'><tr><td align='center'>"
+            . "<table width='560' cellpadding='0' cellspacing='0' style='max-width:560px; background:#ffffff; border-radius:12px; overflow:hidden; box-shadow:0 4px 20px rgba(0,0,0,0.08);'>"
+            . "<tr><td style='background:#07145f; padding:26px 36px; text-align:center;'><div style='font-size:20px; font-weight:700; color:#FFD700; letter-spacing:0.5px;'>NEUST OJT Portal</div>"
+            . "<div style='font-size:12px; color:rgba(255,255,255,0.6); margin-top:4px;'>Atate Campus &mdash; On the Job Training System</div></td></tr>"
+            . "<tr><td style='padding:26px 36px 0;'><div style='background:{$bg}; border:1px solid {$border}; border-radius:8px; padding:12px 16px; font-size:15px; font-weight:700; color:{$color};'>" . $h($heading) . "</div></td></tr>"
+            . "<tr><td style='padding:20px 36px 26px;'>{$body}</td></tr>"
+            . "<tr><td style='background:#f9fafb; border-top:1px solid #e5e7eb; padding:16px 36px; text-align:center;'><p style='margin:0; font-size:11px; color:#9ca3af;'>This is an automated message from the NEUST OJT Validation System. Please do not reply to this email.</p></td></tr>"
+            . "</table></td></tr></table></div>";
+        $mail = new \PHPMailer\PHPMailer\PHPMailer(true);
+        $mail->isSMTP();
+        $mail->Host       = 'smtp.gmail.com';
+        $mail->SMTPAuth   = true;
+        $mail->Username   = 'salesjohnlhoyd@gmail.com';
+        $mail->Password   = 'qwufanprpmezotly';
+        $mail->SMTPSecure = \PHPMailer\PHPMailer\PHPMailer::ENCRYPTION_STARTTLS;
+        $mail->Port       = 587;
+        $mail->Timeout    = 8;
+        $mail->setFrom('example@gmail.com', 'Atate Campus On The Job Training System');
+        $mail->addAddress($toEmail, $toName);
+        $mail->isHTML(true);
+        $mail->Subject = $subject;
+        $mail->Body    = $html;
+        $mail->AltBody = strip_tags(implode(' ', $paragraphs)) . ($reason !== '' ? ' ' . ($reasonLabel ?: 'Reason') . ': ' . $reason : '');
+        $mail->send();
+        return true;
+    } catch (\Throwable $e) {
+        error_log('company_list.php: email to ' . $toEmail . ' failed: ' . $e->getMessage());
+        return false;
+    }
+}
+}
+if (!function_exists('ci_process_ready')) {
+/* ── Execution: register every accepted invitation whose Application SIT is verified ──
+   $company_id / $student_id narrow the check (the page that calls it only cares about its own rows).
+   Returns the number of students registered. */
+function ci_process_ready($conn, $company_id = null, $student_id = null) {
+    $done = 0;
+    try {
+        if (!ci_ensure_table($conn)) return 0;
+        $sql = "SELECT ci.*, u.first_name, u.last_name, u.email AS student_email
+                FROM company_invitations ci INNER JOIN users u ON u.id = ci.student_id
+                WHERE ci.status = 'accepted'";
+        $types = ''; $vals = [];
+        if ($company_id !== null) { $sql .= " AND ci.company_id = ?"; $types .= 'i'; $vals[] = (int)$company_id; }
+        if ($student_id !== null) { $sql .= " AND ci.student_id = ?"; $types .= 'i'; $vals[] = (int)$student_id; }
+        $q = $conn->prepare($sql);
+        if ($types !== '') $q->bind_param($types, ...$vals);
+        $q->execute();
+        $rows = $q->get_result()->fetch_all(MYSQLI_ASSOC);
+        $q->close();
+
+        foreach ($rows as $inv) {
+            $iid = (int)$inv['id']; $sid = (int)$inv['student_id']; $cid = (int)$inv['company_id'];
+
+            // already registered somewhere (e.g. another route) → this request no longer applies
+            $ra = $conn->prepare("SELECT 1 FROM ojt_assignments WHERE student_id = ? LIMIT 1");
+            $ra->bind_param("i", $sid); $ra->execute();
+            $registered = (bool)$ra->get_result()->fetch_row();
+            $ra->close();
+            if ($registered) {
+                $c = $conn->prepare("UPDATE company_invitations SET status = 'cancelled' WHERE id = ? AND status = 'accepted'");
+                $c->bind_param("i", $iid); $c->execute(); $c->close();
+                ci_drop_invite_notifications($conn, $inv);
+                continue;
+            }
+
+            // NO automatic registration any more: the company registers the student with the Register button on
+            // add_ojt_student.php, once the Application SIT is verified AND the endorsement letter is uploaded.
+        }
+    } catch (\Throwable $e) {
+        error_log('company_list.php: process_ready failed: ' . $e->getMessage());
+    }
+    return $done;
+}
+}
+ci_ensure_table($conn);
+
+/* ============================================================
+   NEW (company invitations): LIVE "REGISTERED" CHECK — unlocks the side menu
+   ------------------------------------------------------------
+   A company's invitation is registered as soon as the student's NEW Application SIT is verified (and the administrator's
+   undo toast is over). The script below asks this endpoint every few seconds: it runs the same registration check
+   (ci_process_ready, this student only) and reports whether the student is now Deployed, so the locked
+   Attendance / Reports / Dashboard links can unlock in place — no reload.
+   URL: company_list.php?poll_deploy=1
+   ============================================================ */
+if (isset($_GET['poll_deploy'])) {
+    header('Content-Type: application/json');
+    header('Cache-Control: no-store');
+    $deployed = false;
+    try {
+        ci_process_ready($conn, null, (int)$user_id);
+        $dq = $conn->prepare("SELECT deploy_status FROM users WHERE id = ?");
+        $dq->bind_param("i", $user_id);
+        $dq->execute();
+        $dr = $dq->get_result()->fetch_assoc();
+        $dq->close();
+        $deployed = $dr && $dr['deploy_status'] === 'Deployed';
+    } catch (\Throwable $e) { error_log('company_list.php: poll_deploy failed: ' . $e->getMessage()); }
+    echo json_encode(['deployed' => $deployed]);
+    exit;
+}
 
 /* ============================================================
    AJAX ENDPOINT — returns live requirement statuses as JSON
@@ -79,6 +512,21 @@ if (isset($_GET['poll_status'])) {
    ============================================================ */
 function clAppLiveState($conn, $user_id) {
     $pending = [];
+    try { ci_process_ready($conn, null, (int)$user_id); } catch (\Throwable $e) {}   // NEW (company invitations): accepted + Application SIT verified → registered
+    /* ADJUSTMENT: a held application (placement replaced, waiting for the new
+       Application SIT to be verified) is sent automatically the moment every
+       requirement is Verified again — checked here on every poll. */
+    try { cv_vt_release_if_ready($conn, (int)$user_id); } catch (\Throwable $e) {}
+    try {
+        $q = $conn->prepare("SELECT company_id FROM placement_hold_applications WHERE student_id = ?");
+        $q->bind_param("i", $user_id);
+        $q->execute();
+        $r = $q->get_result();
+        while ($row = $r->fetch_assoc()) $pending[(string)(int)$row['company_id']] = 'hold';
+        $q->close();
+    } catch (\Throwable $e) {}
+    foreach (cv_vt_stashed_company_ids($conn, (int)$user_id) as $_vt_cid) $pending[(string)$_vt_cid] = 'hold';   // ADJUSTMENT: still on hold while the admin's Verified toast is active
+    foreach (ciStudentInvites($conn, (int)$user_id) as $_ci_inv) { if ($_ci_inv['status'] === 'accepted') $pending[(string)$_ci_inv['company_id']] = 'hold'; }   // NEW (company invitations): accepted → on hold until the Application SIT is verified
     try {
         $q = $conn->prepare("SELECT company_id FROM admin_application_approvals WHERE student_id = ?");
         $q->bind_param("i", $user_id);
@@ -120,7 +568,31 @@ function clAppLiveState($conn, $user_id) {
             }
         } catch (\Throwable $e) {}
     }
-    return ['pending' => (object)$pending, 'registered' => $registered, 'names' => (object)$names];
+    /* ADJUSTMENT (sync): the Inbox / sidebar letter badges ride on the same snapshot as the popup,
+       so the page can refresh all three in one step. Additive field; fails open to null. */
+    $endo = null;
+    try {
+        $q = $conn->prepare("SELECT el.id, el.company_id, el.validation_status, el.student_viewed,
+                                    (SELECT cix.status FROM company_invitations cix WHERE cix.student_id = el.student_id AND cix.company_id = el.company_id
+                                        AND cix.status IN ('allowed','accepted','registered') ORDER BY cix.id DESC LIMIT 1) AS invite_status
+                             FROM endorsement_letters el WHERE el.student_id = ? ORDER BY el.id");
+        $q->bind_param("i", $user_id);
+        $q->execute();
+        $r = $q->get_result();
+        $att = 0; $sig = [];
+        while ($row = $r->fetch_assoc()) {
+            $st = $row['validation_status'] ?: 'Awaiting Upload';
+            if (($row['invite_status'] ?? '') !== 'allowed' && (!$row['student_viewed'] || in_array($st, ['Awaiting Upload', 'Rejected'], true))) $att++;   // NEW (company invitations): not while the invitation is unanswered
+            $sig[] = (int)$row['id'] . ':' . $st . ':' . (int)$row['student_viewed'] . ':' . ($row['invite_status'] ?? '');
+        }
+        $q->close();
+        foreach (ciStudentInvites($conn, (int)$user_id) as $_ci_inv) {   // NEW (company invitations): an invitation waiting for the student's answer needs attention
+            if ($_ci_inv['status'] === 'allowed') $att++;
+            $sig[] = 'i' . (int)$_ci_inv['id'] . ':' . $_ci_inv['status'];
+        }
+        $endo = ['attention' => $att, 'sig' => implode('|', $sig)];
+    } catch (\Throwable $e) { $endo = null; }
+    return ['pending' => (object)$pending, 'registered' => $registered, 'names' => (object)$names, 'endo' => $endo];
 }
 
 if (isset($_GET['poll_application'])) {
@@ -202,6 +674,8 @@ function fetchStudentEndorsements($conn, $user_id) {
         SELECT el.id, el.company_id, el.sent_at, el.student_viewed, el.uploaded_at, el.uploaded_name,
                el.uploaded_mime, el.validation_status, el.validation_remark, el.validated_at, el.batch_id,
                (el.uploaded_file IS NOT NULL) AS has_upload,
+               (SELECT cix.status FROM company_invitations cix WHERE cix.student_id = el.student_id AND cix.company_id = el.company_id
+                   AND cix.status IN ('allowed','accepted','registered') ORDER BY cix.id DESC LIMIT 1) AS invite_status,   -- NEW (company invitations)
                ci.company AS company_name, u.first_name, u.last_name
         FROM endorsement_letters el
         LEFT JOIN company_information ci ON ci.user_id = el.company_id
@@ -220,6 +694,7 @@ function fetchStudentEndorsements($conn, $user_id) {
             'company_name'  => $cname !== '' ? $cname : 'Company',
             'sent_at'       => $r['sent_at'] ? date('M j, Y g:i A', strtotime($r['sent_at'])) : '',
             'viewed'        => (bool)$r['student_viewed'],
+            'invite'        => (string)($r['invite_status'] ?? ''),   // NEW (company invitations): 'allowed' = answer the invitation first
             'status'        => $r['validation_status'] ?: 'Awaiting Upload',
             'remark'        => $r['validation_remark'] ?? '',
             'has_upload'    => (bool)$r['has_upload'],
@@ -238,6 +713,7 @@ function fetchStudentEndorsements($conn, $user_id) {
 function endorsementAttentionCount(array $letters) {
     $n = 0;
     foreach ($letters as $l) {
+        if (($l['invite'] ?? '') === 'allowed') continue;   // NEW (company invitations): the invitation itself is what needs the student's attention
         if (!$l['viewed'] || in_array($l['status'], ['Awaiting Upload', 'Rejected'], true)) $n++;
     }
     return $n;
@@ -247,7 +723,9 @@ function endorsementAttentionCount(array $letters) {
 if (isset($_GET['endorsement_inbox'])) {
     header('Content-Type: application/json');
     $letters = fetchStudentEndorsements($conn, $user_id);
-    echo json_encode(['success' => true, 'letters' => $letters, 'attention' => endorsementAttentionCount($letters)]);
+    $_ci_list = ciStudentInvites($conn, (int)$user_id);   // NEW (company invitations)
+    $_ci_att  = count(array_filter($_ci_list, fn($i) => $i['status'] === 'allowed'));
+    echo json_encode(['success' => true, 'letters' => $letters, 'invitations' => $_ci_list, 'attention' => endorsementAttentionCount($letters) + $_ci_att]);
     exit;
 }
 
@@ -350,6 +828,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['upload_endorsement'])
         echo json_encode(['success' => false, 'message' => 'This letter has already been verified by the company.']);
         exit;
     }
+    // NEW (company invitations): the letter that came with a company's invitation is uploaded after the student accepted it
+    try {
+        $ciL = $conn->prepare("SELECT 1 FROM company_invitations ci INNER JOIN endorsement_letters el ON el.student_id = ci.student_id AND el.company_id = ci.company_id
+                               WHERE el.id = ? AND ci.student_id = ? AND ci.status = 'allowed' LIMIT 1");
+        $ciL->bind_param("ii", $eid, $user_id); $ciL->execute();
+        $ciWait = (bool)$ciL->get_result()->fetch_row(); $ciL->close();
+        if ($ciWait) { echo json_encode(['success' => false, 'message' => 'Please accept the company invitation first, then upload the signed letter.']); exit; }
+    } catch (\Throwable $e) { /* never blocks the upload over a lookup problem */ }
 
     $file = $_FILES['endorsement_file'] ?? null;
     if (!$file || ($file['error'] ?? UPLOAD_ERR_NO_FILE) !== UPLOAD_ERR_OK) {
@@ -781,6 +1267,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['apply'])) {
 
     if ($already_registered) {
         $apply_blocked = true;
+    } elseif (ci_active_for_student($conn, (int)$user_id)) {
+        // NEW (company invitations): a company's invitation is in progress — answer it in the Inbox first
+        $error = "You have a company invitation in progress. Please answer it in your Inbox (or wait for it to finish) before applying to a company.";
     } elseif (!$all_verified) {
         /* ADJUSTMENT: server-side half of the apply gate. The Apply
            buttons already stop the click client-side and open
@@ -802,6 +1291,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['apply'])) {
            $legacy_exp1 derived above — instead of the old
            $student['skill1'] / ['skill2'] / ['exp1'] columns. */
         $incomplete_profile = true;
+    } elseif (($placement_mismatch = ph_check_apply_mismatch($conn, (int)$user_id, intval($_POST['company_id'] ?? 0))) !== null) {
+        /* ADJUSTMENT: the selected company's data does not match the student's
+           Preference for Placement. Nothing is submitted yet — the page opens
+           #placementMismatchModal asking whether to replace the preference
+           with this company's data (Yes → replace_placement handler below;
+           No → the application is cancelled and the student is notified). */
     } else {
 
         $company_id = intval($_POST['company_id']);
@@ -878,6 +1373,352 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['apply'])) {
     }
 }
 
+/* ================= HELPER: REMOVE THE STUDENT'S APPLICATION SIT (DB + UPLOAD FOLDER) =================
+   ADJUSTMENT: used by the replace-placement handler below. When a student replaces the preferred
+   placement, the Application SIT has to disappear everywhere it is stored:
+
+     1) the database  — every `requirements` row of type 'application_sit' (the uploaded file itself is
+                        the blob in requirements.file_name, so deleting the row removes it);
+     2) the student's upload folder — administrator.php copies every requirement file to
+                        uploads/<First>_<Middle>_<Last>/ when the administrator verifies it
+                        (ajax_update_requirement -> svSaveVerifiedRequirementFiles), named
+                            <Label>_verified_<time>.<ext>       (one file)
+                            <Label>_<n>_verified_<time>.<ext>   (several files)
+                        where <Label> is the requirement's label with every non-alphanumeric character
+                        turned into "_". The folder name and the file names are rebuilt here by the SAME
+                        rules, so exactly those copies are found — nothing else in the folder is touched.
+
+   Safety rules:
+     • only ever runs after ph_replace_preference() succeeded (see the handler);
+     • only regular files whose name matches the pattern above are deleted — never a folder, never a
+       symlink, never the student's other requirements / 2x2 photo;
+     • the folder is resolved with realpath() and must sit inside uploads/ (no path tricks);
+     • two students whose names reduce to the SAME folder name share that folder in administrator.php, so
+       their files cannot be told apart — in that case the files are left alone (and logged) rather than
+       risk deleting another student's document;
+     • never throws: every problem is logged with error_log() and the replace itself is never affected. */
+if (!function_exists('cl_student_upload_folder')) {
+    // same rule as administrator.php (ajax_update_requirement / ajax_update_photo)
+    function cl_student_upload_folder($first, $middle, $last) {
+        $f = preg_replace("/[^a-zA-Z0-9]/", "_", (string)$first);
+        $m = preg_replace("/[^a-zA-Z0-9]/", "_", (string)$middle);
+        $l = preg_replace("/[^a-zA-Z0-9]/", "_", (string)$last);
+        return !empty($m) ? $f . "_" . $m . "_" . $l : $f . "_" . $l;
+    }
+}
+if (!function_exists('cl_application_sit_files')) {
+    // full paths of the verified Application SIT copies inside one student folder
+    function cl_application_sit_files($dir, $labels) {
+        $out = [];
+        $alts = [];
+        foreach ((array)$labels as $lbl) {
+            $s = preg_replace('/[^a-zA-Z0-9]/', '_', (string)$lbl);
+            if (trim($s, '_') === '') continue;
+            $alts[strtolower($s)] = preg_quote($s, '/');   // case-insensitive duplicates collapse (admin label vs this page's label)
+        }
+        if (!$alts) return $out;
+        $re = '/^(?:' . implode('|', $alts) . ')(?:_\d+)?_verified_\d+(?:_\d+)?\.[A-Za-z0-9]{1,5}$/i';
+        $names = @scandir($dir);
+        if (!is_array($names)) return $out;
+        foreach ($names as $n) {
+            if ($n === '.' || $n === '..') continue;
+            $path = $dir . DIRECTORY_SEPARATOR . $n;
+            if (is_link($path) || !is_file($path)) continue;
+            if (preg_match($re, $n)) $out[] = $path;
+        }
+        return $out;
+    }
+}
+if (!function_exists('cl_remove_application_sit')) {
+    function cl_remove_application_sit($conn, $student_id, $extraLabels = []) {
+        $res = ['db_rows' => 0, 'files_removed' => 0, 'files_failed' => 0, 'folder' => '', 'note' => ''];
+        $student_id = (int)$student_id;
+        if ($student_id <= 0) { $res['note'] = 'invalid student id'; return $res; }
+
+        // 1) database — idempotent: harmless if placement_hold.php already removed the row(s)
+        try {
+            $st = $conn->prepare("DELETE FROM requirements WHERE user_id = ? AND requirement_type = 'application_sit'");
+            if ($st) {
+                $st->bind_param("i", $student_id);
+                $st->execute();
+                $res['db_rows'] = max(0, (int)$st->affected_rows);
+                $st->close();
+            } else {
+                error_log("company_list.php: could not prepare Application SIT delete for student " . $student_id);
+            }
+        } catch (\Throwable $e) {
+            error_log("company_list.php: Application SIT DB delete failed for student " . $student_id . ": " . $e->getMessage());
+        }
+
+        // 2) the student's upload folder
+        try {
+            $uq = $conn->prepare("SELECT first_name, middle_name, last_name FROM users WHERE id = ?");
+            if (!$uq) { $res['note'] = 'name lookup failed'; return $res; }
+            $uq->bind_param("i", $student_id);
+            $uq->execute();
+            $u = $uq->get_result()->fetch_assoc();
+            $uq->close();
+            if (!$u || trim((string)$u['first_name']) === '' || trim((string)$u['last_name']) === '') {
+                $res['note'] = 'student name incomplete';
+                return $res;
+            }
+            $folder = cl_student_upload_folder($u['first_name'], $u['middle_name'], $u['last_name']);
+            $res['folder'] = $folder;
+
+            // another student whose name gives the same folder? then the files cannot be told apart — leave them
+            $cq = $conn->prepare("SELECT first_name, middle_name, last_name FROM users WHERE id <> ? AND role = 'student' AND first_name = ? AND last_name = ?");
+            if (!$cq) { $res['note'] = 'folder check failed'; return $res; }
+            $fn = (string)$u['first_name']; $ln = (string)$u['last_name'];
+            $cq->bind_param("iss", $student_id, $fn, $ln);
+            $cq->execute();
+            $cres = $cq->get_result();
+            while ($o = $cres->fetch_assoc()) {
+                if (cl_student_upload_folder($o['first_name'], $o['middle_name'], $o['last_name']) === $folder) {
+                    $cq->close();
+                    $res['note'] = 'folder shared with another student';
+                    error_log("company_list.php: Application SIT files of student " . $student_id . " left in place — folder '" . $folder . "' is shared with another student");
+                    return $res;
+                }
+            }
+            $cq->close();
+
+            $base = realpath(__DIR__ . DIRECTORY_SEPARATOR . 'uploads');
+            if ($base === false) { $res['note'] = 'no uploads folder'; return $res; }
+            $dir = realpath($base . DIRECTORY_SEPARATOR . $folder);
+            if ($dir === false || !is_dir($dir)) { $res['note'] = 'no student folder'; return $res; }
+            if (strpos($dir . DIRECTORY_SEPARATOR, $base . DIRECTORY_SEPARATOR) !== 0 || $dir === $base) {
+                $res['note'] = 'folder outside uploads';
+                error_log("company_list.php: refusing to clean '" . $dir . "' (outside uploads)");
+                return $res;
+            }
+
+            $labels = ['Application for Supervised Industrial Training'];
+            foreach ((array)$extraLabels as $x) { if ((string)$x !== '') $labels[] = (string)$x; }
+            foreach (cl_application_sit_files($dir, $labels) as $file) {
+                if (@unlink($file)) {
+                    $res['files_removed']++;
+                } else {
+                    $res['files_failed']++;
+                    error_log("company_list.php: could not delete Application SIT file " . $file);
+                }
+            }
+        } catch (\Throwable $e) {
+            error_log("company_list.php: Application SIT folder cleanup failed for student " . $student_id . ": " . $e->getMessage());
+        }
+        return $res;
+    }
+}
+
+/* ================= HANDLE REPLACE PLACEMENT =================
+   ADJUSTMENT: the student answered "Yes" to the placement-mismatch popup.
+   The Preference for Placement is overwritten with the selected company's
+   data, the Application SIT requirement is deleted from the database AND its
+   verified copies are removed from the student's uploads/ folder (it has to be
+   uploaded and verified again), and the application is put on hold — it is sent
+   automatically once all requirements are Verified again (see
+   ph_release_if_ready() in placement_hold.php). */
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['replace_placement'])) {
+    $rp_company_id = intval($_POST['company_id'] ?? 0);
+    if ($already_registered) {
+        $apply_blocked = true;
+    } else {
+        $rp_busy = false;
+        foreach (["SELECT 1 FROM admin_application_approvals WHERE student_id = ?",
+                  "SELECT 1 FROM ojt_applications WHERE student_id = ? AND phase = 'pending'",
+                  "SELECT 1 FROM placement_hold_applications WHERE student_id = ?",
+                  "SELECT 1 FROM verify_toast_hold_stash WHERE student_id = ?"] as $rp_sql) {
+            try {
+                $rp_q = $conn->prepare($rp_sql);
+                $rp_q->bind_param("i", $user_id);
+                $rp_q->execute();
+                if ($rp_q->get_result()->fetch_row()) $rp_busy = true;
+                $rp_q->close();
+            } catch (\Throwable $e) {}
+        }
+        ph_ensure_table($conn);
+        if ($rp_busy) {
+            $error = "You already have an application in progress. Please cancel it first before replacing your preferred placement.";
+        } else {
+            $rp_company = ph_replace_preference($conn, (int)$user_id, $rp_company_id);
+            if ($rp_company) {
+                $placement_replaced = ['company_name' => $rp_company['name']];
+                // ADJUSTMENT: the Application SIT is removed from the DB AND from the student's upload folder
+                // (see cl_remove_application_sit() above). Never lets a cleanup problem break the replace.
+                try {
+                    $rp_clean = cl_remove_application_sit($conn, (int)$user_id, [$reqLabels['application_sit'] ?? '']);
+                    if (!empty($rp_clean['files_failed'])) {
+                        error_log("company_list.php: " . (int)$rp_clean['files_failed'] . " Application SIT file(s) of student " . (int)$user_id . " could not be deleted from uploads/" . $rp_clean['folder']);
+                    }
+                } catch (\Throwable $e) {
+                    error_log("company_list.php: Application SIT cleanup error: " . $e->getMessage());
+                }
+                // keep the sidebar / apply gate accurate for this same page render
+                unset($studentReqs['application_sit']);
+                $all_verified = false;
+                $req_gate_statuses['application_sit'] = 'Not Submitted';
+            } else {
+                $error = "The selected company could not be found, or your student information is incomplete.";
+            }
+        }
+    }
+}
+
+/* ================= NEW (company invitations): THE STUDENT'S ANSWER TO A COMPANY'S INVITATION =================
+   A company asked to register this student (add_ojt_student.php) and the administrator allowed it (status 'allowed').
+     • ci_respond (decline)        → 'declined_student' — the company sees it in its Registered OJT Students table.
+     • ci_respond (accept)         → the same placement check as applying (ph_check_apply_mismatch): on a mismatch nothing
+                                     changes yet and the page opens the mismatch popup; otherwise the invitation is accepted.
+     • ci_replace_placement (Yes)  → the preference is replaced with the company's data, then the invitation is accepted.
+   Accepting ('accepted'): the Application SIT is removed (DB + uploads folder, same helper as replacing the placement) so it has
+   to be validated again, and the administrator is notified. The student is registered by ci_process_ready() once the Application
+   SIT is verified (and the administrator's undo toast is over) — until then the request is on hold. */
+function ciStudentInvites($conn, $user_id) {
+    $out = [];
+    try {
+        ci_ensure_table($conn);
+        $q = $conn->prepare("SELECT ci.id, ci.company_id, ci.status, ci.updated_at FROM company_invitations ci
+                             WHERE ci.student_id = ? AND ci.status IN ('allowed','accepted') ORDER BY ci.id DESC");
+        $q->bind_param("i", $user_id);
+        $q->execute();
+        $res = $q->get_result();
+        while ($r = $res->fetch_assoc()) {
+            $out[] = ['id' => (int)$r['id'], 'company_id' => (int)$r['company_id'], 'status' => $r['status'],
+                      'company_name' => ci_company_name($conn, (int)$r['company_id']),
+                      'sent_at' => $r['updated_at'] ? date('M j, Y g:i A', strtotime($r['updated_at'])) : ''];
+        }
+        $q->close();
+    } catch (\Throwable $e) { error_log('company_list.php: invitations lookup failed: ' . $e->getMessage()); }
+    return $out;
+}
+
+/* The endorsement letter that came with an invitation is withdrawn when the invitation ends without a registration. */
+function ciDropLetter($conn, $student_id, $company_id) {
+    try {
+        // entirely removed (whatever its status) — unless the student really is registered to that company
+        $d = $conn->prepare("DELETE FROM endorsement_letters WHERE student_id = ? AND company_id = ?
+                             AND NOT EXISTS (SELECT 1 FROM ojt_assignments oa WHERE oa.student_id = ? AND oa.company_id = ?)");
+        $d->bind_param("iiii", $student_id, $company_id, $student_id, $company_id); $d->execute(); $d->close();
+    } catch (\Throwable $e) { error_log('company_list.php: letter cleanup failed: ' . $e->getMessage()); }
+}
+
+/* Accepts an invitation that is still 'allowed'. Returns [ok, message]. */
+function ciAcceptInvitation($conn, $user_id, array $inv, array $reqLabels) {
+    $iid = (int)$inv['id'];
+    $u = $conn->prepare("UPDATE company_invitations SET status = 'accepted' WHERE id = ? AND student_id = ? AND status = 'allowed'");
+    $u->bind_param("ii", $iid, $user_id);
+    $u->execute();
+    $won = ($u->affected_rows === 1);
+    $u->close();
+    if (!$won) return [false, 'This invitation is no longer available.'];
+
+    // the Application SIT has to be validated again (database + the verified copies in the student's uploads folder)
+    try {
+        $clean = cl_remove_application_sit($conn, (int)$user_id, [$reqLabels['application_sit'] ?? '']);
+        if (!empty($clean['files_failed'])) error_log('company_list.php: ' . (int)$clean['files_failed'] . ' Application SIT file(s) of student ' . (int)$user_id . ' could not be deleted');
+    } catch (\Throwable $e) { error_log('company_list.php: Application SIT cleanup error: ' . $e->getMessage()); }
+
+    // tell the administrator
+    try {
+        $nm = $conn->prepare("SELECT first_name, middle_name, last_name FROM users WHERE id = ?");
+        $nm->bind_param("i", $user_id); $nm->execute();
+        $s = $nm->get_result()->fetch_assoc(); $nm->close();
+        $sname = $s ? ci_full_name($s['first_name'], $s['middle_name'], $s['last_name']) : 'The student';
+        $nid = ci_notify_admin($conn, (int)$user_id, '__invite_accepted', $sname . ' accepted the invitation of ' . ci_company_name($conn, (int)$inv['company_id']), $iid);
+        if ($nid > 0) ci_set_notif($conn, $iid, 'notif_accepted_id', $nid);
+    } catch (\Throwable $e) { error_log('company_list.php: admin notification failed: ' . $e->getMessage()); }
+    ci_reconcile_validation($conn);   // back in the administrator's pending list until the new Application SIT is reviewed
+    return [true, ''];
+}
+
+function ciLoadAllowedInvite($conn, $user_id, $iid) {
+    $q = $conn->prepare("SELECT * FROM company_invitations WHERE id = ? AND student_id = ?");
+    $q->bind_param("ii", $iid, $user_id);
+    $q->execute();
+    $inv = $q->get_result()->fetch_assoc();
+    $q->close();
+    return $inv ?: null;
+}
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && (isset($_POST['ci_respond']) || isset($_POST['ci_replace_placement']))) {
+    header('Content-Type: application/json');
+    $iid = intval($_POST['invite_id'] ?? 0);
+    try {
+        $inv = ciLoadAllowedInvite($conn, (int)$user_id, $iid);
+        $cname = $inv ? ci_company_name($conn, (int)$inv['company_id']) : '';
+        if (!$inv || $inv['status'] !== 'allowed') {
+            echo json_encode(['success' => false, 'gone' => true, 'message' => 'This invitation is no longer available.']); exit;
+        }
+        $regQ = $conn->prepare("SELECT 1 FROM ojt_assignments WHERE student_id = ? LIMIT 1");
+        $regQ->bind_param("i", $user_id); $regQ->execute();
+        $alreadyReg = (bool)$regQ->get_result()->fetch_row(); $regQ->close();
+        if ($alreadyReg) {
+            echo json_encode(['success' => false, 'gone' => true, 'message' => 'You are already registered to a company.']); exit;
+        }
+
+        if (isset($_POST['ci_replace_placement'])) {
+            $c = ph_get_company($conn, (int)$inv['company_id']);
+            if (!$c) { echo json_encode(['success' => false, 'message' => 'The company could not be found, or it is no longer verified.']); exit; }
+            $up = $conn->prepare("UPDATE student_information SET pref_company_name=?, pref_company_address=?, pref_telephone=?,
+                                  pref_contact_person_first=?, pref_contact_person_middle=?, pref_contact_person_last=?, pref_position=? WHERE user_id=?");
+            $up->bind_param("sssssssi", $c['name'], $c['address'], $c['tel'], $c['first'], $c['middle'], $c['last'], $c['position'], $user_id);
+            $okUp = $up->execute(); $up->close();
+            if (!$okUp) { echo json_encode(['success' => false, 'message' => 'Your preferred placement could not be updated. Please try again.']); exit; }
+            [$ok, $msg] = ciAcceptInvitation($conn, (int)$user_id, $inv, $reqLabels);
+            echo json_encode(['success' => $ok, 'gone' => !$ok, 'message' => $msg, 'company_name' => $cname]); exit;
+        }
+
+        $decision = (string)($_POST['decision'] ?? '');
+        if ($decision === 'decline') {
+            $reason = trim((string)($_POST['reason'] ?? ''));
+            if (function_exists('mb_substr')) $reason = mb_substr($reason, 0, 500); else $reason = substr($reason, 0, 500);
+            $d = $conn->prepare("UPDATE company_invitations SET status = 'declined_student', decline_reason = ? WHERE id = ? AND student_id = ? AND status = 'allowed'");
+            $d->bind_param("sii", $reason, $iid, $user_id);
+            $d->execute();
+            $won = ($d->affected_rows === 1); $d->close();
+            if (!$won) { echo json_encode(['success' => false, 'gone' => true, 'message' => 'This invitation is no longer available.']); exit; }
+            ci_drop_invite_notifications($conn, $inv);
+            ciDropLetter($conn, (int)$user_id, (int)$inv['company_id']);   // the letter that came with the invitation goes too
+            // tell the administrator (a "Got it" notification in the Application Requests inbox)
+            try {
+                $nm2 = $conn->prepare("SELECT first_name, middle_name, last_name FROM users WHERE id = ?");
+                $nm2->bind_param("i", $user_id); $nm2->execute();
+                $s2 = $nm2->get_result()->fetch_assoc(); $nm2->close();
+                $sname2 = $s2 ? ci_full_name($s2['first_name'], $s2['middle_name'], $s2['last_name']) : 'The student';
+                ci_notify_admin($conn, (int)$user_id, '__invite_declined', $sname2 . ' declined the invitation of ' . $cname, $iid, $reason);
+            } catch (\Throwable $e) { error_log('company_list.php: admin decline notification failed: ' . $e->getMessage()); }
+            // tell the company by email as well (its table shows it too)
+            try {
+                $cq = $conn->prepare("SELECT email, first_name, last_name FROM users WHERE id = ?");
+                $cq->bind_param("i", $inv['company_id']); $cq->execute();
+                $co = $cq->get_result()->fetch_assoc(); $cq->close();
+                $sq = $conn->prepare("SELECT first_name, last_name FROM users WHERE id = ?");
+                $sq->bind_param("i", $user_id); $sq->execute();
+                $st = $sq->get_result()->fetch_assoc(); $sq->close();
+                if ($co && !empty($co['email'])) {
+                    ci_send_email($co['email'], trim(($co['first_name'] ?? '') . ' ' . ($co['last_name'] ?? '')) ?: $cname,
+                        'Invitation Declined — ' . trim(($st['first_name'] ?? '') . ' ' . ($st['last_name'] ?? '')), 'The Student Declined Your Invitation',
+                        ["<strong>" . htmlspecialchars(trim(($st['first_name'] ?? '') . ' ' . ($st['last_name'] ?? ''))) . "</strong> has declined your invitation to be an OJT trainee of <strong>" . htmlspecialchars($cname) . "</strong>."],
+                        'Reason', $reason, 'danger');
+                }
+            } catch (\Throwable $e) { error_log('company_list.php: decline email failed: ' . $e->getMessage()); }
+            echo json_encode(['success' => true, 'company_name' => $cname]); exit;
+        }
+        if ($decision !== 'accept') { echo json_encode(['success' => false, 'message' => 'Unknown answer.']); exit; }
+
+        // the same placement check as applying: a mismatch asks the student first (nothing changes yet)
+        $mm = ph_check_apply_mismatch($conn, (int)$user_id, (int)$inv['company_id']);
+        if ($mm !== null) {
+            echo json_encode(['success' => true, 'mismatch' => ['company_name' => $mm['company_name'], 'pref_name' => $mm['pref_name'], 'diff' => $mm['diff']]]); exit;
+        }
+        [$ok, $msg] = ciAcceptInvitation($conn, (int)$user_id, $inv, $reqLabels);
+        echo json_encode(['success' => $ok, 'gone' => !$ok, 'message' => $msg, 'company_name' => $cname]);
+    } catch (\Throwable $e) {
+        error_log('company_list.php: invitation answer failed: ' . $e->getMessage());
+        echo json_encode(['success' => false, 'message' => 'Something went wrong. Please try again.']);
+    }
+    exit;
+}
+
 /* ================= HANDLE CANCEL REQUEST =================
    ADJUSTMENT: lets a student withdraw an application at EITHER stage
    of the two-step review process:
@@ -938,6 +1779,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['cancel_request'])) {
     }
     $cancelStmt2->close();
 
+    // ADJUSTMENT: an application on hold (waiting for the new Application SIT) is cancelled too.
+    if (ph_delete_hold($conn, (int)$user_id, $cancel_company_id) > 0) {
+        $cancelled = true;
+    }
+    if (cv_vt_stash_delete($conn, (int)$user_id, $cancel_company_id) > 0) {   // ADJUSTMENT: ...also while it waits behind the admin's Verified toast
+        $cancelled = true;
+    }
+    try {   // NEW (company invitations): an accepted invitation that is on hold is cancelled too (the company sees it as cancelled)
+        $ciq = $conn->prepare("SELECT * FROM company_invitations WHERE student_id = ? AND company_id = ? AND status IN ('allowed','accepted')");
+        $ciq->bind_param("ii", $user_id, $cancel_company_id); $ciq->execute();
+        $ciRows = $ciq->get_result()->fetch_all(MYSQLI_ASSOC); $ciq->close();
+        foreach ($ciRows as $ciRow) {
+            $ciu = $conn->prepare("UPDATE company_invitations SET status = 'cancelled' WHERE id = ? AND status IN ('allowed','accepted')");
+            $ciId = (int)$ciRow['id']; $ciu->bind_param("i", $ciId); $ciu->execute();
+            if ($ciu->affected_rows > 0) { $cancelled = true; ci_drop_invite_notifications($conn, $ciRow); ciDropLetter($conn, (int)$user_id, (int)$ciRow['company_id']); }
+            $ciu->close();
+        }
+    } catch (\Throwable $e) { error_log('company_list.php: invitation cancel failed: ' . $e->getMessage()); }
+
     if ($cancelled) {
         $cleanupStmt = $conn->prepare("DELETE FROM application_requirements WHERE student_id = ? AND company_id = ?");
         $cleanupStmt->bind_param("ii", $user_id, $cancel_company_id);
@@ -987,9 +1847,24 @@ $pendingStageLabels = [
     'endorsement_upload'   => 'Endorsement letter received — upload the signed letter from your Inbox',
     'endorsement_review'   => 'Endorsement letter uploaded — waiting for company validation',
     'endorsement_rejected' => 'Endorsement letter rejected — see remarks in your Inbox and re-upload',
+    // ADJUSTMENT (placement replaced)
+    'placement_hold'       => 'On hold — waiting for your new Application SIT to be verified',
+    // NEW (company invitations)
+    'invite_hold'          => 'Invitation accepted — on hold until your new Application SIT is verified',
 ];
 
 $pending_applications = [];
+
+/* ADJUSTMENT: release a held application first if every requirement is Verified again,
+   then list any application that is still on hold as a pending one. */
+try { cv_vt_release_if_ready($conn, (int)$user_id); } catch (\Throwable $e) {}
+$_ph_hold = ph_get_hold($conn, (int)$user_id);
+if ($_ph_hold) {
+    $pending_applications[$_ph_hold['company_id']] = ['stage' => 'placement_hold'];
+}
+foreach (cv_vt_stashed_company_ids($conn, (int)$user_id) as $_vt_cid) {   // ADJUSTMENT: still on hold while the admin's Verified toast is active
+    $pending_applications[$_vt_cid] = ['stage' => 'placement_hold'];
+}
 
 $pendingAppStmt = $conn->prepare("SELECT company_id FROM admin_application_approvals WHERE student_id = ?");
 $pendingAppStmt->bind_param("i", $user_id);
@@ -1019,7 +1894,8 @@ $pendingCompanyStmt->close();
 
 /* NEW (endorsement flow): refine the company-review stage using the endorsement letter state. */
 $endorsement_letters = fetchStudentEndorsements($conn, $user_id);
-$endo_attention_count = endorsementAttentionCount($endorsement_letters);
+$endo_attention_count = endorsementAttentionCount($endorsement_letters)
+    + count(array_filter(ciStudentInvites($conn, (int)$user_id), fn($i) => $i['status'] === 'allowed'));   // NEW (company invitations)
 foreach ($endorsement_letters as $_el) {
     $cid = $_el['company_id'];
     if (isset($pending_applications[$cid]) && $pending_applications[$cid]['stage'] === 'company_review') {
@@ -1032,7 +1908,15 @@ foreach ($endorsement_letters as $_el) {
     }
 }
 
-$has_pending_application = !empty($pending_applications);
+/* NEW (company invitations): an accepted invitation is an application on hold for that company; an invitation still waiting for the
+   student's answer also blocks applying to another company (the answer is given in the Inbox). */
+$ci_invites_now = ciStudentInvites($conn, (int)$user_id);
+foreach ($ci_invites_now as $_ci_inv) {
+    if ($_ci_inv['status'] === 'accepted') $pending_applications[$_ci_inv['company_id']] = ['stage' => 'invite_hold'];
+}
+$ci_has_open_invite = !empty($ci_invites_now);
+
+$has_pending_application = !empty($pending_applications) || $ci_has_open_invite;
 
 /* ================= FETCH VERIFIED COMPANIES ================= */
 /* FIX: added ci.company AS company_name so the display uses the company's
@@ -1090,45 +1974,58 @@ $companies = $conn->query("
     <style>
         /* ── Design tokens ── */
         :root {
-            --maroon:       #07145f;
+            /* Field Ops Grid palette (same values as AccomForm.php) */
+            --grid-bg: #EEF1F6;
+            --grid-navy: #1B2A4A;
+            --grid-border: #C3CADA;
+            --grid-border-soft: #DCE1EC;
+            --grid-green: #2C5A2C;
+            --grid-green-bg: #EAF3EA;
+            --grid-red: #A02A2A;
+            --grid-red-bg: #F7E9E9;
+            --grid-amber: #A0850A;
+            --grid-amber-bg: #FAF3DC;
+            --grid-muted: #5A6272;
+
+            --maroon:       #1B2A4A;
             --gold:         #FFD700;
-            --active-nav:   #1a237e;
-            --ink:          #1a1a2e;
-            --ink-muted:    #4a4a6a;
-            --ink-faint:    #8888aa;
+            --active-nav:   #1B2A4A;
+            --ink:          #2d3748;
+            --ink-muted:    #5A6272;
+            --ink-faint:    #8A93A6;
             --surface:      #ffffff;
-            --surface-soft: #f7f6f3;
-            --surface-warm: #f0efe9;
-            --border:       #e4e2da;
-            --border-light: #eeede8;
-            --teal:         #0d8c6a;
-            --teal-light:   #e1f5ee;
-            --teal-dark:    #085041;
-            --blue:         #185fa5;
-            --blue-light:   #e6f1fb;
-            --amber:        #b45309;
-            --amber-light:  #fef3c7;
-            --red:          #991b1b;
-            --red-light:    #fee2e2;
-            --radius-sm:    6px;
-            --radius-md:    10px;
-            --radius-lg:    16px;
-            --shadow-card:  0 1px 3px rgba(0,0,0,.06), 0 4px 16px rgba(0,0,0,.04);
-            --shadow-lift:  0 4px 20px rgba(0,0,0,.10);
+            --surface-soft: #F3F5F9;
+            --surface-warm: #EEF1F6;
+            --border:       #C3CADA;
+            --border-light: #DCE1EC;
+            --teal:         #2C5A2C;
+            --teal-light:   #EAF3EA;
+            --teal-dark:    #2C5A2C;
+            --blue:         #1B2A4A;
+            --blue-light:   #E7ECF7;
+            --amber:        #A0850A;
+            --amber-light:  #FAF3DC;
+            --red:          #A02A2A;
+            --red-light:    #F7E9E9;
+            --radius-sm:    0;
+            --radius-md:    0;
+            --radius-lg:    0;
+            --shadow-card:  none;
+            --shadow-lift:  none;
 
             /* Legacy aliases */
             --neust-maroon: #07145fe5;
             --neust-gold:   #FFD700;
-            --neust-active: #1a237e;
-            --bg:           #f0efe9;
+            --neust-active: #1B2A4A;
+            --bg:           #EEF1F6;
             --white:        #ffffff;
-            --text:         #1a1a2e;
+            --text:         #2d3748;
         }
 
         * { box-sizing: border-box; margin: 0; padding: 0; }
 
         body {
-            font-family: 'DM Sans', 'Segoe UI', sans-serif;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             background: var(--surface-warm);
             color: var(--ink);
             display: flex;
@@ -1144,18 +2041,18 @@ $companies = $conn->query("
             background: var(--neust-maroon);
             height: 100vh;
             position: fixed;
-            top: 0; left: 0;
             display: flex;
             flex-direction: column;
             transition: width 0.3s ease;
             z-index: 1000;
             box-shadow: 4px 0 10px rgba(0,0,0,0.1);
+            top: 0; left: 0;
         }
         .sidebar.collapsed { width: 80px; }
 
         /* Header — name + role label (matches student_attendance.php) */
         .sidebar-header {
-            padding: 16px 20px;
+            padding: 20px;
             display: flex;
             align-items: center;
             justify-content: space-between;
@@ -1170,34 +2067,36 @@ $companies = $conn->query("
             overflow: hidden;
             transition: opacity 0.2s, width 0.3s;
             max-width: 180px;
+            min-width: 0;
         }
         .sidebar-user-name {
             color: var(--neust-gold);
-            font-size: 14px;
-            font-weight: 700;
+            font-size: 18px;
+            font-weight: bold;
             white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
             line-height: 1.3;
-            font-family: 'DM Sans', sans-serif;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
         }
         .sidebar-user-role {
             color: rgba(255,255,255,0.55);
-            font-size: 10px;
-            font-weight: 500;
+            font-size: 11px;
+            font-weight: 700;
             text-transform: uppercase;
-            letter-spacing: 0.08em;
+            letter-spacing: 0.8px;
+            margin-top: 3px;
             white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
         }
-        .sidebar.collapsed .sidebar-user-info { opacity: 0; width: 0; overflow: hidden; }
-
-        .sidebar-links {
-            flex: 1;
-            display: flex;
-            flex-direction: column;
-            padding: 10px 0;
+        .sidebar.collapsed .sidebar-user-info {
+            opacity: 0;
+            width: 0;
             overflow: hidden;
         }
+
+        .sidebar-links { flex: 1; display: flex; flex-direction: column; padding: 10px 0; overflow: hidden; }
 
         .sidebar a {
             padding: 15px 25px;
@@ -1228,22 +2127,11 @@ $companies = $conn->query("
         }
 
         /* ── Locked sidebar links (not deployed) ── */
-        .sidebar a.nav-locked {
-            cursor: not-allowed;
-            opacity: 0.55;
-        }
-        .sidebar a.nav-locked:hover {
-            background: rgba(255,255,255,0.04);
-            color: #cbd5e0;
-        }
+        .sidebar a.nav-locked { cursor: not-allowed; opacity: 0.55; }
+        .sidebar a.nav-locked:hover { background: rgba(255,255,255,0.04); color: #cbd5e0; }
         .nav-lock-icon {
-            font-size: 11px;
-            color: #fbbf24;
-            position: absolute;
-            right: 22px;
-            top: 50%;
-            transform: translateY(-50%);
-            opacity: 0.85;
+            font-size: 11px; color: var(--neust-gold); position: absolute;
+            right: 22px; top: 50%; transform: translateY(-50%); opacity: 0.85;
         }
         .sidebar.collapsed .nav-lock-icon { display: none; }
 
@@ -1254,25 +2142,29 @@ $companies = $conn->query("
         }
         .sidebar-lock-notice-inner {
             display: flex; align-items: flex-start; gap: 10px;
-            background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1);
-            border-radius: 8px; padding: 10px 12px;
+            background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.14);
+            border-radius: 0; padding: 10px 12px;
         }
-        .sidebar-lock-notice i { font-size: 15px; color: var(--neust-gold); margin-top: 1px; flex-shrink: 0; }
+        .sidebar-lock-notice i { font-size: 14px; color: var(--neust-gold); margin-top: 1px; flex-shrink: 0; }
         .sidebar-lock-notice p { font-size: 11px; color: rgba(255,255,255,0.65); line-height: 1.5; margin: 0; }
-        .sidebar.collapsed .sidebar-lock-notice { display: none; }
+        /* FIX (jerking notice): the notice used to switch to display:none the instant the menu was collapsed (and its text
+           re-wrapped line by line while the menu narrowed), so every link below it jumped up / down. Now it keeps ONE layout
+           (the open menu's width, clipped by the menu) and simply folds its height + fades on the menu's own 0.3s timing,
+           so the links glide instead of jumping. Open / closed look is unchanged. */
+        .sidebar-lock-notice { display: grid; grid-template-rows: 1fr; overflow: hidden;
+            transition: grid-template-rows 0.3s ease, padding 0.3s ease, opacity 0.2s ease, visibility 0s linear 0s; }
+        .sidebar-lock-notice-inner { min-height: 0; overflow: hidden; box-sizing: border-box; }
+        @media (min-width: 769px) { .sidebar-lock-notice-inner { width: 220px; } }
+        .sidebar.collapsed .sidebar-lock-notice { grid-template-rows: 0fr; padding-top: 0; padding-bottom: 0; opacity: 0; visibility: hidden; pointer-events: none;
+            transition: grid-template-rows 0.3s ease, padding 0.3s ease, opacity 0.12s ease, visibility 0s linear 0.3s; }
+        @media (prefers-reduced-motion: reduce) { .sidebar-lock-notice, .sidebar.collapsed .sidebar-lock-notice { transition-duration: 0.01s !important; transition-delay: 0s !important; } }
 
         /* ── Attendance sidebar badge (amber/pulsing) — matches student_attendance.php ── */
         .sidebar-badge-att {
-            background: #d97706;
-            color: white;
-            border-radius: 50%;
-            width: 18px; height: 18px;
-            font-size: 10px; font-weight: 700;
-            display: inline-flex;
-            align-items: center; justify-content: center;
-            position: absolute;
-            right: 18px; top: 50%;
-            transform: translateY(-50%);
+            background: #d97706; color: white; border-radius: 50%;
+            width: 18px; height: 18px; font-size: 10px; font-weight: 700;
+            display: inline-flex; align-items: center; justify-content: center;
+            position: absolute; right: 18px; top: 50%; transform: translateY(-50%);
             animation: badge-pulse-att 2s ease-in-out infinite;
         }
         @keyframes badge-pulse-att {
@@ -1282,47 +2174,47 @@ $companies = $conn->query("
 
         /* ── Journal badge — matches student_attendance.php ── */
         .sidebar-badge-journal {
-            background: #f59e0b;
-            color: #1c1917;
-            border-radius: 50%;
-            min-width: 18px; height: 18px;
-            font-size: 10px; font-weight: 800;
-            display: inline-flex;
-            align-items: center; justify-content: center;
-            position: absolute;
-            right: 18px; top: 50%;
-            transform: translateY(-50%);
-            padding: 0 3px;
-            animation: badge-pulse-journal 2.4s ease-in-out infinite;
+            background: #f59e0b; color: #1c1917; border-radius: 50%;
+            min-width: 18px; height: 18px; font-size: 10px; font-weight: 800;
+            display: inline-flex; align-items: center; justify-content: center;
+            position: absolute; right: 18px; top: 50%; transform: translateY(-50%);
+            padding: 0 3px; animation: badge-pulse-journal 2.4s ease-in-out infinite;
         }
         @keyframes badge-pulse-journal {
             0%, 100% { box-shadow: 0 0 0 0 rgba(245,158,11,0.5); }
             50%       { box-shadow: 0 0 0 5px rgba(245,158,11,0); }
         }
 
+        /* ── ADJUSTMENT: Endorsement-letter sidebar badge (Company List link) ──
+           Same shape/position as the other sidebar badges; RED so it stands out on the navy sidebar and
+           stays distinct from the amber Attendance / Reports badges. Shown/hidden by updateEndoBadge(). ── */
+        .sidebar-badge-endo {
+            background: #dc2626; color: #ffffff; border-radius: 50%;
+            min-width: 18px; height: 18px; font-size: 10px; font-weight: 800;
+            display: none; align-items: center; justify-content: center;
+            position: absolute; right: 18px; top: 50%; transform: translateY(-50%);
+            padding: 0 3px; animation: badge-pulse-endo 2s ease-in-out infinite;
+        }
+        .sidebar-badge-endo.is-on { display: inline-flex; }
+        @keyframes badge-pulse-endo {
+            0%, 100% { box-shadow: 0 0 0 0 rgba(220,38,38,0.55); }
+            50%       { box-shadow: 0 0 0 6px rgba(220,38,38,0); }
+        }
+        /* collapsed sidebar: tuck the badge onto the icon's corner so it never overlaps it */
+        .sidebar.collapsed .sidebar-badge-endo { right: 14px; top: 10px; transform: none; }
+
         .logout-link { margin-top: auto; padding: 20px; border-top: 1px solid rgba(255,255,255,0.1); }
         .logout-link a {
-            border: 1px solid var(--neust-gold);
-            color: var(--neust-gold);
-            border-radius: 6px;
-            justify-content: center;
-            padding: 10px;
-            display: flex;
-            align-items: center;
-            text-decoration: none;
-            font-size: 14px;
-            transition: background 0.2s;
+            border: 1px solid var(--neust-gold); color: var(--neust-gold);
+            border-radius: 6px; justify-content: center; padding: 10px;
+            display: flex; align-items: center; text-decoration: none;
+            font-size: 14px; transition: background 0.2s;
         }
         .logout-link a:hover { background: rgba(255,215,0,0.08); }
 
         .toggle-btn {
-            background: transparent;
-            border: none;
-            color: white;
-            cursor: pointer;
-            font-size: 20px;
-            outline: none;
-            flex-shrink: 0;
+            background: transparent; border: none; color: white;
+            cursor: pointer; font-size: 20px; outline: none; flex-shrink: 0;
         }
 
         /* ══════════════════════════════════════════
@@ -1349,10 +2241,11 @@ $companies = $conn->query("
             opacity: 0;
             width: calc(100% - 300px);
             max-width: 820px;
-            background: #07145f;
-            border-radius: 0 0 12px 12px;
-            border: 1px solid rgba(255,255,255,.12);
+            background: var(--grid-navy);
+            border-radius: 0;
+            border: 1px solid #55668C;
             border-top: none;
+            box-shadow: 0 8px 24px rgba(27,42,74,0.30);
             padding: 10px 16px;
             display: flex;
             align-items: center;
@@ -1362,7 +2255,7 @@ $companies = $conn->query("
                         visibility 0s linear .4s;
             z-index: 2000;
             pointer-events: none;
-            overflow: hidden;  /* keeps progress bar inside rounded corners */
+            overflow: hidden;
         }
         #att-notif-bar.anb-visible {
             transform: translateX(-50%) translateY(0);
@@ -1377,19 +2270,16 @@ $companies = $conn->query("
 
         /* ── ANB inner pieces ── */
         .anb-icon {
-            width: 34px; height: 34px;
-            border-radius: 8px;
-            background: #FAEEDA;
+            width: 34px; height: 34px; border-radius: 0;
+            background: var(--grid-amber-bg);
             display: flex; align-items: center; justify-content: center;
             flex-shrink: 0;
         }
-        .anb-icon i { font-size: 16px; color: #854F0B; }
+        .anb-icon i { font-size: 16px; color: var(--grid-amber); }
 
         .anb-pulse {
-            width: 8px; height: 8px;
-            border-radius: 50%;
-            background: #EF9F27;
-            flex-shrink: 0;
+            width: 8px; height: 8px; border-radius: 50%;
+            background: #F7C600; flex-shrink: 0;
             animation: anb-blink 1.4s ease-in-out infinite;
         }
         @keyframes anb-blink { 0%,100%{opacity:1} 50%{opacity:.2} }
@@ -1407,81 +2297,66 @@ $companies = $conn->query("
         .anb-text-group {
             display: flex;
             flex-direction: column;
-            min-width: 0;        /* allows text to shrink & ellipsis */
-            flex-shrink: 1;
+            min-width: 0;
         }
         .anb-label {
             font-size: 12px;
             font-weight: 700;
-            color: #FAEEDA;
+            color: #ffffff;
+            text-transform: uppercase;
+            letter-spacing: 0.4px;
             white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
         }
         .anb-window {
             font-size: 11px;
-            color: rgba(250,238,218,.65);
+            color: #E3E8F1;
+            opacity: .75;
             margin-top: 1px;
             white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
         }
-        .anb-divider {
-            width: 1px; height: 26px;
-            background: rgba(255,255,255,.18);
-            flex-shrink: 0;
-        }
+        .anb-divider { width: 1px; height: 26px; background: rgba(255,255,255,.18); flex-shrink: 0; }
         /* Countdown pill — fixed width prevents layout shift as digits change */
         .anb-countdown {
             font-size: 11px;
-            color: #FAC775;
+            font-weight: 700;
+            color: #F7C600;
             white-space: nowrap;
-            background: rgba(250,199,117,.14);
-            border-radius: 99px;
+            background: rgba(247,198,0,.10);
+            border-radius: 0;
             padding: 3px 11px;
-            border: 1px solid rgba(250,199,117,.28);
-            font-family: 'DM Mono', monospace;
+            border: 1px solid rgba(247,198,0,.35);
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             font-variant-numeric: tabular-nums;
             flex-shrink: 0;
-            min-width: 100px;      /* prevents width jitter as digit count changes */
+            min-width: 100px;
             text-align: center;
         }
         .anb-btn {
-            background: #EF9F27;
-            color: #412402;
-            border: none;
-            border-radius: 7px;
-            padding: 7px 15px;
-            font-size: 11px; font-weight: 700;
-            font-family: inherit;
-            white-space: nowrap;
-            flex-shrink: 0;
-            transition: background .15s;
-            cursor: pointer;
+            background: #F7C600; color: var(--grid-navy); border: 1px solid #F7C600;
+            border-radius: 0; padding: 7px 15px; font-size: 11px; font-weight: 700;
+            text-transform: uppercase; letter-spacing: 0.4px;
+            font-family: inherit; white-space: nowrap; flex-shrink: 0;
+            transition: opacity .15s; cursor: pointer;
         }
-        .anb-btn:hover { background: #FAC775; }
+        .anb-btn:hover { opacity: .88; }
         .anb-close {
-            background: rgba(255,255,255,.12);
-            border: none;
-            color: rgba(250,238,218,.75);
-            width: 26px; height: 26px;
-            border-radius: 50%;
-            font-size: 13px;
+            background: rgba(255,255,255,.10); border: 1px solid rgba(255,255,255,.18);
+            color: #E3E8F1; width: 26px; height: 26px;
+            border-radius: 0; font-size: 13px;
             display: flex; align-items: center; justify-content: center;
-            flex-shrink: 0;
-            transition: background .15s;
-            cursor: pointer;
+            flex-shrink: 0; transition: background .15s; cursor: pointer;
         }
-        .anb-close:hover { background: rgba(255,255,255,.24); color: #FAEEDA; }
+        .anb-close:hover { background: rgba(255,255,255,.22); color: #ffffff; }
 
         /* Progress bar — absolutely positioned at bottom of bar */
         .anb-progress {
-            position: absolute;
-            bottom: 0; left: 0;
-            height: 2px;
-            background: #EF9F27;
-            border-radius: 0 0 0 12px;
-            pointer-events: none;  /* never intercepts clicks */
+            position: absolute; bottom: 0; left: 0;
+            height: 2px; background: #F7C600; border-radius: 0;
+            pointer-events: none;
         }
 
         /* ══ MAIN CONTENT ══ */
@@ -1496,14 +2371,14 @@ $companies = $conn->query("
 
         /* ══ NAVBAR ══ */
         .navbar {
-            background: var(--maroon);
+            background: var(--neust-maroon);
             padding: 10px 30px;
             display: flex;
             align-items: center;
             color: white;
             height: 60px;
             flex-shrink: 0;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+            box-shadow: none;
             position: relative;
             z-index: 99;
         }
@@ -1518,22 +2393,22 @@ $companies = $conn->query("
             margin-bottom: 20px;
             padding-bottom: 10px;
             border-bottom: 2px solid var(--gold);
-            font-family: 'Lora', serif;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
         }
 
         .msg {
             padding: 12px 16px;
             margin-bottom: 16px;
-            border-radius: 8px;
+            border-radius: 0;
             font-size: 14px;
             font-weight: 600;
         }
-        .success { background: #d1fae5; color: #065f46; }
-        .error   { background: #fee2e2; color: #991b1b; }
+        .success { background: #EAF3EA; color: #2C5A2C; }
+        .error   { background: #F7E9E9; color: #A02A2A; }
 
         .company-row {
             background: var(--white);
-            border-radius: 12px;
+            border-radius: 0;
             margin-bottom: 14px;
             box-shadow: var(--shadow-card);
             overflow: hidden;
@@ -1564,17 +2439,17 @@ $companies = $conn->query("
             align-items: center;
             gap: 10px;
             font-size: 13px;
-            color: #6b7280;
+            color: #5A6272;
         }
         .company-summary .summary-right .badge-current {
-            background: #dcfce7;
-            color: #166534;
-            border-radius: 20px;
+            background: #EAF3EA;
+            color: #2C5A2C;
+            border-radius: 0;
             padding: 3px 12px;
             font-size: 12px;
             font-weight: 700;
         }
-        .chevron { font-size: 11px; color: #9ca3af; transition: transform 0.25s; }
+        .chevron { font-size: 11px; color: #8A93A6; transition: transform 0.25s; }
 
         /* ══════════════════════════════════════════════════════════
            ADJUSTMENT: PAGE LOAD / PROCESSING overlay — same as
@@ -1602,7 +2477,20 @@ $companies = $conn->query("
         }
         #globalLoadingOverlay.gl-instant { transition: none; }
         .global-loading-box { display: flex; flex-direction: column; align-items: center; gap: 16px; animation: globalLoadingPop 0.35s ease; }
-        .global-loading-spinner { width: 54px; height: 54px; border-radius: 50%; border: 5px solid #A3AFC7; border-top-color: #1B2A4A; animation: globalLoadingSpin 0.85s linear infinite; }
+        /* UPDATED (loading ring): the 12-segment ticking ring used by AccomForm.php / admin_student_list.php (same size, colour, mask and timing) */
+        .global-loading-spinner {
+            width: 64px; height: 64px; border: 0; border-radius: 50%; box-sizing: border-box;
+            background: conic-gradient(from 0deg, rgba(27,42,74,0.12) 0deg, rgba(27,42,74,0.35) 120deg, rgba(27,42,74,0.7) 240deg, #1B2A4A 330deg, #1B2A4A 360deg);
+            -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 9px), #000 calc(100% - 8px)),
+                          repeating-conic-gradient(from 5deg, #000 0deg 20deg, transparent 20deg 30deg);
+            -webkit-mask-composite: source-in;
+                    mask: radial-gradient(farthest-side, transparent calc(100% - 9px), #000 calc(100% - 8px)),
+                          repeating-conic-gradient(from 5deg, #000 0deg 20deg, transparent 20deg 30deg);
+                    mask-composite: intersect;
+            will-change: transform;
+            animation: cvRingSpin 1s steps(12, end) infinite;
+        }
+        @keyframes cvRingSpin { to { transform: rotate(360deg); } }
         .global-loading-text { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; font-size: 13px; font-weight: 700; color: #1B2A4A; text-transform: uppercase; letter-spacing: 0.6px; display: flex; align-items: center; gap: 8px; }
         .global-loading-dots span { animation: globalLoadingDots 1.2s infinite; opacity: 0; }
         .global-loading-dots span:nth-child(2) { animation-delay: 0.2s; }
@@ -1636,15 +2524,25 @@ $companies = $conn->query("
         .cv-top-toast strong { color: #ffffff; font-weight: 700; }
         .cv-top-toast.is-error i { color: #f87171; } /* ADJUSTMENT: an error gets a red icon, same popup otherwise */
 
+        /* ADJUSTMENT: clickable popup (administrator.php's .cv-top-toast[data-cv-go] pattern) — a small "View ›"
+           marks it; clicking it (or Enter / Space) opens what it is about: the Inbox (letter) or the company row. */
+        .cv-top-toast[data-cv-go] { pointer-events: auto; cursor: pointer; transition: opacity 0.35s, top 0.3s ease, background-color 0.15s ease; }
+        .cv-top-toast[data-cv-go]:hover { background: #24375E; }
+        .cv-top-toast[data-cv-go]:focus-visible { outline: 2px solid #F7C600; outline-offset: 2px; }
+        .cv-top-toast .cv-toast-go { flex-shrink: 0; margin-left: 6px; color: #F7C600; font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.4px; white-space: nowrap; }
+        .cv-top-toast .cv-toast-go i { color: inherit; font-size: 9px; margin-left: 3px; }
+        .cv-go-highlight { outline: 2px solid #F7C600 !important; outline-offset: 2px; animation: cvGoFlash 2.6s ease; }
+        @keyframes cvGoFlash { 0%, 55% { box-shadow: 0 0 0 5px rgba(247, 198, 0, 0.35); } 100% { box-shadow: 0 0 0 0 rgba(247, 198, 0, 0); } }
+
         /* ADJUSTMENT: application status in the company panel — same pill as the inbox used */
         .company-summary .summary-right .app-stage-chip {
             display: inline-flex; align-items: center; gap: 5px;
-            border-radius: 20px; padding: 3px 12px; font-size: 12px; font-weight: 700; white-space: nowrap;
+            border-radius: 0; padding: 3px 12px; font-size: 12px; font-weight: 700; white-space: nowrap;
         }
-        .app-stage-chip.awaiting { background: #fef9c3; color: #854d0e; }
-        .app-stage-chip.pending  { background: #dbeafe; color: #1e40af; }
-        .pending-request-badge.app-stage-awaiting { background: #fef9c3; color: #854d0e; }
-        .pending-request-badge.app-stage-pending  { background: #dbeafe; color: #1e40af; }
+        .app-stage-chip.awaiting { background: #FAF3DC; color: #A0850A; }
+        .app-stage-chip.pending  { background: #E7ECF7; color: #1B2A4A; }
+        .pending-request-badge.app-stage-awaiting { background: #FAF3DC; color: #A0850A; }
+        .pending-request-badge.app-stage-pending  { background: #E7ECF7; color: #1B2A4A; }
 
         .toggle-input { display: none; }
         .toggle-input:checked ~ .details-pane { display: block; }
@@ -1653,11 +2551,11 @@ $companies = $conn->query("
         .details-pane {
             display: none;
             padding: 20px 22px;
-            border-top: 1px solid #f0f0f0;
-            background: #fafafa;
+            border-top: 1px solid #DCE1EC;
+            background: #F3F5F9;
         }
         .details-pane p { font-size: 14px; margin-bottom: 8px; }
-        .details-pane p b { color: #4a5568; }
+        .details-pane p b { color: #5A6272; }
 
         /* ══ ADJUSTMENT: COMPANY PROFILE / BRIEF DESCRIPTION ══
            Shown at the top of each company's details pane. Content comes
@@ -1668,7 +2566,7 @@ $companies = $conn->query("
         .company-profile-box {
             background: #ffffff;
             border: 1px solid var(--border);
-            border-radius: var(--radius-md);
+            border-radius: 0;
             padding: 14px 16px;
             margin: 0 0 14px 0;
         }
@@ -1711,7 +2609,7 @@ $companies = $conn->query("
 
         .map iframe {
             width: 100%; height: 240px;
-            border: 0; border-radius: 10px;
+            border: 0; border-radius: 0;
             margin: 12px 0;
         }
 
@@ -1785,15 +2683,15 @@ $companies = $conn->query("
             margin: 14px 0 10px;
             padding: 20px 14px;
             background: #d8dde8;
-            border-radius: 12px;
+            border-radius: 0;
         }
         .dr-paper {
             background: #fff;
             width: 794px;
             max-width: 100%;
             height: 1123px;
-            border: 1px solid #b0b8cc;
-            box-shadow: 0 4px 24px rgba(0,0,0,.14);
+            border: 1px solid #C3CADA;
+            box-shadow: none;
             font-family: "Times New Roman","Crimson Pro",Times,serif;
             color: #1a1a1a;
             display: flex;
@@ -1850,7 +2748,7 @@ $companies = $conn->query("
             flex-shrink: 0;
         }
         .dr-title-band h1 {
-            font-family: 'DM Sans', sans-serif;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             font-size: 16px; font-weight: 700; color: var(--maroon);
             letter-spacing: .035em; text-transform: uppercase;
         }
@@ -1898,7 +2796,7 @@ $companies = $conn->query("
 
         .dr-section-title {
             font-size: 13px; font-weight: 700; color: #1a1a1a;
-            margin: 16px 0 8px; border-bottom: 1px solid #e5e7eb; padding-bottom: 4px;
+            margin: 16px 0 8px; border-bottom: 1px solid #DCE1EC; padding-bottom: 4px;
         }
         .dr-section-title:first-child { margin-top: 0; }
         .dr-footer-band {
@@ -1921,18 +2819,18 @@ $companies = $conn->query("
         .dr-avatar img { width: 100%; height: 100%; object-fit: cover; display: block; }
         .dr-resume-mirror-info { margin-bottom: 2px; }
         .dr-resume-mirror-info p {
-            font-family: 'DM Sans', sans-serif;
-            font-size: 12.5px; color: #4b5563;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            font-size: 12.5px; color: #5A6272;
             margin: 0 0 3px; line-height: 1.5;
         }
-        .dr-resume-mirror-info p b { color: #1a1a2e; font-weight: 700; margin-right: 4px; }
+        .dr-resume-mirror-info p b { color: #2d3748; font-weight: 700; margin-right: 4px; }
         .dr-applicant-badges { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 7px; }
         .dr-badge-pill {
             display: inline-flex; align-items: center; gap: 5px;
-            font-family: 'DM Sans', sans-serif; font-size: 11px; font-weight: 700;
-            padding: 3px 10px; border-radius: 20px;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; font-size: 11px; font-weight: 700;
+            padding: 3px 10px; border-radius: 0;
         }
-        .dr-badge-company { background: #d1fae5; color: #166534; }
+        .dr-badge-company { background: #EAF3EA; color: #2C5A2C; }
 
         /* Skill / Experience entry boxes — mirrors admin's fv-entry-box
            (numbered "Skill N" / "Experience N" locked-field look) ── */
@@ -1940,46 +2838,46 @@ $companies = $conn->query("
         .dr-entry-item { margin-bottom: 0; }
         .dr-entry-item + .dr-entry-item { margin-top: 10px; }
         .dr-field-label {
-            font-family: 'DM Sans', sans-serif; font-size: 10.5px; font-weight: 700;
-            color: #6b7280; text-transform: uppercase; letter-spacing: 0.04em;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; font-size: 10.5px; font-weight: 700;
+            color: #5A6272; text-transform: uppercase; letter-spacing: 0.04em;
             margin-bottom: 4px;
         }
         .dr-entry-box {
-            font-family: 'DM Sans', sans-serif;
-            font-size: 12.5px; color: #374151; line-height: 1.6;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            font-size: 12.5px; color: #2d3748; line-height: 1.6;
             background: #f4f5fb; border: 1.5px solid var(--dr-rule);
-            border-radius: 10px; padding: 10px 14px;
+            border-radius: 0; padding: 10px 14px;
             white-space: pre-wrap; word-break: break-word;
         }
-        .dr-empty-note { font-family: 'DM Sans', sans-serif; font-size: 12px; color: #a0aec0; font-style: italic; }
+        .dr-empty-note { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; font-size: 12px; color: #8A93A6; font-style: italic; }
 
         /* Submitted Documents table, mirrors admin's fv-doc-table ── */
         .dr-doc-table { width: 100%; border-collapse: collapse; border: 1px solid #000; font-size: 12px; margin-top: 4px; }
-        .dr-doc-table td { border: 1px solid #000; padding: 7px 10px; vertical-align: middle; font-family: 'DM Sans', sans-serif; }
+        .dr-doc-table td { border: 1px solid #000; padding: 7px 10px; vertical-align: middle; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
         .dr-doc-table .dr-doc-th td { font-weight: 700; background: #f4f5fb; text-align: center; }
         .dr-doc-thumb {
-            width: 38px; height: 38px; border-radius: 6px; overflow: hidden;
+            width: 38px; height: 38px; border-radius: 0; overflow: hidden;
             flex-shrink: 0; border: 1px solid #ddd; display: inline-flex;
         }
         .dr-doc-thumb.clickable { cursor: pointer; }
         .dr-doc-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
         .dr-doc-nothumb {
-            width: 38px; height: 38px; border-radius: 6px; background: #f3f4f6;
+            width: 38px; height: 38px; border-radius: 0; background: #F3F5F9;
             display: inline-flex; align-items: center; justify-content: center;
         }
         .dr-doc-row-name { display: flex; align-items: center; gap: 10px; }
         .dr-doc-label-text { font-size: 12.5px; }
-        .dr-status-chip { font-size: 10px; font-weight: 700; padding: 3px 9px; border-radius: 8px; white-space: nowrap; display: inline-block; }
-        .dr-status-chip.verified { background: #dcfce7; color: #166534; }
-        .dr-status-chip.denied   { background: #fee2e2; color: #991b1b; }
-        .dr-status-chip.pending  { background: #fef9c3; color: #854d0e; }
-        .dr-status-chip.none     { background: #f3f4f6; color: #6b7280; }
-        .dr-doc-remark-row td { background: #fff7f7; }
-        .dr-doc-remark { font-size: 10.5px; color: #991b1b; font-family: 'DM Sans', sans-serif; }
+        .dr-status-chip { font-size: 10px; font-weight: 700; padding: 3px 9px; border-radius: 0; white-space: nowrap; display: inline-block; }
+        .dr-status-chip.verified { background: #EAF3EA; color: #2C5A2C; }
+        .dr-status-chip.denied   { background: #F7E9E9; color: #A02A2A; }
+        .dr-status-chip.pending  { background: #FAF3DC; color: #A0850A; }
+        .dr-status-chip.none     { background: #F3F5F9; color: #5A6272; }
+        .dr-doc-remark-row td { background: #F7E9E9; }
+        .dr-doc-remark { font-size: 10.5px; color: #A02A2A; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
         .dr-req-note {
-            margin-top: 14px; font-size: 12px; color: #92400e; background: #fef3c7;
-            border-radius: 6px; padding: 8px 12px; line-height: 1.5;
-            font-family: 'DM Sans', sans-serif;
+            margin-top: 14px; font-size: 12px; color: #A0850A; background: #FAF3DC;
+            border-radius: 0; padding: 8px 12px; line-height: 1.5;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
         }
         .dr-req-note i { margin-right: 4px; }
 
@@ -1992,7 +2890,7 @@ $companies = $conn->query("
             color: white;
             border: none;
             padding: 10px 22px;
-            border-radius: 8px;
+            border-radius: 0;
             cursor: pointer;
             font-size: 14px;
             font-weight: 600;
@@ -2006,9 +2904,9 @@ $companies = $conn->query("
             display: inline-flex;
             align-items: center;
             gap: 6px;
-            background: #d1fae5;
-            color: #065f46;
-            border-radius: 8px;
+            background: #EAF3EA;
+            color: #2C5A2C;
+            border-radius: 0;
             padding: 8px 14px;
             font-size: 14px;
             font-weight: 700;
@@ -2027,9 +2925,9 @@ $companies = $conn->query("
             display: inline-flex;
             align-items: center;
             gap: 6px;
-            background: #fef3c7;
-            color: #92400e;
-            border-radius: 8px;
+            background: #FAF3DC;
+            color: #A0850A;
+            border-radius: 0;
             padding: 8px 14px;
             font-size: 13px;
             font-weight: 700;
@@ -2037,11 +2935,11 @@ $companies = $conn->query("
             margin-bottom: 8px;
         }
         .btn-cancel-request {
-            background: #fff1f1;
-            color: #dc2626;
-            border: 1.5px solid #fecaca;
+            background: #F7E9E9;
+            color: #A02A2A;
+            border: 1.5px solid #E3BCBC;
             padding: 10px 22px;
-            border-radius: 8px;
+            border-radius: 0;
             cursor: pointer;
             font-size: 14px;
             font-weight: 600;
@@ -2052,7 +2950,7 @@ $companies = $conn->query("
             align-items: center;
             gap: 6px;
         }
-        .btn-cancel-request:hover { background: #dc2626; color: #fff; }
+        .btn-cancel-request:hover { background: #A02A2A; color: #fff; }
 
         /* ══════════════════════════════════════════════════════════════
            ADJUSTMENT (this revision): "mini" Cancel Request button shown
@@ -2069,11 +2967,11 @@ $companies = $conn->query("
            and submit the SAME per-company hidden form, so there is only
            ever one code path that actually cancels a request. ══════ */
         .btn-cancel-request-mini {
-            background: #fff1f1;
-            color: #dc2626;
-            border: 1.5px solid #fecaca;
+            background: #F7E9E9;
+            color: #A02A2A;
+            border: 1.5px solid #E3BCBC;
             padding: 5px 12px;
-            border-radius: 20px;
+            border-radius: 0;
             cursor: pointer;
             font-size: 11.5px;
             font-weight: 700;
@@ -2084,7 +2982,7 @@ $companies = $conn->query("
             gap: 5px;
             white-space: nowrap;
         }
-        .btn-cancel-request-mini:hover { background: #dc2626; color: #fff; }
+        .btn-cancel-request-mini:hover { background: #A02A2A; color: #fff; }
         .btn-cancel-request-mini i { font-size: 11px; }
 
         /* ══════════════════════════════════════════════════════════════
@@ -2107,7 +3005,7 @@ $companies = $conn->query("
             color: #fff;
             border: 1.5px solid var(--maroon);
             padding: 5px 12px;
-            border-radius: 20px;
+            border-radius: 0;
             cursor: pointer;
             font-size: 11.5px;
             font-weight: 700;
@@ -2131,11 +3029,11 @@ $companies = $conn->query("
            the shared #digitalResumeModal instead. It stays visible
            whether the row is collapsed or expanded. ══ */
         .btn-view-resume-mini {
-            background: #eef2ff;
-            color: #1a237e;
-            border: 1.5px solid #c7d2fe;
+            background: #E7ECF7;
+            color: #1B2A4A;
+            border: 1.5px solid #C3CADA;
             padding: 5px 12px;
-            border-radius: 20px;
+            border-radius: 0;
             cursor: pointer;
             font-size: 11.5px;
             font-weight: 700;
@@ -2146,7 +3044,7 @@ $companies = $conn->query("
             gap: 5px;
             white-space: nowrap;
         }
-        .btn-view-resume-mini:hover { background: #1a237e; color: #fff; border-color: #1a237e; }
+        .btn-view-resume-mini:hover { background: #1B2A4A; color: #fff; border-color: #1B2A4A; }
         .btn-view-resume-mini i { font-size: 11px; }
 
         /* Hide the mini cancel / apply buttons once the row is expanded —
@@ -2181,25 +3079,25 @@ $companies = $conn->query("
         .popup-content {
             background: white;
             padding: 32px 28px;
-            border-radius: 14px;
+            border-radius: 0;
             text-align: center;
             width: 360px;
             max-width: 92%;
-            box-shadow: 0 20px 60px rgba(0,0,0,0.2);
+            box-shadow: none;
             animation: popIn 0.3s cubic-bezier(0.34,1.56,0.64,1);
         }
         @keyframes popIn {
             from { opacity: 0; transform: scale(0.88); }
             to   { opacity: 1; transform: scale(1); }
         }
-        .popup-content h3 { margin-top: 0; margin-bottom: 10px; color: var(--maroon); font-size: 18px; font-family: 'Lora', serif; }
-        .popup-content p  { font-size: 14px; color: #6b7280; margin-bottom: 20px; }
+        .popup-content h3 { margin-top: 0; margin-bottom: 10px; color: var(--maroon); font-size: 18px; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        .popup-content p  { font-size: 14px; color: #5A6272; margin-bottom: 20px; }
         .popup-content button {
             background: var(--maroon);
             color: white;
             padding: 11px 24px;
             border: none;
-            border-radius: 8px;
+            border-radius: 0;
             cursor: pointer;
             font-size: 14px;
             font-weight: 600;
@@ -2209,20 +3107,20 @@ $companies = $conn->query("
         .popup-content button:hover { opacity: 0.88; }
 
         /* ══ ALREADY-REGISTERED POPUP ══ */
-        #registeredModal .popup-content { border-top: 5px solid #d97706; }
-        #registeredModal .popup-content h3 { color: #92400e; }
+        #registeredModal .popup-content { border: 1px solid var(--grid-border); }
+        #registeredModal .popup-content h3 { color: #A0850A; }
         #registeredModal .popup-icon { font-size: 42px; margin-bottom: 12px; display: block; }
-        #registeredModal .popup-content button { background: #d97706; }
+        #registeredModal .popup-content button { background: #A0850A; }
 
         /* ══ PENDING-APPLICATION-BLOCKS-APPLY POPUP ══
            ADJUSTMENT: shown when the student clicks Apply on a company
            OTHER than the one they already have a pending request with —
            mirrors #registeredModal's styling exactly, just a distinct
            id/message so the copy is accurate to the actual guard. */
-        #pendingBlockedModal .popup-content { border-top: 5px solid #d97706; }
-        #pendingBlockedModal .popup-content h3 { color: #92400e; }
+        #pendingBlockedModal .popup-content { border: 1px solid var(--grid-border); }
+        #pendingBlockedModal .popup-content h3 { color: #A0850A; }
         #pendingBlockedModal .popup-icon { font-size: 42px; margin-bottom: 12px; display: block; }
-        #pendingBlockedModal .popup-content button { background: #d97706; }
+        #pendingBlockedModal .popup-content button { background: #A0850A; }
 
         /* ══ CANCEL-REQUEST CONFIRMATION POPUP ══
            ADJUSTMENT (this revision): replaces the old browser-native
@@ -2233,21 +3131,21 @@ $companies = $conn->query("
            the original details-pane Cancel Request button — see
            openCancelConfirm() / submitCancelConfirm() in the <script>
            block further down. */
-        #cancelConfirmModal .popup-content { border-top: 5px solid #dc2626; }
-        #cancelConfirmModal .popup-content h3 { color: #991b1b; }
+        #cancelConfirmModal .popup-content { border: 1px solid var(--grid-border); }
+        #cancelConfirmModal .popup-content h3 { color: #A02A2A; }
         #cancelConfirmModal .popup-icon { font-size: 42px; margin-bottom: 12px; display: block; }
         #cancelConfirmModal .ccm-actions { display: flex; gap: 10px; justify-content: center; }
         #cancelConfirmModal .ccm-actions button { flex: 1; }
-        #cancelConfirmModal .ccm-btn-keep { background: #e5e7eb !important; color: #374151 !important; }
-        #cancelConfirmModal .ccm-btn-confirm { background: #dc2626 !important; }
+        #cancelConfirmModal .ccm-btn-keep { background: #DCE1EC !important; color: #2d3748 !important; }
+        #cancelConfirmModal .ccm-btn-confirm { background: #A02A2A !important; }
 
         /* ══ ADJUSTMENT: REQUIREMENTS-NOT-VERIFIED POPUP ══
            Shown when the student clicks Apply (mini or full-size) while
            any of the 8 requirements is not yet Verified. Built on the
            same shared .popup-modal / .popup-content base as every other
            modal on this page; only this id's own rules are added. */
-        #reqUnverifiedModal .popup-content { border-top: 5px solid #dc2626; width: 440px; }
-        #reqUnverifiedModal .popup-content h3 { color: #991b1b; }
+        #reqUnverifiedModal .popup-content { border: 1px solid var(--grid-border); width: 440px; }
+        #reqUnverifiedModal .popup-content h3 { color: #A02A2A; }
         #reqUnverifiedModal .popup-icon { font-size: 42px; margin-bottom: 12px; display: block; }
         #reqUnverifiedModal .popup-content p { margin-bottom: 14px; }
         #reqUnverifiedModal .rum-list {
@@ -2258,7 +3156,7 @@ $companies = $conn->query("
             max-height: 240px;
             overflow-y: auto;
             border: 1px solid var(--border);
-            border-radius: var(--radius-md);
+            border-radius: 0;
         }
         #reqUnverifiedModal .rum-list li {
             display: flex;
@@ -2275,17 +3173,257 @@ $companies = $conn->query("
             flex-shrink: 0;
             font-size: 11px;
             font-weight: 700;
-            border-radius: 20px;
+            border-radius: 0;
             padding: 2px 10px;
             white-space: nowrap;
         }
-        #reqUnverifiedModal .rum-chip.st-pending   { background: #fef3c7; color: #92400e; }
-        #reqUnverifiedModal .rum-chip.st-denied    { background: #fee2e2; color: #991b1b; }
-        #reqUnverifiedModal .rum-chip.st-missing   { background: #e5e7eb; color: #374151; }
+        #reqUnverifiedModal .rum-chip.st-pending   { background: #FAF3DC; color: #A0850A; }
+        #reqUnverifiedModal .rum-chip.st-denied    { background: #F7E9E9; color: #A02A2A; }
+        #reqUnverifiedModal .rum-chip.st-missing   { background: #DCE1EC; color: #2d3748; }
         #reqUnverifiedModal .rum-actions { display: flex; gap: 10px; justify-content: center; }
         #reqUnverifiedModal .rum-actions button { flex: 1; }
-        #reqUnverifiedModal .rum-btn-close { background: #e5e7eb !important; color: #374151 !important; }
-        #reqUnverifiedModal .rum-btn-go { background: #dc2626 !important; }
+        #reqUnverifiedModal .rum-btn-close { background: #DCE1EC !important; color: #2d3748 !important; }
+        #reqUnverifiedModal .rum-btn-go { background: #A02A2A !important; }
+
+        /* ══ ADJUSTMENT: PREFERRED-PLACEMENT MISMATCH / REPLACED POPUPS ══
+           Same shared .popup-modal / .popup-content base and the same button
+           styling as #cancelConfirmModal / #reqUnverifiedModal. */
+        /* UPDATED: #placementMismatchModal now uses the same layout as the manual
+           Add Student form in admin_student_list.php (#addStudentModal): square
+           bordered box, header with title + close button, compact body, and a
+           sticky right-aligned action bar. The box is capped to the viewport and
+           its body scrolls, so the popup no longer stretches top-to-bottom. */
+        #placementMismatchModal { align-items: center; padding: 20px 0; box-sizing: border-box; }
+        #placementMismatchModal .pm-box {
+            background: #fff; border: 1px solid var(--grid-border); border-radius: 0;
+            width: 720px; max-width: 94%; max-height: calc(100vh - 40px); max-height: calc(100dvh - 40px);
+            display: flex; flex-direction: column; padding: 16px 24px 0 24px; box-sizing: border-box;
+            text-align: left; animation: popIn 0.3s ease;
+        }
+        #placementMismatchModal .pm-header {
+            display: flex; justify-content: space-between; align-items: center; flex-shrink: 0;
+            margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px solid var(--grid-border);
+        }
+        #placementMismatchModal .pm-header h3 {
+            margin: 0; color: var(--grid-navy); font-size: 15px; font-family: inherit;
+            text-transform: uppercase; letter-spacing: 0.4px;
+        }
+        #placementMismatchModal .pm-header h3 i { color: #A0850A; margin-right: 6px; }
+        #placementMismatchModal .pm-close {
+            background: none !important; border: none; font-size: 24px; line-height: 1; padding: 0 4px;
+            cursor: pointer; color: var(--grid-muted); transition: color 0.2s;
+        }
+        #placementMismatchModal .pm-close:hover { color: var(--grid-navy); opacity: 1; }
+        #placementMismatchModal .pm-body { overflow-y: auto; flex: 1 1 auto; min-height: 0; }
+        #placementMismatchModal .pm-body p { font-size: 13px; color: #475569; line-height: 1.5; margin: 0 0 10px 0; }
+        #placementMismatchModal .pm-body p strong { color: #1e293b; }
+        #placementMismatchModal .pm-diff { width: 100%; border-collapse: collapse; margin: 0 0 10px 0; font-size: 12.5px; text-align: left; border: 1px solid var(--grid-border); }
+        #placementMismatchModal .pm-diff th { background: #F0F2F8; color: var(--grid-navy); padding: 5px 8px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.3px; font-size: 11px; }
+        #placementMismatchModal .pm-diff td { padding: 5px 8px; border-top: 1px solid var(--border-light); color: var(--ink); word-break: break-word; vertical-align: top; }
+        #placementMismatchModal .pm-diff td:first-child { font-weight: 600; color: #1e293b; white-space: nowrap; }
+        #placementMismatchModal .pm-diff td.pm-empty { color: #9aa2b1; font-style: italic; }
+        #placementMismatchModal .pm-note { font-size: 11px !important; color: var(--grid-muted) !important; }
+        #placementMismatchModal .pm-actions {
+            display: flex; gap: 12px; justify-content: flex-end; flex-shrink: 0;
+            background: #fff; margin-top: 4px; padding: 10px 0 12px 0; border-top: 1px solid var(--grid-border);
+        }
+        #placementMismatchModal .pm-actions button {
+            padding: 10px 24px; border-radius: 0; font-weight: 600; cursor: pointer; font-size: 12px;
+            text-transform: uppercase; letter-spacing: 0.3px; transition: opacity 0.2s;
+        }
+        #placementMismatchModal .pm-btn-no { background: #fff !important; color: var(--grid-navy) !important; border: 1px solid var(--grid-border) !important; }
+        #placementMismatchModal .pm-btn-no:hover { background: #f3f4f7 !important; opacity: 1; }
+        #placementMismatchModal .pm-btn-yes { background: var(--grid-navy) !important; color: #fff !important; border: 1px solid var(--grid-navy) !important; }
+        @media (max-width: 600px) {
+            #placementMismatchModal .pm-box { padding: 14px 14px 0 14px; }
+            #placementMismatchModal .pm-actions { flex-direction: column-reverse; }
+            #placementMismatchModal .pm-actions button { width: 100%; }
+            #placementMismatchModal .pm-diff td:first-child { white-space: normal; }
+        }
+
+        #ciMismatchModal { align-items: center; padding: 20px 0; box-sizing: border-box; }
+        #ciMismatchModal .pm-box {
+            background: #fff; border: 1px solid var(--grid-border); border-radius: 0;
+            width: 720px; max-width: 94%; max-height: calc(100vh - 40px); max-height: calc(100dvh - 40px);
+            display: flex; flex-direction: column; padding: 16px 24px 0 24px; box-sizing: border-box;
+            text-align: left; animation: popIn 0.3s ease;
+        }
+        #ciMismatchModal .pm-header {
+            display: flex; justify-content: space-between; align-items: center; flex-shrink: 0;
+            margin-bottom: 12px; padding-bottom: 8px; border-bottom: 1px solid var(--grid-border);
+        }
+        #ciMismatchModal .pm-header h3 {
+            margin: 0; color: var(--grid-navy); font-size: 15px; font-family: inherit;
+            text-transform: uppercase; letter-spacing: 0.4px;
+        }
+        #ciMismatchModal .pm-header h3 i { color: #A0850A; margin-right: 6px; }
+        #ciMismatchModal .pm-close {
+            background: none !important; border: none; font-size: 24px; line-height: 1; padding: 0 4px;
+            cursor: pointer; color: var(--grid-muted); transition: color 0.2s;
+        }
+        #ciMismatchModal .pm-close:hover { color: var(--grid-navy); opacity: 1; }
+        #ciMismatchModal .pm-body { overflow-y: auto; flex: 1 1 auto; min-height: 0; }
+        #ciMismatchModal .pm-body p { font-size: 13px; color: #475569; line-height: 1.5; margin: 0 0 10px 0; }
+        #ciMismatchModal .pm-body p strong { color: #1e293b; }
+        #ciMismatchModal .pm-diff { width: 100%; border-collapse: collapse; margin: 0 0 10px 0; font-size: 12.5px; text-align: left; border: 1px solid var(--grid-border); }
+        #ciMismatchModal .pm-diff th { background: #F0F2F8; color: var(--grid-navy); padding: 5px 8px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.3px; font-size: 11px; }
+        #ciMismatchModal .pm-diff td { padding: 5px 8px; border-top: 1px solid var(--border-light); color: var(--ink); word-break: break-word; vertical-align: top; }
+        #ciMismatchModal .pm-diff td:first-child { font-weight: 600; color: #1e293b; white-space: nowrap; }
+        #ciMismatchModal .pm-diff td.pm-empty { color: #9aa2b1; font-style: italic; }
+        #ciMismatchModal .pm-note { font-size: 11px !important; color: var(--grid-muted) !important; }
+        #ciMismatchModal .pm-actions {
+            display: flex; gap: 12px; justify-content: flex-end; flex-shrink: 0;
+            background: #fff; margin-top: 4px; padding: 10px 0 12px 0; border-top: 1px solid var(--grid-border);
+        }
+        #ciMismatchModal .pm-actions button {
+            padding: 10px 24px; border-radius: 0; font-weight: 600; cursor: pointer; font-size: 12px;
+            text-transform: uppercase; letter-spacing: 0.3px; transition: opacity 0.2s;
+        }
+        #ciMismatchModal .pm-btn-no { background: #fff !important; color: var(--grid-navy) !important; border: 1px solid var(--grid-border) !important; }
+        #ciMismatchModal .pm-btn-no:hover { background: #f3f4f7 !important; opacity: 1; }
+        #ciMismatchModal .pm-btn-yes { background: var(--grid-navy) !important; color: #fff !important; border: 1px solid var(--grid-navy) !important; }
+        @media (max-width: 600px) {
+            #ciMismatchModal .pm-box { padding: 14px 14px 0 14px; }
+            #ciMismatchModal .pm-actions { flex-direction: column-reverse; }
+            #ciMismatchModal .pm-actions button { width: 100%; }
+            #ciMismatchModal .pm-diff td:first-child { white-space: normal; }
+        }
+
+
+        /* NEW (company invitations): same look as the placement popups, plus the Inbox invitation cards */
+        #ciMismatchModal, #ciConfirmModal, #ciAcceptedModal { z-index: 10040; }
+        #ciConfirmModal .popup-content, #ciAcceptedModal .popup-content { border: 1px solid var(--grid-border); width: 460px; }
+        #ciConfirmModal .popup-content h3 { color: #A0850A; }
+        #ciAcceptedModal .popup-content h3 { color: #2b6a3f; }
+        #ciConfirmModal .popup-icon, #ciAcceptedModal .popup-icon { font-size: 42px; margin-bottom: 12px; display: block; }
+        #ciConfirmModal .pm-actions, #ciAcceptedModal .pm-actions { display: flex; gap: 10px; justify-content: center; }
+        #ciConfirmModal .pm-actions button, #ciAcceptedModal .pm-actions button { flex: 1; }
+        #ciConfirmModal .pm-btn-close, #ciAcceptedModal .pm-btn-close { background: #DCE1EC !important; color: #2d3748 !important; }
+        #ciAcceptedModal .pm-btn-go { background: #A02A2A !important; }
+        #ciConfirmModal .ci-btn-danger { background: #A02A2A !important; }
+        #ciMismatchModal .pm-btn-yes:disabled, #ciMismatchModal .pm-btn-no:disabled { opacity: .5; cursor: not-allowed; }
+        .ci-inv-wrap { display: flex; flex-direction: column; gap: 12px; margin-bottom: 14px; }
+        .ci-inv-card { background: #fff; border: 1px solid var(--grid-border); border-left: 4px solid var(--grid-navy); border-radius: 0; padding: 14px 16px; }
+        .ci-inv-top { display: flex; gap: 12px; align-items: flex-start; }
+        .ci-inv-top > i { font-size: 22px; color: var(--grid-navy); margin-top: 2px; }
+        .ci-inv-title { font-weight: 700; font-size: 12.5px; color: var(--ink); text-transform: uppercase; letter-spacing: 0.3px; line-height: 1.3; }
+        .ci-inv-card .endo-help { margin-top: 8px; }
+        .ci-inv-card .endo-card-actions { margin-top: 12px; }
+        .ci-inv-card .endo-act { border-radius: 0; height: 36px; padding: 0 16px; justify-content: center; }
+        .ci-inv-status { margin-top: 10px; font-size: 12px; font-weight: 700; color: #A0850A; background: #FAF3DC; border: 1px solid #E6D9A8; padding: 7px 10px; }
+        .ci-inv-status i { margin-right: 4px; }
+
+        /* Preferred-placement "Updated" popup (unchanged look). */
+        #placementReplacedModal .popup-content { border: 1px solid var(--grid-border); width: 460px; }
+        #placementReplacedModal .popup-content h3 { color: #2b6a3f; }
+        #placementReplacedModal .popup-icon { font-size: 42px; margin-bottom: 12px; display: block; }
+        #placementReplacedModal .popup-content p { margin-bottom: 14px; }
+        #placementReplacedModal .pm-actions { display: flex; gap: 10px; justify-content: center; }
+        #placementReplacedModal .pm-actions button { flex: 1; }
+        #placementReplacedModal .pm-btn-close { background: #DCE1EC !important; color: #2d3748 !important; }
+        #placementReplacedModal .pm-btn-go { background: #A02A2A !important; }
+
+        /* ══ ADJUSTMENT: POPUP DESIGN — same look as the page's other dialogs (no icon) ══
+           Applies to the shared .popup-content popups: Incomplete Profile, Already Registered, Application Pending,
+           Cancel Request, Requirements Not Yet Verified, Preferred Placement Updated and the invitation popups.
+           The big round icon is gone; each popup now has a gold top bar, a left-aligned title with a thin divider, a
+           left-aligned message and a light button strip along the bottom. Only the look changed — the buttons keep their
+           ids, handlers and colours. */
+        #profileModal .popup-icon,
+        #registeredModal .popup-icon,
+        #pendingBlockedModal .popup-icon,
+        #cancelConfirmModal .popup-icon,
+        #reqUnverifiedModal .popup-icon,
+        #placementReplacedModal .popup-icon,
+        #ciConfirmModal .popup-icon,
+        #ciAcceptedModal .popup-icon { display: none !important; }
+        #profileModal .popup-content,
+        #registeredModal .popup-content,
+        #pendingBlockedModal .popup-content,
+        #cancelConfirmModal .popup-content,
+        #reqUnverifiedModal .popup-content,
+        #placementReplacedModal .popup-content,
+        #ciConfirmModal .popup-content,
+        #ciAcceptedModal .popup-content { text-align: left; padding: 18px 24px 0; border: 1px solid var(--grid-border); border-top: 4px solid #F7C600; overflow: hidden; }
+        #profileModal .popup-content h3,
+        #registeredModal .popup-content h3,
+        #pendingBlockedModal .popup-content h3,
+        #cancelConfirmModal .popup-content h3,
+        #reqUnverifiedModal .popup-content h3,
+        #placementReplacedModal .popup-content h3,
+        #ciConfirmModal .popup-content h3,
+        #ciAcceptedModal .popup-content h3 { margin: 0 -24px 14px; padding: 0 24px 14px; border-bottom: 1px solid #DCE1EC; color: var(--grid-navy); font-size: 17px; font-weight: 700; text-align: left; }
+        #profileModal .popup-content p,
+        #registeredModal .popup-content p,
+        #pendingBlockedModal .popup-content p,
+        #cancelConfirmModal .popup-content p,
+        #reqUnverifiedModal .popup-content p,
+        #placementReplacedModal .popup-content p,
+        #ciConfirmModal .popup-content p,
+        #ciAcceptedModal .popup-content p { text-align: left; line-height: 1.6; margin: 0 0 14px; }
+        #profileModal .popup-content button,
+        #registeredModal .popup-content button,
+        #pendingBlockedModal .popup-content button,
+        #cancelConfirmModal .popup-content button,
+        #reqUnverifiedModal .popup-content button,
+        #placementReplacedModal .popup-content button,
+        #ciConfirmModal .popup-content button,
+        #ciAcceptedModal .popup-content button { text-transform: uppercase; letter-spacing: 0.4px; font-size: 13px; padding: 11px 24px; }
+        #profileModal .popup-content button, #registeredModal .popup-content button, #pendingBlockedModal .popup-content button { background: var(--grid-navy); }
+        #cancelConfirmModal .ccm-actions,
+        #reqUnverifiedModal .rum-actions,
+        #placementReplacedModal .pm-actions,
+        #ciConfirmModal .pm-actions,
+        #ciAcceptedModal .pm-actions,
+        #profileModal .popup-actions,
+        #registeredModal .popup-actions,
+        #pendingBlockedModal .popup-actions,
+        #cancelConfirmModal .popup-actions,
+        #reqUnverifiedModal .popup-actions,
+        #placementReplacedModal .popup-actions,
+        #ciConfirmModal .popup-actions,
+        #ciAcceptedModal .popup-actions { display: flex; gap: 10px; justify-content: flex-end !important; margin: 18px -24px 0; padding: 14px 24px; background: #F3F5F9; border-top: 1px solid #DCE1EC; }
+        #cancelConfirmModal .ccm-actions button,
+        #reqUnverifiedModal .rum-actions button,
+        #placementReplacedModal .pm-actions button,
+        #ciConfirmModal .pm-actions button,
+        #ciAcceptedModal .pm-actions button,
+        #profileModal .popup-actions button,
+        #registeredModal .popup-actions button,
+        #pendingBlockedModal .popup-actions button,
+        #cancelConfirmModal .popup-actions button,
+        #reqUnverifiedModal .popup-actions button,
+        #placementReplacedModal .popup-actions button,
+        #ciConfirmModal .popup-actions button,
+        #ciAcceptedModal .popup-actions button { flex: 0 0 auto; }
+        @media (max-width: 480px) {
+            #cancelConfirmModal .ccm-actions,
+            #reqUnverifiedModal .rum-actions,
+            #placementReplacedModal .pm-actions,
+            #ciConfirmModal .pm-actions,
+            #ciAcceptedModal .pm-actions,
+            #profileModal .popup-actions,
+            #registeredModal .popup-actions,
+            #pendingBlockedModal .popup-actions,
+            #cancelConfirmModal .popup-actions,
+            #reqUnverifiedModal .popup-actions,
+            #placementReplacedModal .popup-actions,
+            #ciConfirmModal .popup-actions,
+            #ciAcceptedModal .popup-actions { flex-direction: column-reverse; }
+            #cancelConfirmModal .ccm-actions button,
+            #reqUnverifiedModal .rum-actions button,
+            #placementReplacedModal .pm-actions button,
+            #ciConfirmModal .pm-actions button,
+            #ciAcceptedModal .pm-actions button,
+            #profileModal .popup-actions button,
+            #registeredModal .popup-actions button,
+            #pendingBlockedModal .popup-actions button,
+            #cancelConfirmModal .popup-actions button,
+            #reqUnverifiedModal .popup-actions button,
+            #placementReplacedModal .popup-actions button,
+            #ciConfirmModal .popup-actions button,
+            #ciAcceptedModal .popup-actions button { width: 100%; }
+        }
 
         /* ══ REQUIREMENT PREVIEW MODAL ══ */
         #reqPreviewModal {
@@ -2300,8 +3438,8 @@ $companies = $conn->query("
         }
         #reqPreviewModal img {
             max-width: 88vw; max-height: 88vh;
-            border-radius: 6px;
-            box-shadow: 0 8px 40px rgba(0,0,0,0.5);
+            border-radius: 0;
+            box-shadow: none;
         }
         #reqPreviewClose {
             position: absolute; top: 20px; right: 36px;
@@ -2312,62 +3450,55 @@ $companies = $conn->query("
 
         /* ══ NOT-DEPLOYED MODAL ══ */
         #not-deployed-modal {
-            display: none;
-            position: fixed;
-            inset: 0;
-            z-index: 99999;
-            background: rgba(7, 20, 95, 0.55);
-            backdrop-filter: blur(3px);
-            align-items: center;
-            justify-content: center;
+            display: none; position: fixed; inset: 0; z-index: 99999;
+            background: rgba(0,0,0,0.5);
+            align-items: center; justify-content: center;
         }
         #not-deployed-modal.show { display: flex; }
         .ndm-box {
-            background: #fff;
-            border-radius: 18px;
-            padding: 36px 32px 28px;
-            max-width: 400px;
-            width: calc(100% - 40px);
-            box-shadow: 0 20px 60px rgba(7,20,95,0.22), 0 4px 16px rgba(0,0,0,0.10);
+            background: #fff; border-radius: 0; border: 1px solid var(--grid-border);
+            padding: 32px; max-width: 420px; width: calc(100% - 40px);
             text-align: center;
-            animation: ndm-pop 0.32s cubic-bezier(.34,1.56,.64,1) both;
+            animation: ndm-pop 0.3s ease both;
         }
         @keyframes ndm-pop {
             from { opacity: 0; transform: scale(0.88) translateY(18px); }
             to   { opacity: 1; transform: scale(1)    translateY(0); }
         }
         .ndm-icon {
-            width: 68px; height: 68px;
-            border-radius: 50%;
-            background: linear-gradient(135deg, #fef3c7, #fde68a);
-            border: 3px solid #f59e0b;
+            width: auto; height: auto; border-radius: 0;
+            background: none; border: none;
             display: flex; align-items: center; justify-content: center;
-            font-size: 30px;
-            margin: 0 auto 18px;
+            font-size: 48px; color: var(--grid-amber); margin: 0 auto 16px;
         }
-        .ndm-title { font-size: 18px; font-weight: 800; color: var(--maroon); margin-bottom: 10px; font-family: 'Lora', serif; }
-        .ndm-message { font-size: 13.5px; color: #4b5563; line-height: 1.65; margin-bottom: 22px; }
+        .ndm-title {
+            font-size: 18px; font-weight: 700; color: #1e293b; margin-bottom: 12px;
+            text-transform: uppercase; letter-spacing: 0.3px;
+        }
+        .ndm-message { font-size: 14px; color: var(--grid-muted); line-height: 1.6; margin-bottom: 24px; }
         .ndm-page-name {
-            display: inline-block;
-            background: #f0f4f8; border: 1.5px solid #e2e8f0;
-            border-radius: 8px; padding: 3px 12px;
-            font-weight: 700; color: var(--maroon); font-size: 13px; margin-bottom: 18px;
+            display: inline-block; background: var(--grid-bg); border: 1px solid var(--grid-border);
+            border-radius: 0; padding: 4px 12px; font-weight: 700;
+            color: var(--grid-navy); font-size: 12px; margin-bottom: 14px;
+            text-transform: uppercase; letter-spacing: 0.4px;
         }
         .ndm-status-badge {
-            display: inline-flex; align-items: center; gap: 6px;
-            background: #fff7ed; border: 1.5px solid #fed7aa;
-            border-radius: 20px; padding: 5px 14px;
-            font-size: 12px; font-weight: 700; color: #c2410c; margin-bottom: 22px;
+            display: flex; align-items: center; justify-content: center; gap: 6px;
+            width: fit-content; margin-left: auto; margin-right: auto;
+            background: var(--grid-amber-bg); border: 1px solid #E6D9A8;
+            border-radius: 0; padding: 5px 14px;
+            font-size: 11px; font-weight: 700; color: var(--grid-amber); margin-bottom: 20px;
+            text-transform: uppercase; letter-spacing: 0.4px;
         }
-        .ndm-status-dot { width: 8px; height: 8px; border-radius: 50%; background: #f97316; flex-shrink: 0; }
+        .ndm-status-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--grid-amber); flex-shrink: 0; }
         .ndm-close-btn {
-            background: var(--maroon); color: white; border: none;
-            border-radius: 10px; padding: 11px 32px;
-            font-size: 14px; font-weight: 700; font-family: 'DM Sans', sans-serif;
-            cursor: pointer; transition: opacity 0.2s; width: 100%;
+            background: var(--grid-navy); color: white; border: 1px solid var(--grid-navy);
+            border-radius: 0; padding: 10px 24px; font-size: 12px; font-weight: 600;
+            text-transform: uppercase; letter-spacing: 0.4px;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; cursor: pointer; transition: opacity 0.2s; width: 100%;
         }
         .ndm-close-btn:hover { opacity: 0.88; }
-        .ndm-hint { font-size: 11.5px; color: #9ca3af; margin-top: 12px; }
+        .ndm-hint { font-size: 11.5px; color: var(--grid-muted); margin-top: 12px; }
 
         /* ══════════════════════════════════════════════════════════════
            ADJUSTMENT: DIGITAL RESUME MODAL — restyled to match the
@@ -2410,12 +3541,12 @@ $companies = $conn->query("
             position: sticky;
             top: 0;
             z-index: 200;
-            box-shadow: 0 2px 10px rgba(0,0,0,.35);
+            box-shadow: none;
         }
         .drm-toolbar-left { display: flex; align-items: center; gap: 10px; min-width: 0; }
         .drm-toolbar-left i { color: var(--gold); flex-shrink: 0; }
         .drm-toolbar-title {
-            font-family: 'Lora', serif;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             font-size: 0.85rem;
             font-weight: 700;
             color: #fff;
@@ -2429,7 +3560,7 @@ $companies = $conn->query("
             color: rgba(255,255,255,0.9);
             border: 1px solid rgba(255,255,255,0.28);
             padding: 7px 16px;
-            border-radius: 6px;
+            border-radius: 0;
             font-size: 12.5px;
             font-weight: 600;
             cursor: pointer;
@@ -2473,7 +3604,7 @@ $companies = $conn->query("
         }
         #endoInboxBadge {
             position: absolute; top: -5px; right: -5px;
-            background: #dc2626; color: #fff; border-radius: 50%;
+            background: #A02A2A; color: #fff; border-radius: 50%;
             min-width: 18px; height: 18px; font-size: 10px; font-weight: 700;
             display: none; align-items: center; justify-content: center;
             border: 2px solid var(--maroon); padding: 0 3px;
@@ -2486,41 +3617,41 @@ $companies = $conn->query("
         #endoInboxDrawer {
             background: #fff; width: 480px; max-width: 97vw; display: flex; flex-direction: column;
             box-shadow: -8px 0 32px rgba(0,0,0,0.18); animation: endoSlideIn 0.3s ease;
-            font-family: 'DM Sans', sans-serif;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
         }
         @keyframes endoSlideIn { from { transform: translateX(100%); } to { transform: translateX(0); } }
         .endo-inbox-head {
             padding: 18px 22px; background: var(--maroon); display: flex; align-items: center;
             justify-content: space-between; flex-shrink: 0;
         }
-        .endo-inbox-head h3 { margin: 0; color: var(--gold); font-size: 15px; display: flex; align-items: center; gap: 10px; font-family: 'Lora', serif; }
+        .endo-inbox-head h3 { margin: 0; color: var(--gold); font-size: 15px; display: flex; align-items: center; gap: 10px; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
         .endo-inbox-close { background: none; border: none; color: rgba(255,255,255,0.75); font-size: 22px; cursor: pointer; line-height: 1; }
         .endo-inbox-close:hover { color: #fff; }
-        #endoInboxBody { overflow-y: auto; flex: 1; padding: 18px 20px; background: #fafaf8; }
-        .endo-empty { text-align: center; color: #a0aec0; padding: 50px 20px; font-size: 13px; }
+        #endoInboxBody { overflow-y: auto; flex: 1; padding: 18px 20px; background: #F3F5F9; }
+        .endo-empty { text-align: center; color: #8A93A6; padding: 50px 20px; font-size: 13px; }
         .endo-empty i { font-size: 40px; display: block; margin-bottom: 14px; color: #cbd5e0; }
 
         .endo-card {
-            background: #fff; border: 1px solid var(--border); border-radius: 12px;
+            background: #fff; border: 1px solid var(--border); border-radius: 0;
             padding: 15px 16px; margin-bottom: 13px; position: relative;
         }
-        .endo-card.unread { border-color: #c7d2fe; box-shadow: 0 0 0 3px rgba(99,102,241,0.08); }
+        .endo-card.unread { border-color: #C3CADA; box-shadow: 0 0 0 3px rgba(27,42,74,0.08); }
         .endo-card-top { display: flex; gap: 12px; align-items: flex-start; }
         .endo-card-icon {
-            width: 40px; height: 40px; border-radius: 10px; background: #eef2ff; color: var(--maroon);
+            width: 40px; height: 40px; border-radius: 0; background: #E7ECF7; color: var(--maroon);
             display: flex; align-items: center; justify-content: center; font-size: 17px; flex-shrink: 0;
         }
         .endo-card-title { font-weight: 700; font-size: 14px; color: var(--ink); line-height: 1.3; }
         .endo-card-sub { font-size: 11.5px; color: var(--ink-faint); margin-top: 2px; }
-        .endo-new-pill { position: absolute; top: 12px; right: 12px; background: #dc2626; color: #fff; font-size: 9.5px; font-weight: 800; letter-spacing: .06em; padding: 2px 7px; border-radius: 10px; }
+        .endo-new-pill { position: absolute; top: 12px; right: 12px; background: #A02A2A; color: #fff; font-size: 9.5px; font-weight: 800; letter-spacing: .06em; padding: 2px 7px; border-radius: 0; }
         .endo-status {
             display: inline-flex; align-items: center; gap: 5px; margin-top: 10px;
-            font-size: 11px; font-weight: 700; padding: 4px 10px; border-radius: 20px;
+            font-size: 11px; font-weight: 700; padding: 4px 10px; border-radius: 0;
         }
-        .endo-status.awaiting { background: #fef9c3; color: #854d0e; }
-        .endo-status.pending  { background: #dbeafe; color: #1e40af; }
-        .endo-status.verified { background: #dcfce7; color: #166534; }
-        .endo-status.rejected { background: #fee2e2; color: #991b1b; }
+        .endo-status.awaiting { background: #FAF3DC; color: #A0850A; }
+        .endo-status.pending  { background: #E7ECF7; color: #1B2A4A; }
+        .endo-status.verified { background: #EAF3EA; color: #2C5A2C; }
+        .endo-status.rejected { background: #F7E9E9; color: #A02A2A; }
         .endo-help { font-size: 12px; color: var(--ink-muted); margin-top: 8px; line-height: 1.5; }
 
         /* ══════════════════════════════════════════════════════════════
@@ -2530,7 +3661,7 @@ $companies = $conn->query("
            placeholder + red Remark box, square full-width controls.
            ══════════════════════════════════════════════════════════════ */
         .cv-gallery { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 14px; }
-        .cv-gallery .req-item { display: flex; flex-direction: column; align-items: stretch; gap: 0; padding: 0; margin-bottom: 0; border: 1px solid #A3AFC7; border-radius: 0; overflow: hidden; background: #ffffff; box-shadow: 0 1px 3px rgba(27,42,74,0.16); text-align: left; position: relative; }
+        .cv-gallery .req-item { display: flex; flex-direction: column; align-items: stretch; gap: 0; padding: 0; margin-bottom: 0; border: 1px solid #A3AFC7; border-radius: 0; overflow: hidden; background: #ffffff; box-shadow: none; text-align: left; position: relative; }
         .cv-gallery .req-item.unread { border-color: #1B2A4A; box-shadow: 0 0 0 2px rgba(27,42,74,0.12); }
         .cv-card-preview { position: relative; flex: 1 0 132px; min-height: 132px; background: #E4EAF4; display: flex; align-items: center; justify-content: center; }
         .cv-gallery .cv-card-preview img.cv-thumb-img { position: absolute; top: 0; left: 0; width: 100%; height: 100%; margin: 0; border: none; border-radius: 0; object-fit: cover; object-position: top center; display: block; cursor: pointer; }
@@ -2545,7 +3676,7 @@ $companies = $conn->query("
         .cv-card-label { font-size: 13.5px; font-weight: 700; color: #1B2A4A; line-height: 1.3; }
         .cv-card-body .endo-card-sub { margin-top: -4px; }
         .cv-card-body .endo-help { margin-top: 0; }
-        .endo-batch-note { font-size: 11.5px; color: #1e40af; background: #eff6ff; border: 1px solid #bfdbfe; padding: 6px 9px; line-height: 1.4; } /* ADJUSTMENT: shared batch letter */
+        .endo-batch-note { font-size: 11.5px; color: #1B2A4A; background: #E7ECF7; border: 1px solid #C3CADA; padding: 6px 9px; line-height: 1.4; } /* ADJUSTMENT: shared batch letter */
         .endo-batch-note i { margin-right: 4px; }
         .cv-card-remark { display: none; align-items: flex-start; gap: 7px; padding: 7px 10px; background: #F2D5D1; border: 1px solid #D49A94; border-radius: 0; color: #A02A2A; font-size: 12px; line-height: 1.4; overflow-wrap: anywhere; }
         .cv-card-remark i { margin-top: 2px; flex-shrink: 0; }
@@ -2566,34 +3697,55 @@ $companies = $conn->query("
             width: 32px; height: 32px; padding: 0; border-radius: 0;
             display: inline-flex; align-items: center; justify-content: center;
             background: #ffffff; color: #1B2A4A; border: 1px solid #A3AFC7;
-            box-shadow: 0 1px 3px rgba(27,42,74,0.25); cursor: pointer; font-size: 13px;
+            box-shadow: none; cursor: pointer; font-size: 13px;
         }
         .cv-view-btn:hover { background: #1B2A4A; color: #ffffff; border-color: #1B2A4A; }
         .cv-gallery .cv-req-card[data-rejected="1"] .cv-card-preview > .cv-view-btn.cv-view-btn { display: inline-flex !important; } /* still view the rejected upload (beats the hide rule's specificity) */
         .cv-card-preview .cv-thumb-img, .cv-card-preview .cv-no-file.is-file { cursor: zoom-in; }
         button.cv-no-file { background: transparent; font-family: inherit; cursor: zoom-in; }
         button.cv-no-file:hover { background: #d7dfec; }
+        /* ADJUSTMENT: an uploaded PDF is shown the way AccomForm.php shows an uploaded PDF requirement — the same 90 x 90
+           red-tinted tile with the red PDF icon and a "PDF" label (.rce-pdf-thumb). The file name stays in the line under the
+           card; the tile and the eye button still open the in-page viewer. */
+        .cv-pdf-tile {
+            width: 90px; height: 90px; box-sizing: border-box; padding: 0; margin: 0;
+            background: var(--grid-red-bg); border: 1px solid #e3bcbc; border-radius: 0;
+            display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px;
+            font-family: inherit; cursor: zoom-in;
+        }
+        .cv-pdf-tile:hover { background: #f1dada; }
+        .cv-pdf-tile:focus-visible { outline: 2px solid var(--grid-red); outline-offset: 2px; }
+        .cv-pdf-tile i { font-size: 26px; color: var(--grid-red); }
+        .cv-pdf-tile span { font-size: 10px; color: var(--grid-red); font-weight: 700; letter-spacing: 0.4px; }
 
         /* ADJUSTMENT: in-page full-screen viewer body */
-        #endoFileModal { z-index: 10000; }
-        .endo-file-canvas { justify-content: flex-start; }
-        .endo-file-canvas img { display: block; max-width: 100%; height: auto; margin: 0 auto; background: #ffffff; box-shadow: 0 4px 24px rgba(0,0,0,0.25); }
-        .endo-file-canvas iframe { display: block; width: 100%; max-width: 960px; height: calc(100vh - 118px); border: none; background: #ffffff; box-shadow: 0 4px 24px rgba(0,0,0,0.25); }
-        .endo-remark-box { margin-top: 9px; background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; padding: 9px 11px; font-size: 12.5px; color: #7f1d1d; line-height: 1.5; }
-        .endo-remark-box b { color: #991b1b; display: block; margin-bottom: 2px; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+        /* UPDATED: the uploaded-letter preview is the same document viewer as administrator.php (#cvReqDocPreviewModal): dark navy
+           screen, navy bar with the gold file name, an image centred on black with 26px around it and fitted to the screen (no
+           scrolling, nothing cropped), a PDF in the browser's own viewer filling the area. */
+        #endoFileModal { z-index: 10000; background: #0F1A33; overflow: hidden; }
+        #endoFileModal .drm-toolbar { background: #1B2A4A; padding: 14px 20px; position: relative; flex-shrink: 0; box-shadow: 0 2px 12px rgba(0,0,0,0.4); }
+        #endoFileModal .drm-toolbar-title { color: var(--gold); font-size: 14px; }
+        .endo-file-canvas { flex: 1; min-height: 0; padding: 0; background: #ffffff; display: flex; flex-direction: row; align-items: stretch; justify-content: stretch; overflow: hidden; }
+        .endo-file-canvas.image-mode { background: #000000; padding: 26px; align-items: center; justify-content: center; }
+        .endo-file-canvas img { display: block; max-width: 100%; max-height: 100%; margin: auto; background: #ffffff; box-shadow: 0 8px 40px rgba(0,0,0,0.6); }
+        .endo-file-canvas iframe { display: block; width: 100%; height: 100%; max-width: none; border: none; background: #ffffff; box-shadow: none; }
+        .endo-file-unavailable { color: #C3CADA; font-size: 14px; font-weight: 600; display: flex; flex-direction: column; align-items: center; gap: 10px; margin: auto; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        .endo-file-unavailable i { font-size: 40px; color: #3E4963; }
+        .endo-remark-box { margin-top: 9px; background: #F7E9E9; border: 1px solid #E3BCBC; border-radius: 0; padding: 9px 11px; font-size: 12.5px; color: #A02A2A; line-height: 1.5; }
+        .endo-remark-box b { color: #A02A2A; display: block; margin-bottom: 2px; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
         .endo-upload-line { margin-top: 8px; font-size: 11.5px; color: var(--ink-muted); display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-        .endo-upload-line a { color: #1d4ed8; font-weight: 600; text-decoration: none; }
+        .endo-upload-line a { color: #1B2A4A; font-weight: 600; text-decoration: none; }
         .endo-upload-line a:hover { text-decoration: underline; }
         .endo-card-actions { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
         .endo-act {
-            border-radius: 8px; font-size: 12px; font-weight: 700; padding: 8px 14px; cursor: pointer;
+            border-radius: 0; font-size: 12px; font-weight: 700; padding: 8px 14px; cursor: pointer;
             display: inline-flex; align-items: center; gap: 6px; border: 1px solid transparent;
-            font-family: 'DM Sans', sans-serif; transition: all 0.2s;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; transition: all 0.2s;
         }
         .endo-act:disabled { opacity: 0.5; cursor: not-allowed; }
         .endo-act.primary { background: var(--maroon); color: #fff; }
         .endo-act.primary:hover { background: var(--active-nav); }
-        .endo-act.upload { background: #16a34a; color: #fff; }
+        .endo-act.upload { background: #2C5A2C; color: #fff; }
         .endo-act.upload:hover:not(:disabled) { opacity: 0.88; }
         .endo-act.ghost { background: #fff; color: var(--ink-muted); border-color: var(--border); }
         .endo-act.ghost:hover { background: var(--surface-soft); }
@@ -2601,23 +3753,93 @@ $companies = $conn->query("
 
         /* Letter viewer — reuses the Digital Resume modal shell (.drm-modal / .drm-toolbar / .drm-canvas) */
         #endoLetterModal { z-index: 10000; }
-        #endoLetterModal .drm-canvas-inner { overflow-x: auto; }
+        #endoLetterModal .drm-canvas-inner { overflow-x: auto; flex-shrink: 0; }
+        /* ADJUSTMENT: the canvas must grow with the full-height letter. As a flex item of the scrolling
+           modal it was allowed to shrink to its min-height, so the tail of a long letter overflowed the
+           canvas and was clipped / hidden while scrolling. flex-shrink:0 lets the whole letter scroll. */
+        #endoLetterModal .drm-canvas { flex-shrink: 0; height: auto; }
         #endoLetterFrame { width: 794px; min-width: 794px; height: 1200px; border: none; display: block; background: #d8dde8; }
-        .drm-tbtn-close.endo-pdf { background: #b8860b; border-color: #b8860b; color: #fff; }
-        .drm-tbtn-close.endo-pdf:hover { background: #9a7009; }
+        .drm-tbtn-close.endo-pdf { background: #A0850A; border-color: #A0850A; color: #fff; }
+        .drm-tbtn-close.endo-pdf:hover { background: #A0850A; }
         .drm-tbtn-close:disabled { opacity: .6; cursor: wait; }
 
         #endoToast {
             position: fixed; bottom: 30px; left: 50%; transform: translateX(-50%) translateY(90px);
-            background: #1e293b; color: #fff; padding: 13px 20px; border-radius: 12px;
-            font-family: 'DM Sans', sans-serif; font-size: 13.5px; font-weight: 600;
+            background: #2d3748; color: #fff; padding: 13px 20px; border-radius: 0;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; font-size: 13.5px; font-weight: 600;
             display: flex; align-items: center; gap: 10px; z-index: 10050; opacity: 0; max-width: 92vw;
             transition: transform .35s cubic-bezier(0.34,1.56,0.64,1), opacity .3s;
-            box-shadow: 0 8px 30px rgba(0,0,0,0.25); border-left: 4px solid #16a34a;
+            box-shadow: 0 8px 24px rgba(27,42,74,0.30); border: 1px solid #55668C;
         }
         #endoToast.show { transform: translateX(-50%) translateY(0); opacity: 1; }
-        #endoToast.error { border-left-color: #dc2626; }
-        #endoToast button { background: rgba(255,255,255,0.15); border: 1px solid rgba(255,255,255,0.3); color: #fff; border-radius: 6px; padding: 4px 10px; font-size: 12px; font-weight: 700; cursor: pointer; margin-left: 4px; }
+        #endoToast.error { border-color: #A02A2A; }
+        #endoToast button { background: rgba(255,255,255,0.15); border: 1px solid rgba(255,255,255,0.3); color: #fff; border-radius: 0; padding: 4px 10px; font-size: 12px; font-weight: 700; cursor: pointer; margin-left: 4px; }
+        /* ══ Field Ops Grid (AccomForm.php) — shared additions ══
+           Responsive attendance bar + visible keyboard focus + reduced
+           motion, exactly as AccomForm.php defines them. */
+        @media (max-width: 768px) {
+            #att-notif-bar,
+            #att-notif-bar.sidebar-collapsed {
+                left: 50% !important;
+                width: calc(100% - 20px) !important;
+                max-width: none !important;
+            }
+        }
+        .sidebar.collapsed .logout-link a { border-color: transparent; }
+        .anb-btn:focus-visible, .anb-close:focus-visible, .ndm-close-btn:focus-visible,
+        .toggle-btn:focus-visible { outline: 2px solid #F7C600; outline-offset: 2px; }
+        @media (prefers-reduced-motion: reduce) {
+            .ndm-box, .anb-pulse, .sidebar-badge-att, .sidebar-badge-journal, .sidebar-badge-endo { animation: none; }
+        }
+        /* ══ Field Ops Grid (AccomForm.php) — page typography ══
+           Square, flat, navy; small uppercase labels and buttons. Only
+           the look changes — every class the scripts rely on is kept. */
+        .page-inner h2 {
+            color: var(--grid-navy); font-size: 20px;
+            border-bottom: 1px solid var(--grid-border);
+            text-transform: uppercase; letter-spacing: 0.6px;
+        }
+        .company-row { border: 1px solid var(--grid-border); }
+        .company-row:hover { border-color: var(--grid-navy); }
+        .company-summary .company-name {
+            color: var(--grid-navy); font-size: 14px;
+            text-transform: uppercase; letter-spacing: 0.3px;
+        }
+        .company-summary .company-name i { color: var(--grid-navy); }
+        .details-pane { border-top: 1px solid var(--grid-border-soft); }
+        .details-pane p b { color: var(--grid-navy); }
+        .company-profile-box { border: 1px solid var(--grid-border); }
+        .company-profile-box .cpb-title { color: var(--grid-navy); }
+        .btn-apply, .btn-cancel-request, .popup-content button, .endo-act, .drm-tbtn-close {
+            font-size: 12px; text-transform: uppercase; letter-spacing: 0.4px;
+        }
+        .btn-apply { border: 1px solid var(--grid-navy); background: var(--grid-navy); }
+        .btn-cancel-request, .btn-cancel-request-mini, .btn-view-resume-mini, .btn-apply-mini { border-width: 1px; }
+        .btn-apply-mini, .btn-cancel-request-mini, .btn-view-resume-mini,
+        .company-summary .summary-right .badge-current,
+        .company-summary .summary-right .app-stage-chip,
+        .registered-badge, .pending-request-badge {
+            font-size: 11px; text-transform: uppercase; letter-spacing: 0.3px;
+        }
+        .company-summary .summary-right .badge-current { border: 1px solid #BFE0BF; }
+        .app-stage-chip.awaiting, .pending-request-badge.app-stage-awaiting { border: 1px solid #E6D9A8; }
+        .app-stage-chip.pending,  .pending-request-badge.app-stage-pending  { border: 1px solid var(--grid-border); }
+        .registered-badge { border: 1px solid #BFE0BF; }
+        .pending-request-badge { border: 1px solid #E6D9A8; }
+        .popup-content { border: 1px solid var(--grid-border); }
+        .popup-content h3 { color: #1e293b; text-transform: uppercase; letter-spacing: 0.3px; }
+        .popup-content button:focus-visible { outline: 2px solid var(--grid-navy); outline-offset: 2px; }
+        .endo-inbox-head h3 { color: #fff; font-size: 13px; text-transform: uppercase; letter-spacing: 0.4px; }
+        .endo-inbox-head h3 i { color: #F7C600; }
+        .endo-card-title, .cv-card-label { text-transform: uppercase; letter-spacing: 0.3px; font-size: 12.5px; }
+        .endo-status, .endo-new-pill { text-transform: uppercase; letter-spacing: 0.3px; border: 1px solid transparent; }
+        .endo-status.awaiting { border-color: #E6D9A8; }
+        .endo-status.pending  { border-color: var(--grid-border); }
+        .endo-status.verified { border-color: #BFE0BF; }
+        .endo-status.rejected { border-color: #E3BCBC; }
+        .drm-toolbar-title { text-transform: uppercase; letter-spacing: 0.5px; }
+        .drm-toolbar-left i { color: #F7C600; }
+        #endoInboxBtn { border-radius: 0; border: 1px solid rgba(255,255,255,0.35); }
     </style>
 </head>
 <body>
@@ -2635,6 +3857,8 @@ $companies = $conn->query("
         </div>
     </div>
 </div>
+<!-- Without JavaScript nothing could ever close the overlay — never leave the page covered. -->
+<noscript><style>#globalLoadingOverlay { display: none !important; }</style></noscript>
 <script>
     /* Ported from administrator.php (same counter pattern, same timings):
        showGlobalLoading()/hideGlobalLoading() for in-page work, the first
@@ -2649,6 +3873,33 @@ $companies = $conn->query("
     var globalLoadingInitialDone = false;
     var globalLoadingNavigating  = false;
     var globalLoadingNavTimer    = null;
+
+    /* ADJUSTMENT: no second loading page. Apply / Cancel / Replace placement / the registration reload
+       already show their own loading page and then come back to THIS page; that arrival used to flash a
+       second "Loading" page. The page that is leaving leaves a short-lived flag (sessionStorage); the page
+       that opens reads it once and starts with the overlay already hidden. Every storage access is wrapped
+       because storage can be blocked (private mode) - the page then simply behaves as before. */
+    var GLOBAL_LOADING_SKIP_KEY = 'cl_skip_initial_loading';
+    var GLOBAL_LOADING_SKIP_TTL = 15000;
+    function globalLoadingMarkReturn() {
+        try { sessionStorage.setItem(GLOBAL_LOADING_SKIP_KEY, String(Date.now())); } catch (e) {}
+    }
+    function globalLoadingClearReturn() {
+        try { sessionStorage.removeItem(GLOBAL_LOADING_SKIP_KEY); } catch (e) {}
+    }
+    (function () {
+        var fresh = false;
+        try {
+            var t = parseInt(sessionStorage.getItem(GLOBAL_LOADING_SKIP_KEY) || '', 10);
+            fresh = !isNaN(t) && (Date.now() - t) >= 0 && (Date.now() - t) < GLOBAL_LOADING_SKIP_TTL;
+            sessionStorage.removeItem(GLOBAL_LOADING_SKIP_KEY);
+        } catch (e) { fresh = false; }
+        if (fresh && globalLoadingOverlay) {
+            globalLoadingActiveCount = 0;
+            globalLoadingInitialDone = true;
+            globalLoadingOverlay.classList.add('gl-instant', 'hidden');
+        }
+    })();
 
     function globalLoadingPaint() {
         if (!globalLoadingOverlay) return;
@@ -2690,6 +3941,7 @@ $companies = $conn->query("
     }
     function stopNavigationGlobalLoading() {
         clearTimeout(globalLoadingNavTimer);
+        globalLoadingClearReturn();
         globalLoadingNavigating = false;
         if (globalLoadingLabel && globalLoadingActiveCount === 0) globalLoadingLabel.textContent = 'Loading';
         globalLoadingPaint();
@@ -2718,8 +3970,8 @@ $companies = $conn->query("
     document.addEventListener('submit', function (e) {
         var f = e.target;
         if (e.defaultPrevented || !f || !f.id) return;
-        if (f.id.indexOf('applyForm_') === 0)  startNavigationGlobalLoading('Submitting application');
-        if (f.id.indexOf('cancelForm_') === 0) startNavigationGlobalLoading('Cancelling request');
+        if (f.id.indexOf('applyForm_') === 0)  { globalLoadingMarkReturn(); startNavigationGlobalLoading('Matching preferred placement'); }
+        if (f.id.indexOf('cancelForm_') === 0) { globalLoadingMarkReturn(); startNavigationGlobalLoading('Cancelling request'); }
     });
     // Back/Forward cache restore: the page did not reload, so re-sync the overlay.
     window.addEventListener('pageshow', function (e) {
@@ -2729,6 +3981,395 @@ $companies = $conn->query("
             stopNavigationGlobalLoading();
         }
     });
+</script>
+<!-- STUDENT PAGE SHELL (self-contained): side-menu loading page + sync, logout popup, sidebar state, action loading page. -->
+<style>
+    /* the overlay appears with no fade while the page is being left (same as the admin pages) */
+    #globalLoadingOverlay.gl-instant { transition: none; }
+    /* the saved menu state is applied before the first paint — nothing animates while it is restored */
+    html.cv-sb-restoring .sidebar, html.cv-sb-restoring .main-content, html.cv-sb-restoring #att-notif-bar { transition: none !important; }
+
+    /* LOGOUT CONFIRMATION POPUP — same square navy look as the admin pages' */
+    .cv-logout-overlay { position: fixed; inset: 0; z-index: 100050; display: flex; align-items: center; justify-content: center; padding: 20px;
+        background: rgba(27, 42, 74, 0.45); opacity: 0; visibility: hidden; transition: opacity 0.2s ease, visibility 0.2s ease; }
+    .cv-logout-overlay.show { opacity: 1; visibility: visible; }
+    .cv-logout-box { background: #ffffff; width: 420px; max-width: 100%; border-top: 3px solid #1B2A4A; box-shadow: 0 20px 60px rgba(0, 0, 0, 0.25);
+        padding: 26px 24px 22px; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; transform: translateY(8px); transition: transform 0.2s ease; }
+    .cv-logout-overlay.show .cv-logout-box { transform: translateY(0); }
+    .cv-logout-box h3 { margin: 0 0 10px; font-size: 16px; color: #1B2A4A; display: flex; align-items: center; gap: 10px; }
+    .cv-logout-box h3 i { color: #1B2A4A; }
+    .cv-logout-box p { margin: 0 0 22px; font-size: 13.5px; color: #4A5568; line-height: 1.6; }
+    .cv-logout-actions { display: flex; justify-content: flex-end; gap: 8px; }
+    .cv-logout-btn { display: inline-flex; align-items: center; gap: 8px; border: 1px solid #1B2A4A; cursor: pointer; font-family: inherit; font-size: 12px;
+        font-weight: 600; letter-spacing: 0.4px; text-transform: uppercase; padding: 11px 18px; border-radius: 0; background: #1B2A4A; color: #ffffff; transition: opacity 0.2s ease; }
+    .cv-logout-btn:hover { opacity: 0.88; }
+    .cv-logout-btn:focus-visible { outline: 2px solid #F7C600; outline-offset: 2px; }
+    .cv-logout-btn.ghost { background: #ffffff; color: #1B2A4A; border-color: #D5DBE6; }
+    @media (prefers-reduced-motion: reduce) { .cv-logout-overlay, .cv-logout-box { transition: none; } }
+</style>
+<script>
+(function () {
+    'use strict';
+    if (window._cvShellReady) return;
+    window._cvShellReady = true;
+
+    var OWN_OVERLAY = true;
+    var OWN_NAV     = true;
+    var root  = document.documentElement;
+    var ov    = document.getElementById('globalLoadingOverlay');
+    var label = document.getElementById('globalLoadingLabel');
+    var byId  = function (id) { return document.getElementById(id); };
+    var isDesktop = function () { return !(window.matchMedia && window.matchMedia('(max-width: 768px)').matches); };
+
+    function overlayShown() {
+        try { return !!ov && !ov.classList.contains('hidden') && !ov.classList.contains('success-state') && window.getComputedStyle(ov).display !== 'none'; }
+        catch (e) { return false; }
+    }
+
+    /* ── 1a) SIDEBAR STATE SYNC — restore (before the first paint) + save ───────────────────────────────────────────
+       Applies exactly what the pages' own toggle button does (the .collapsed class, the main content's margin / width
+       and the attendance notification bar's .sidebar-collapsed), so the page's toggle code carries on unchanged.
+       Phones (768px and narrower) are left alone: some pages collapse the menu there on their own. */
+    var SB_KEY = 'neustSidebarCollapsed';
+    var wantCollapsed = false;
+    try { wantCollapsed = isDesktop() && window.localStorage.getItem(SB_KEY) === '1'; } catch (e) { /* storage blocked: default state */ }
+    var sbDone = { sb: false, mc: false, anb: false }, sbWatching = false;
+    if (wantCollapsed) root.classList.add('cv-sb-restoring');
+    function watchSidebar(sb) {
+        if (sbWatching || !window.MutationObserver) return;
+        sbWatching = true;
+        new MutationObserver(function () {
+            if (!isDesktop()) return;
+            try { window.localStorage.setItem(SB_KEY, sb.classList.contains('collapsed') ? '1' : '0'); } catch (e) { /* state just won't persist */ }
+        }).observe(sb, { attributes: true, attributeFilter: ['class'] });
+    }
+    function syncSidebar() {
+        var sb = byId('sidebar');
+        if (!sb) return false;
+        if (wantCollapsed) {
+            if (!sbDone.sb) { sb.classList.add('collapsed'); sbDone.sb = true; }
+            var mc = byId('mainContent'), anb = byId('att-notif-bar');
+            if (mc && !sbDone.mc)   { mc.style.marginLeft = '80px'; mc.style.width = 'calc(100% - 80px)'; sbDone.mc = true; }
+            if (anb && !sbDone.anb) { anb.classList.add('sidebar-collapsed'); sbDone.anb = true; }
+        }
+        watchSidebar(sb);
+        return !wantCollapsed || (sbDone.sb && sbDone.mc && sbDone.anb);
+    }
+    var sbObs = null;
+    if (!syncSidebar() && window.MutationObserver) {
+        sbObs = new MutationObserver(function () { if (syncSidebar() && sbObs) { sbObs.disconnect(); sbObs = null; } });
+        sbObs.observe(root, { childList: true, subtree: true });
+    }
+    document.addEventListener('DOMContentLoaded', function () {
+        syncSidebar();
+        if (sbObs) { sbObs.disconnect(); sbObs = null; }
+        var done = function () { root.classList.remove('cv-sb-restoring'); };
+        if (window.requestAnimationFrame) requestAnimationFrame(function () { requestAnimationFrame(done); }); else done();
+    });
+
+    /* ── 1b) ONE LOADING PAGE ACROSS PAGES — pick up where the previous page's loading page was ──────────────────── */
+    var KEY_EPOCH = 'cvLoaderEpoch', KEY_PHASE = 'cvLoaderPhase';
+    var carriedSince = -1, ringAt0 = null, dotsAt0 = null;
+    try {
+        var ep = parseInt(window.sessionStorage.getItem(KEY_EPOCH) || '', 10);
+        window.sessionStorage.removeItem(KEY_EPOCH);
+        var since = ep ? Date.now() - ep : -1;
+        if (since >= 0 && since < 15000) {
+            carriedSince = since;
+            try {
+                var ph = JSON.parse(window.sessionStorage.getItem(KEY_PHASE) || 'null');
+                if (ph && typeof ph.ring === 'number' && typeof ph.dots === 'number' && Date.now() - ph.t >= 0 && Date.now() - ph.t < 15000) {
+                    var gap = Date.now() - ph.t;
+                    ringAt0 = (ph.ring + gap) / 1000; dotsAt0 = (ph.dots + gap) / 1000;
+                }
+            } catch (e) { /* unreadable hand-over: fall back to the elapsed time */ }
+        }
+    } catch (e) { /* storage blocked: the loading page simply starts fresh */ }
+    try { window.sessionStorage.removeItem(KEY_PHASE); } catch (e) {}
+
+    var shownSince = null;
+    if (overlayShown()) {
+        shownSince = carriedSince >= 0 ? Date.now() - carriedSince : Date.now();
+        if (carriedSince >= 0) {
+            try {
+                var spinner = ov.querySelector('.global-loading-spinner');
+                var dots = ov.querySelectorAll('.global-loading-dots span');
+                var box = ov.querySelector('.global-loading-box');
+                var eRing = ringAt0 !== null ? ringAt0 : carriedSince / 1000;
+                var eDots = dotsAt0 !== null ? dotsAt0 : carriedSince / 1000;
+                if (spinner) spinner.style.animationDelay = (-(eRing % 1)).toFixed(3) + 's';
+                for (var i = 0; i < dots.length; i++) dots[i].style.animationDelay = (-(((eDots - i * 0.2) % 1.2) + 1.2) % 1.2).toFixed(3) + 's';
+                if (box) {
+                    box.style.animation = 'none';   // already on screen: no second pop-in
+                    if (window.MutationObserver) {
+                        var restore = new MutationObserver(function () {   // later showings get their pop-in back, as before
+                            if (!ov.classList.contains('hidden')) return;
+                            restore.disconnect();
+                            setTimeout(function () {
+                                box.style.animation = ''; if (spinner) spinner.style.animationDelay = '';
+                                for (var j = 0; j < dots.length; j++) dots[j].style.animationDelay = '';
+                            }, 400);
+                        });
+                        restore.observe(ov, { attributes: true, attributeFilter: ['class'] });
+                    }
+                }
+            } catch (e) { /* never affects the page */ }
+        }
+    }
+    if (ov && window.MutationObserver) {
+        new MutationObserver(function () {
+            var shown = !ov.classList.contains('hidden');
+            if (shown && shownSince === null) shownSince = Date.now();
+            if (!shown) shownSince = null;
+        }).observe(ov, { attributes: true, attributeFilter: ['class'] });
+    }
+    function animPhase(el, period) {   // ms into the current turn of an element's running CSS animation (null if unknown)
+        try {
+            if (!el || !el.getAnimations) return null;
+            var list = el.getAnimations();
+            for (var i = 0; i < list.length; i++) {
+                var a = list[i], ct = a.currentTime;
+                if (typeof ct !== 'number' || !a.effect || !a.effect.getComputedTiming) continue;
+                var delay = a.effect.getComputedTiming().delay || 0;
+                return (((ct - delay) % period) + period) % period;
+            }
+        } catch (e) {}
+        return null;
+    }
+    window.addEventListener('pagehide', function () {
+        try {
+            if (!ov || ov.classList.contains('hidden') || ov.classList.contains('success-state')) return;
+            window.sessionStorage.setItem(KEY_EPOCH, String(shownSince !== null ? shownSince : Date.now()));
+            var ringMs = animPhase(ov.querySelector('.global-loading-spinner'), 1000);
+            var dotsMs = animPhase(ov.querySelector('.global-loading-dots span'), 1200);
+            if (ringMs !== null && dotsMs !== null) window.sessionStorage.setItem(KEY_PHASE, JSON.stringify({ t: Date.now(), ring: ringMs, dots: dotsMs }));
+        } catch (e) {}
+    });
+
+    /* ── 1c) THIS PAGE'S OWN LOAD + ACTIONS (only when the page had no loading page of its own) ───────────────────── */
+    var initialPending = false, actions = 0, navActive = false;
+    var actionShownAt = 0, actionHideTimer = null, actionSafety = null, navTimer = null, navObs = null;
+    function hideIfIdle() {
+        if (!ov || initialPending || actions > 0 || navActive) return;
+        ov.classList.add('hidden');
+        ov.classList.remove('gl-instant');
+    }
+    if (!OWN_OVERLAY && ov) {
+        initialPending = true;
+        var startedAt = Date.now(), ending = false, MIN_MS = 450;
+        var endInitial = function () {
+            if (ending) return;
+            ending = true;
+            setTimeout(function () { initialPending = false; hideIfIdle(); }, Math.max(0, MIN_MS - (Date.now() - startedAt)));
+        };
+        if (document.readyState === 'complete') endInitial(); else window.addEventListener('load', endInitial);
+        setTimeout(endInitial, 4000);   // safety net if a slow asset holds up 'load'
+    }
+    // Action loading page for background saves: window.cvActionBusy('Saving') … window.cvActionIdle()
+    window.cvActionBusy = function (text) {
+        if (!ov) return;
+        actions++;
+        clearTimeout(actionHideTimer);
+        if (actions === 1) actionShownAt = Date.now();
+        if (label) label.textContent = text || 'Processing';
+        ov.classList.remove('success-state');
+        ov.classList.remove('hidden');
+        clearTimeout(actionSafety);
+        actionSafety = setTimeout(function () { actions = 0; window.cvActionIdle(); }, 60000);   // never leave the page covered
+    };
+    window.cvActionIdle = function () {
+        if (!ov) return;
+        actions = Math.max(0, actions - 1);
+        if (actions > 0) return;
+        clearTimeout(actionSafety);
+        clearTimeout(actionHideTimer);
+        actionHideTimer = setTimeout(function () {   // shown for at least 350 ms so it never just flickers
+            if (actions > 0) return;
+            hideIfIdle();
+            setTimeout(function () { if (label && actions === 0 && ov.classList.contains('hidden')) label.textContent = 'Loading'; }, 400);
+        }, Math.max(0, 350 - (Date.now() - actionShownAt)));
+    };
+
+    /* ── 1d) LEAVING THE PAGE — the loading page goes up at once and nothing may hide it until the next page opens ── */
+    var navShown = false, navWasHidden = false, navPrevLabel = null;
+    function navAttach() {
+        if (navObs || !ov || !window.MutationObserver) return;
+        navObs = new MutationObserver(function () {
+            if (navActive && ov.classList.contains('hidden')) { ov.classList.add('gl-instant'); ov.classList.remove('hidden'); }
+        });
+        navObs.observe(ov, { attributes: true, attributeFilter: ['class'] });
+    }
+    function navShow(stuckMs, text) {
+        if (!ov) return;
+        if (navShown) { if (text && label) label.textContent = text; return; }
+        navShown = true; navActive = true;
+        navAttach();
+        navWasHidden = ov.classList.contains('hidden');
+        if (navWasHidden) {
+            if (label) { navPrevLabel = label.textContent; label.textContent = text || 'Loading'; }
+            ov.classList.add('gl-instant');
+            ov.classList.remove('success-state');
+            ov.classList.remove('hidden');
+        } else if (text && label) {
+            label.textContent = text;
+        }
+        clearTimeout(navTimer);
+        navTimer = setTimeout(navReset, stuckMs || 10000);   // still here → navigation was cancelled / it was a download
+    }
+    function navReset() {
+        clearTimeout(navTimer);
+        if (!navShown) return;
+        navShown = false; navActive = false;
+        if (navWasHidden) {
+            if (actions === 0 && !initialPending) { ov.classList.add('hidden'); ov.classList.remove('gl-instant'); }
+            if (label && navPrevLabel !== null) label.textContent = navPrevLabel;
+        }
+        navWasHidden = false; navPrevLabel = null;
+    }
+    // file / export / preview URLs download or open a file instead of leaving the page — skip them
+    var FILE_RE  = /\.(pdf|xlsx?|csv|docx?|pptx?|zip|png|jpe?g|gif|webp|txt)$/i;
+    var PARAM_RE = /[?&][^=&]*(export|download|dtrdl|print|stream|pdf|preview|blob|file)[^=&]*=/i;
+    function isPageUrl(u) {
+        if (u.origin !== window.location.origin || !/^https?:$/.test(u.protocol)) return false;
+        if (FILE_RE.test(u.pathname) || PARAM_RE.test(u.search)) return false;
+        return true;
+    }
+    var lastFileClick = 0;
+    if (!OWN_NAV && ov) {
+        document.addEventListener('click', function (e) {
+            if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+            var a = e.target && e.target.closest ? e.target.closest('a[href]') : null;
+            if (!a || a.hasAttribute('download')) return;
+            var raw = (a.getAttribute('href') || '').trim();
+            if (!raw || raw.charAt(0) === '#' || /^(javascript|mailto|tel|blob|data):/i.test(raw)) return;
+            var t = (a.getAttribute('target') || '').toLowerCase();
+            if (t && t !== '_self') return;
+            var u; try { u = new URL(a.href, window.location.href); } catch (x) { return; }
+            if (!isPageUrl(u)) { lastFileClick = Date.now(); return; }
+            if (u.pathname === window.location.pathname && u.search === window.location.search && u.hash) return;   // same-page anchor
+            // decided after every other click handler has run, so links the page handles itself (unsaved-changes prompts…) are left alone
+            setTimeout(function () { if (!e.defaultPrevented) navShow(); }, 0);
+        });
+        document.addEventListener('submit', function (e) {
+            var f = e.target;
+            if (!f || f.tagName !== 'FORM') return;
+            var t = (f.getAttribute('target') || '').toLowerCase();
+            if (t && t !== '_self') return;
+            var u; try { u = new URL(f.getAttribute('action') || window.location.href, window.location.href); } catch (x) { return; }
+            if (!isPageUrl(u)) return;
+            setTimeout(function () { if (!e.defaultPrevented) navShow(); }, 0);   // AJAX forms prevent the submit — left alone
+        });
+        // reloads / redirects started by the page's own script (registered last, so a "leave without saving?" prompt is seen first)
+        document.addEventListener('DOMContentLoaded', function () {
+            window.addEventListener('beforeunload', function (e) {
+                if (e.defaultPrevented) return;                          // the browser is asking "leave this page?" — not leaving yet
+                if (Date.now() - lastFileClick < 2000) return;           // most likely a file download
+                navShow(8000);
+            });
+        });
+    }
+
+    /* Back / Forward restore: a page kept in the browser's memory is reloaded from the server, so a logged-out visitor
+       is sent to login.php instead of seeing the old page; the loading page covers the old view meanwhile. */
+    window.addEventListener('pageshow', function (e) {
+        if (!e.persisted) return;
+        navReset();
+        if (ov) { ov.classList.remove('success-state'); ov.classList.remove('hidden'); }
+        window.location.reload();
+    });
+
+    /* ── 2) LOGOUT CONFIRMATION POPUP + "LOGGING OUT" LOADING PAGE ───────────────────────────────────────────────── */
+    var LOGOUT_SELECTOR = '.logout-link a[href*="logout=1"]';
+    var pendingHref = null, loggingOut = false, lastFocus = null, stuckTimer = null;
+    var popup = document.createElement('div');
+    popup.className = 'cv-logout-overlay';
+    popup.id = 'cvLogoutConfirm';
+    popup.setAttribute('role', 'dialog');
+    popup.setAttribute('aria-modal', 'true');
+    popup.setAttribute('aria-labelledby', 'cvLogoutTitle');
+    popup.setAttribute('aria-describedby', 'cvLogoutMsg');
+    popup.innerHTML =
+        '<div class="cv-logout-box">' +
+            '<h3 id="cvLogoutTitle"><i class="fas fa-sign-out-alt"></i> Log Out</h3>' +
+            '<p id="cvLogoutMsg">Are you sure you want to Log out? You need to login again to access your Account.</p>' +
+            '<div class="cv-logout-actions">' +
+                '<button type="button" class="cv-logout-btn ghost" data-cv-logout="cancel">Cancel</button>' +
+                '<button type="button" class="cv-logout-btn" data-cv-logout="ok"><i class="fas fa-sign-out-alt"></i> Log out</button>' +
+            '</div>' +
+        '</div>';
+    (document.body || root).appendChild(popup);
+    var btnCancel = popup.querySelector('[data-cv-logout="cancel"]');
+    var btnOk     = popup.querySelector('[data-cv-logout="ok"]');
+
+    function isOpen() { return popup.classList.contains('show'); }
+    function openConfirm(href) {
+        pendingHref = href;
+        lastFocus = document.activeElement;
+        popup.classList.add('show');
+        setTimeout(function () { btnCancel.focus(); }, 30);
+    }
+    function closeConfirm() {
+        popup.classList.remove('show');
+        pendingHref = null;
+        if (lastFocus && lastFocus.focus) { try { lastFocus.focus(); } catch (e) {} }
+    }
+    function showLoggingOut() {
+        if (!ov) return;
+        ov.removeAttribute('data-initial');   // pages with a first-load cover: it must not hide this one
+        navShow(15000, 'Logging out');
+        if (label) label.textContent = 'Logging out';
+    }
+    function hideLoggingOut() {
+        navReset();
+        if (ov && ov.classList.contains('hidden') === false && actions === 0 && !initialPending) ov.classList.add('hidden');
+        if (label) label.textContent = 'Loading';
+    }
+    function confirmLogout() {
+        if (!pendingHref) return;
+        var href = pendingHref;
+        popup.classList.remove('show');
+        pendingHref = null;
+        loggingOut = true;
+        showLoggingOut();
+        // safety: if the browser never leaves (e.g. the server cannot be reached), give the page back
+        clearTimeout(stuckTimer);
+        stuckTimer = setTimeout(function () { if (loggingOut) { loggingOut = false; hideLoggingOut(); } }, 15000);
+        setTimeout(function () { window.location.href = href; }, 60);   // lets "Logging out" paint first
+    }
+    // Caught before any other click handler (capture phase). A page may veto it with window.cvLogoutGuard() === false
+    // (student_report.php does while the report has unsaved entries: its own "unsaved changes" prompt handles the click).
+    function intercept(e) {
+        var a = e.target && e.target.closest ? e.target.closest(LOGOUT_SELECTOR) : null;
+        if (!a) return;
+        if (e.type === 'auxclick' && e.button !== 1) return;
+        try { if (typeof window.cvLogoutGuard === 'function' && window.cvLogoutGuard() === false) return; } catch (x) {}
+        e.preventDefault();
+        if (loggingOut) return;
+        openConfirm(a.href);
+    }
+    document.addEventListener('click', intercept, true);
+    document.addEventListener('auxclick', intercept, true);
+    btnCancel.addEventListener('click', closeConfirm);
+    btnOk.addEventListener('click', confirmLogout);
+    popup.addEventListener('click', function (e) { if (e.target === popup) closeConfirm(); });
+    document.addEventListener('keydown', function (e) {
+        if (!isOpen()) return;
+        if (e.key === 'Escape') { e.preventDefault(); closeConfirm(); }
+        else if (e.key === 'Tab') {        // keep keyboard focus inside the popup
+            if (e.shiftKey && document.activeElement === btnCancel) { e.preventDefault(); btnOk.focus(); }
+            else if (!e.shiftKey && document.activeElement === btnOk) { e.preventDefault(); btnCancel.focus(); }
+        }
+    });
+    // While leaving, keep the label "Logging out" (the pages' own leave handlers reset it to "Loading")
+    document.addEventListener('DOMContentLoaded', function () {
+        window.addEventListener('beforeunload', function () { if (loggingOut) showLoggingOut(); });
+    });
+    window.addEventListener('pageshow', function (e) {
+        if (!e.persisted) return;
+        loggingOut = false; clearTimeout(stuckTimer);
+        popup.classList.remove('show'); pendingHref = null;
+    });
+})();
 </script>
 
 <!-- ══════════════════════════════════════════════════════
@@ -2768,19 +4409,18 @@ $companies = $conn->query("
 <!-- POPUP MODAL — incomplete profile -->
 <div id="profileModal" class="popup-modal" style="display:none;">
     <div class="popup-content">
-        <h3><i class="fas fa-triangle-exclamation" style="color:#d97706;"></i> Incomplete Profile</h3>
+        <h3>Incomplete Profile</h3>
         <p>Please complete your student profile (skills, experience, and photo) before applying.</p>
-        <button onclick="redirectProfile()">Go to Profile</button>
+        <div class="popup-actions"><button onclick="redirectProfile()">Go to Profile</button></div>
     </div>
 </div>
 
 <!-- POPUP MODAL — already registered to a company -->
 <div id="registeredModal" class="popup-modal" style="display:none;">
     <div class="popup-content">
-        <span class="popup-icon"></span>
         <h3>Already Registered</h3>
         <p>You are already registered to a company. You cannot apply to another company while you have an active OJT placement.</p>
-        <button onclick="document.getElementById('registeredModal').style.display='none'">Got it</button>
+        <div class="popup-actions"><button onclick="document.getElementById('registeredModal').style.display='none'">Got it</button></div>
     </div>
 </div>
 
@@ -2792,10 +4432,9 @@ $companies = $conn->query("
      details pane) clears this guard. -->
 <div id="pendingBlockedModal" class="popup-modal" style="display:none;">
     <div class="popup-content">
-        <span class="popup-icon"></span>
         <h3>Application Pending</h3>
         <p>You already have an application request awaiting admin approval. Please cancel it first (in that company's details) if you'd like to apply elsewhere.</p>
-        <button onclick="document.getElementById('pendingBlockedModal').style.display='none'">Got it</button>
+        <div class="popup-actions"><button onclick="document.getElementById('pendingBlockedModal').style.display='none'">Got it</button></div>
     </div>
 </div>
 
@@ -2807,7 +4446,6 @@ $companies = $conn->query("
      / submitCancelConfirm() in the <script> block further down). -->
 <div id="cancelConfirmModal" class="popup-modal" style="display:none;">
     <div class="popup-content">
-        <span class="popup-icon"><i class="fas fa-triangle-exclamation" style="color:#d97706;"></i></span>
         <h3>Cancel Application Request?</h3>
         <p>This will withdraw your pending application request from this company. This action cannot be undone.</p>
         <div class="ccm-actions">
@@ -2826,13 +4464,113 @@ $companies = $conn->query("
      requirements that are actually still outstanding. -->
 <div id="reqUnverifiedModal" class="popup-modal" style="display:none;">
     <div class="popup-content">
-        <span class="popup-icon"><i class="fas fa-clipboard-list" style="color:var(--maroon);"></i></span>
         <h3>Requirements Not Yet Verified</h3>
         <p>You cannot apply to a company until <strong>all</strong> of your requirements are <strong>Verified</strong> by the administrator. <span id="rumCount"></span></p>
         <ul class="rum-list" id="rumList"></ul>
         <div class="rum-actions">
             <button type="button" class="rum-btn-close" onclick="closeReqUnverifiedModal()">Close</button>
             <button type="button" class="rum-btn-go" onclick="window.location.href='AccomForm.php'">Go to Requirements</button>
+        </div>
+    </div>
+</div>
+
+<?php if (!empty($placement_mismatch)): ?>
+<!-- POPUP MODAL — preferred placement does not match the selected company
+     ADJUSTMENT: shown after Apply when the company's data differs from the
+     student's Preference for Placement. "Yes" replaces the preference with
+     the company's data (replace_placement handler), "No" cancels the
+     application and notifies the student. -->
+<div id="placementMismatchModal" class="popup-modal" style="display:none;" role="dialog" aria-modal="true" aria-labelledby="pmTitle">
+    <div class="pm-box">
+        <div class="pm-header">
+            <h3 id="pmTitle"><i class="fas fa-right-left"></i> Preferred Placement Doesn't Match</h3>
+            <button type="button" class="pm-close" aria-label="Close" onclick="declinePlacementReplace()">&times;</button>
+        </div>
+        <div class="pm-body">
+            <p>The data of <strong><?= htmlspecialchars($placement_mismatch['company_name']) ?></strong> does not match your saved Preference for Placement<?= $placement_mismatch['pref_name'] !== '' ? ' (<strong>' . htmlspecialchars($placement_mismatch['pref_name']) . '</strong>)' : '' ?>. Do you want to replace your preferred placement with this company?</p>
+            <table class="pm-diff">
+                <tr><th>Field</th><th>Your Preference</th><th>Selected Company</th></tr>
+                <?php foreach ($placement_mismatch['diff'] as $_d): ?>
+                <tr>
+                    <td><?= htmlspecialchars($_d['label']) ?></td>
+                    <td<?= $_d['pref'] === '' ? ' class="pm-empty"' : '' ?>><?= $_d['pref'] === '' ? '&mdash;' : htmlspecialchars($_d['pref']) ?></td>
+                    <td<?= $_d['company'] === '' ? ' class="pm-empty"' : '' ?>><?= $_d['company'] === '' ? '&mdash;' : htmlspecialchars($_d['company']) ?></td>
+                </tr>
+                <?php endforeach; ?>
+            </table>
+            <p class="pm-note">Replacing it will also remove your current <strong>Application SIT</strong> requirement &mdash; you will need to upload a new one, and your application will be sent automatically once it is verified.</p>
+            <form method="POST" id="replacePlacementForm">
+                <input type="hidden" name="company_id" value="<?= (int)$placement_mismatch['company_id'] ?>">
+                <input type="hidden" name="replace_placement" value="1">
+            </form>
+        </div>
+        <div class="pm-actions">
+            <button type="button" class="pm-btn-no" onclick="declinePlacementReplace()">No, Cancel Application</button>
+            <button type="button" class="pm-btn-yes" onclick="confirmPlacementReplace()">Yes, Replace It</button>
+        </div>
+    </div>
+</div>
+<?php endif; ?>
+
+<?php if (!empty($placement_replaced)): ?>
+<!-- POPUP MODAL — preferred placement replaced; new Application SIT required -->
+<div id="placementReplacedModal" class="popup-modal" style="display:none;">
+    <div class="popup-content">
+        <h3>Preferred Placement Updated</h3>
+        <p>Your preferred placement has been updated with the data of <strong><?= htmlspecialchars($placement_replaced['company_name']) ?></strong>, and your previous Application SIT requirement was removed.</p>
+        <p>Please upload your <strong>new Application SIT</strong>. Your application to this company is on hold and will be sent automatically once all of your requirements are verified.</p>
+        <div class="pm-actions">
+            <button type="button" class="pm-btn-close" onclick="document.getElementById('placementReplacedModal').style.display='none'">Close</button>
+            <button type="button" class="pm-btn-go" onclick="window.location.href='AccomForm.php'">Go to Requirements</button>
+        </div>
+    </div>
+</div>
+<?php endif; ?>
+
+<!-- ══════════════════════════════════════════════════════
+     NEW (company invitations): popups for a company's invitation (Inbox → Accept / Decline)
+     • #ciMismatchModal — same placement check as applying (the company's data vs the student's Preference for
+       Placement): Yes replaces the preference, No declines the invitation. Filled by ciShowMismatch().
+     • #ciConfirmModal  — confirmation before declining.
+     • #ciAcceptedModal — after accepting: the Application SIT has to be uploaded and validated again.
+     ══════════════════════════════════════════════════════ -->
+<div id="ciMismatchModal" class="popup-modal" style="display:none;" role="dialog" aria-modal="true" aria-labelledby="ciPmTitle">
+    <div class="pm-box">
+        <div class="pm-header">
+            <h3 id="ciPmTitle"><i class="fas fa-right-left"></i> Preferred Placement Doesn't Match</h3>
+            <button type="button" class="pm-close" aria-label="Close" onclick="ciMismatchNo()">&times;</button>
+        </div>
+        <div class="pm-body">
+            <p id="ciPmLead"></p>
+            <table class="pm-diff" id="ciPmDiff"></table>
+            <p class="pm-note">Replacing it will also remove your current <strong>Application SIT</strong> requirement &mdash; you will need to upload a new one, and you will be registered once it is verified.</p>
+        </div>
+        <div class="pm-actions">
+            <button type="button" class="pm-btn-no" id="ciPmNo" onclick="ciMismatchNo()">No, Decline Invitation</button>
+            <button type="button" class="pm-btn-yes" id="ciPmYes" onclick="ciMismatchYes()">Yes, Replace It</button>
+        </div>
+    </div>
+</div>
+
+<div id="ciConfirmModal" class="popup-modal" style="display:none;" role="alertdialog" aria-modal="true" aria-labelledby="ciConfirmTitle">
+    <div class="popup-content">
+        <h3 id="ciConfirmTitle">Decline Invitation</h3>
+        <p id="ciConfirmMsg"></p>
+        <div class="pm-actions" style="justify-content:center;">
+            <button type="button" class="pm-btn-close" onclick="ciCloseConfirm()">Keep It</button>
+            <button type="button" class="ci-btn-danger" id="ciConfirmYes">Decline</button>
+        </div>
+    </div>
+</div>
+
+<div id="ciAcceptedModal" class="popup-modal" style="display:none;" role="dialog" aria-modal="true">
+    <div class="popup-content">
+        <h3>Invitation Accepted</h3>
+        <p id="ciAcceptedMsg"></p>
+        <p>Your <strong>Application SIT</strong> has to be validated again. Please upload a new one on the <strong>Requirements</strong> page. You will be registered automatically once the administrator verifies it.</p>
+        <div class="pm-actions" style="justify-content:center;">
+            <button type="button" class="pm-btn-close" onclick="document.getElementById('ciAcceptedModal').style.display='none'">Close</button>
+            <button type="button" class="pm-btn-go" onclick="window.location.href='AccomForm.php'">Go to Requirements</button>
         </div>
     </div>
 </div>
@@ -2908,7 +4646,7 @@ $companies = $conn->query("
 <!-- NOT-DEPLOYED MODAL -->
 <div id="not-deployed-modal" style="display:none;">
     <div class="ndm-box">
-        <div class="ndm-icon"><i class="fas fa-lock" style="color:#b45309;"></i></div>
+        <div class="ndm-icon"><i class="fas fa-lock" style="color:#A0850A;"></i></div>
         <div class="ndm-title">Page Not Accessible</div>
         <div class="ndm-page-name" id="ndm-page-label">—</div>
         <div class="ndm-status-badge">
@@ -2928,7 +4666,7 @@ $companies = $conn->query("
     <div class="sidebar-header">
         <!-- Full name includes middle name -->
         <div class="sidebar-user-info">
-            <span class="sidebar-user-name"><?php echo htmlspecialchars($full_name); ?></span>
+            <span class="sidebar-user-name"><?php echo htmlspecialchars(preg_replace('/\s+/', ' ', trim((string)$full_name)) ?: 'Student'); ?></span>
             <span class="sidebar-user-role">OJT Trainee</span>
         </div>
         <button id="toggleBtn" class="toggle-btn"><i class="fas fa-bars"></i></button>
@@ -2953,13 +4691,17 @@ $companies = $conn->query("
              governed by the exact same $all_verified (and, further,
              $is_deployed) gates as before — nothing about those was
              touched. -->
-        <a href="student_profile.php">
+        <a href="student_profile.php" style="position:relative;">
             <i class="fas fa-user-circle"></i>
-            <span class="link-text">My Profile</span>
+            <span class="link-text">My Profile</span><!-- NEW (OJT trainee group chat): unread messages in the group chat with the company --><span class="sidebar-badge-chat" id="sidebarChatBadge" style="display:none"></span>
         </a>
         <a href="company_list.php" class="active">
             <i class="fas fa-building"></i>
             <span class="link-text">Company List</span>
+            <!-- ADJUSTMENT: endorsement-letter indicator (same count as the Inbox bell) -->
+            <span class="sidebar-badge-endo<?= $endo_attention_count > 0 ? ' is-on' : '' ?>" id="endoSidebarBadge" role="status" aria-live="polite"
+                  title="<?= $endo_attention_count > 0 ? 'You have endorsement letter(s) in your Inbox' : '' ?>"
+                  aria-label="<?= $endo_attention_count > 0 ? (int)$endo_attention_count . ' endorsement letter notification(s)' : '' ?>"><?= $endo_attention_count > 0 ? (int)$endo_attention_count : '' ?></span>
         </a>
         <a href="AccomForm.php">
             <i class="fas fa-file-contract"></i>
@@ -3006,7 +4748,7 @@ $companies = $conn->query("
         <?php endif; ?>
     </div>
     <div class="logout-link">
-        <a href="login.php">
+        <a href="login.php?logout=1">
             <i class="fas fa-sign-out-alt"></i>
             <span class="link-text" style="margin-left:10px;">Logout</span>
         </a>
@@ -3087,9 +4829,10 @@ $companies = $conn->query("
                endorsement-letter inbox showed it (same pill style): at the admin →
                "Waiting for the Approval"; at the company → "Under Company Validation". */
             $appAtAdmin    = ($pendingStage === 'admin_review');
-            $appStageLabel = $appAtAdmin ? 'Waiting for the Approval' : 'Under Company Validation';
-            $appStageClass = $appAtAdmin ? 'awaiting' : 'pending';
-            $appStageIcon  = $appAtAdmin ? 'fa-hourglass-half' : 'fa-magnifying-glass';
+            $appOnHold     = ($pendingStage === 'placement_hold'); // ADJUSTMENT: placement replaced — awaiting new Application SIT
+            $appStageLabel = $appOnHold ? 'On Hold — Awaiting Application SIT' : ($appAtAdmin ? 'Waiting for the Approval' : 'Under Company Validation');
+            $appStageClass = ($appAtAdmin || $appOnHold) ? 'awaiting' : 'pending';
+            $appStageIcon  = $appOnHold ? 'fa-pause-circle' : ($appAtAdmin ? 'fa-hourglass-half' : 'fa-magnifying-glass');
 
             /* FIX: prefer the company's registered name (ci.company) — same
                fallback logic used in student_profile.php's Company Details
@@ -3180,7 +4923,7 @@ $companies = $conn->query("
                                  #reqUnverifiedModal and stops here if any
                                  requirement is not yet Verified. -->
                             <button type="button" class="btn-apply-mini"
-                                    onclick="event.preventDefault(); event.stopPropagation(); if (!guardApplyRequirements(event)) return; var f=document.getElementById('applyForm_<?= (int)$row['id'] ?>'); if(f) { startNavigationGlobalLoading('Submitting application'); f.submit(); }">
+                                    onclick="event.preventDefault(); event.stopPropagation(); if (!guardApplyRequirements(event)) return; var f=document.getElementById('applyForm_<?= (int)$row['id'] ?>'); if(f) { globalLoadingMarkReturn(); startNavigationGlobalLoading('Matching preferred placement'); f.submit(); }">
                                 <i class="fas fa-paper-plane"></i> Apply
                             </button>
                         <?php endif; ?>
@@ -3376,6 +5119,29 @@ document.addEventListener("DOMContentLoaded", function() {
 });
 <?php endif; ?>
 
+<?php if (!empty($placement_mismatch)): ?>
+/* ADJUSTMENT: preferred-placement mismatch popup (after Apply). */
+document.addEventListener("DOMContentLoaded", function() {
+    document.getElementById("placementMismatchModal").style.display = "flex";
+});
+function declinePlacementReplace() {
+    document.getElementById('placementMismatchModal').style.display = 'none';
+    clShowTopToast(<?= json_encode($placement_mismatch['company_name']) ?>,
+        'application was cancelled \u2014 your preferred placement was not changed.', 'fa-circle-xmark', true);
+}
+function confirmPlacementReplace() {
+    globalLoadingMarkReturn();
+    startNavigationGlobalLoading('Updating preferred placement');
+    document.getElementById('replacePlacementForm').submit();
+}
+<?php endif; ?>
+
+<?php if (!empty($placement_replaced)): ?>
+document.addEventListener("DOMContentLoaded", function() {
+    document.getElementById("placementReplacedModal").style.display = "flex";
+});
+<?php endif; ?>
+
 /* ── NOT-DEPLOYED MODAL ── */
 function showNotDeployedModal(pageName, event) {
     if (event) event.preventDefault();
@@ -3440,6 +5206,7 @@ function submitCancelConfirm() {
     if (pendingCancelCompanyId === null) return;
     var form = document.getElementById('cancelForm_' + pendingCancelCompanyId);
     if (form) {
+        globalLoadingMarkReturn();
         startNavigationGlobalLoading('Cancelling request'); // ADJUSTMENT: admin-style loading page
         form.submit();
     }
@@ -3660,7 +5427,7 @@ function activateVerifiedSidebar() {
     if (!linksContainer.querySelector('[data-nav-key="attendance"]')) {
         var holder = document.createElement('div');
 
-        if (IS_DEPLOYED_FLAG) {
+        if ((typeof _deployedLive !== 'undefined' ? _deployedLive : IS_DEPLOYED_FLAG)) {   // UPDATED (company invitations): follows the live deployed state
             holder.innerHTML =
                 '<a href="student_attendance.php" data-nav-key="attendance">' +
                     '<i class="fas fa-calendar-check"></i>' +
@@ -3727,6 +5494,87 @@ function deactivateVerifiedSidebar() {
         });
     }
 }
+
+/* ── NEW (company invitations): the side menu unlocks the moment the registration is executed ──
+   An accepted invitation is registered (Deployed) once the new Application SIT is verified. The locked
+   Attendance / Reports / Dashboard links (and the sidebar built by activateVerifiedSidebar() above) switch to
+   the normal links in place, with a short highlight — no reload. Stops asking once the student is deployed. */
+let _deployedLive = IS_DEPLOYED_FLAG;
+
+function unlockDeployedSidebar() {
+    _deployedLive = true;
+    var c = document.getElementById('sidebarLinksContainer');
+    if (!c) return;
+    if (!document.getElementById('navUnlockStyle')) {
+        var st = document.createElement('style');
+        st.id = 'navUnlockStyle';
+        st.textContent = '@keyframes navUnlockFlash { 0% { background: rgba(255,215,0,0.40); } 100% { background: transparent; } } .sidebar a.nav-just-unlocked { animation: navUnlockFlash 1.6s ease-out 1; }';
+        document.head.appendChild(st);
+    }
+    var defs = {
+        attendance: { href: 'student_attendance.php', icon: 'fa-calendar-check', text: 'Attendance', extra: INITIAL_ATT_SIDEBAR_BADGE ? '<span class="sidebar-badge-att">!</span>' : '' },
+        report:     { href: 'student_report.php', icon: 'fa-chart-bar', text: 'Reports', extra: '<span class="sidebar-badge-journal" id="journalEmptyBadge" style="display:none;"></span>' },
+        dashboard:  { href: 'student_dashboard.php', icon: 'fa-tachometer-alt', text: 'Dashboard', extra: '' }
+    };
+    Object.keys(defs).forEach(function (key) {
+        var old = c.querySelector('[data-nav-key="' + key + '"]');
+        if (!old || !old.classList.contains('nav-locked')) return;   // not shown yet (activateVerifiedSidebar adds it unlocked) or already unlocked
+        var d = defs[key];
+        var a = document.createElement('a');
+        a.href = d.href;
+        a.setAttribute('data-nav-key', key);
+        a.className = 'nav-just-unlocked';
+        a.innerHTML = '<i class="fas ' + d.icon + '"></i><span class="link-text">' + d.text + '</span>' + d.extra;
+        old.replaceWith(a);
+        setTimeout(function () { a.classList.remove('nav-just-unlocked'); }, 1800);
+    });
+    try { refreshJournalBadge(); } catch (e) {}
+}
+
+function lockDeployedSidebar() {
+    _deployedLive = false;
+    var c = document.getElementById('sidebarLinksContainer');
+    if (!c) return;
+    var defs = {
+        attendance: { icon: 'fa-calendar-check', text: 'Attendance' },
+        report:     { icon: 'fa-chart-bar', text: 'Reports' },
+        dashboard:  { icon: 'fa-tachometer-alt', text: 'Dashboard' }
+    };
+    Object.keys(defs).forEach(function (key) {
+        var old = c.querySelector('[data-nav-key="' + key + '"]');
+        if (!old || old.classList.contains('nav-locked')) return;   // not shown, or already locked
+        var d = defs[key];
+        var a = document.createElement('a');
+        a.href = '#';
+        a.className = 'nav-locked';
+        a.setAttribute('data-nav-key', key);
+        a.addEventListener('click', function (e) { showNotDeployedModal(d.text, e); });
+        a.innerHTML = '<i class="fas ' + d.icon + '"></i><span class="link-text">' + d.text + '</span><i class="fas fa-lock nav-lock-icon"></i>';
+        old.replaceWith(a);
+    });
+}
+
+(function () {
+    var busy = false, misses = 0;
+    function checkDeployed() {
+        if (busy) return;
+        busy = true;
+        fetch('company_list.php?poll_deploy=1', { credentials: 'same-origin', cache: 'no-store' })
+            .then(function (r) { return r.ok ? r.json() : null; })
+            .then(function (d) {
+                if (!d) return;
+                if (d.deployed) { misses = 0; if (!_deployedLive) unlockDeployedSidebar(); }
+                else if (_deployedLive) {   // removed by the company: lock the menu again (two answers in a row)
+                    misses++;
+                    if (misses >= 2) { misses = 0; lockDeployedSidebar(); }
+                } else { misses = 0; }
+            })
+            .catch(function () { /* silent - retried on the next interval */ })
+            .then(function () { busy = false; });
+    }
+    setTimeout(function () { checkDeployed(); setInterval(checkDeployed, 4000); }, 2000);
+    document.addEventListener('visibilitychange', function () { if (!document.hidden) checkDeployed(); });
+})();
 
 (function() {
     function pollSidebarVerificationStatus() {
@@ -4201,6 +6049,8 @@ function _anbShow(info) {
     }
     tick();
     _anb.tickInterval = setInterval(tick, 1000);
+    _anb.tickFn      = tick;
+    _anb.showStartMs = Date.now();   // wall-clock start, so the auto-hide is also correct after a background tab
 
     /* ── Auto-hide after autoHideDuration ── */
     const capturedType = info.type;
@@ -4212,6 +6062,18 @@ function _anbShow(info) {
     /* Slide in */
     document.getElementById('att-notif-bar').classList.add('anb-visible');
 }
+
+/* FIX (countdown stale after the user leaves the tab): timers/RAF are throttled or frozen in background tabs, so
+   the "left" text and the auto-hide lagged behind real time. The countdown itself is wall-clock based; on return
+   to the page it is re-read immediately and the bar is closed if its display time has already passed. */
+function _anbResync() {
+    if (!_anb.currentType) return;
+    if (_anb.showStartMs && Date.now() - _anb.showStartMs >= _anb.autoHideDuration) { _anbHide(_anb.currentType); return; }
+    if (typeof _anb.tickFn === 'function') _anb.tickFn();
+}
+document.addEventListener('visibilitychange', function () { if (!document.hidden) _anbResync(); });
+window.addEventListener('focus', _anbResync);
+window.addEventListener('pageshow', _anbResync);
 
 /* Close button — reads type at click time */
 document.getElementById('anb-close-btn').addEventListener('click', function(e) {
@@ -4316,6 +6178,158 @@ var _endoKnownStatus = {};
 _endoLetters.forEach(function (l) { _endoKnownStatus[l.id] = l.status; });
 var _endoUploadTargetId = null;
 var _endoCurrentLetter  = null;
+/* ══════════════════════════════════════════════════════════════════════
+   NEW (company invitations): the company's invitation in the Inbox
+   ------------------------------------------------------------
+   A company asked to register the student and the administrator allowed it. The student answers here:
+     • Accept  → the placement check (mismatch popup, same as applying); then the Application SIT is removed
+                 and has to be validated again; the administrator is told. The student is registered once the
+                 Application SIT is verified.
+     • Decline → the company is told (it sees the invitation as declined).
+   ══════════════════════════════════════════════════════════════════════ */
+var _ciInvites = <?= json_encode($ci_invites_now, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
+var _ciKnown = {};
+_ciInvites.forEach(function (i) { _ciKnown[i.id] = i.status; });
+var _ciBusy = false;
+var _ciMismatchFor = 0;
+
+function ciInviteAttention() { return _ciInvites.filter(function (i) { return i.status === 'allowed'; }).length; }
+
+function ciInvitesHtml() {
+    if (!_ciInvites.length) return '';
+    return '<div class="ci-inv-wrap">' + _ciInvites.map(function (i) {
+        var open = i.status === 'allowed';
+        return '<div class="ci-inv-card" id="ciInv' + i.id + '">' +
+            '<div class="ci-inv-top"><i class="fas fa-building-circle-check"></i><div>' +
+                '<div class="ci-inv-title">Company Invitation &mdash; ' + endoEsc(i.company_name) + '</div>' +
+                '<div class="endo-card-sub">Approved by the OJT Administrator' + (i.sent_at ? ' &middot; ' + endoEsc(i.sent_at) : '') + '</div>' +
+            '</div></div>' +
+            '<div class="endo-help">' + (open
+                ? '<strong>' + endoEsc(i.company_name) + '</strong> would like to have you as their OJT trainee. An endorsement letter came with the invitation (below). If you accept, your Application SIT is removed and has to be validated again, and you upload the signed endorsement letter; the company registers you once both are in.'
+                : 'You accepted this invitation. Upload your new Application SIT on the Requirements page and your signed Endorsement Letter below &mdash; the company registers you once the Application SIT is verified and the letter is uploaded.') + '</div>' +
+            (open
+                ? '<div class="endo-card-actions"><button type="button" class="endo-act upload" onclick="ciRespond(' + i.id + ', \'accept\')"><i class="fas fa-check"></i> Accept</button>' +
+                  '<button type="button" class="endo-act ghost" onclick="ciRespond(' + i.id + ', \'decline\')"><i class="fas fa-xmark"></i> Decline</button></div>'
+                : '<div class="ci-inv-status"><i class="fas fa-pause-circle"></i> Accepted &mdash; on hold until your Application SIT is verified, your Endorsement Letter is uploaded and the company registers you</div>') +
+        '</div>';
+    }).join('') + '</div>';
+}
+
+// called by endoApplyInbox(): remember the invitations and announce a new one
+function ciApplyInvites(res, quiet) {
+    var list = (res && res.invitations) ? res.invitations : [];
+    var fresh = [];
+    list.forEach(function (i) {
+        if (_ciKnown[i.id] === undefined && i.status === 'allowed') fresh.push(i);
+        _ciKnown[i.id] = i.status;
+    });
+    _ciInvites = list;
+    if (fresh.length && !quiet && typeof clShowTopToast === 'function') {
+        clShowTopToast(fresh[0].company_name, 'invited you to be their OJT trainee — open your Inbox to accept or decline.', 'fa-envelope-open-text', false, 'inbox');
+        var btn = document.getElementById('endoInboxBtn');
+        if (btn) { btn.classList.remove('pulse'); void btn.offsetWidth; btn.classList.add('pulse'); }
+    }
+}
+
+function ciPost(fields) {
+    var fd = new FormData();
+    Object.keys(fields).forEach(function (k) { fd.append(k, fields[k]); });
+    return fetch(window.location.pathname, { method: 'POST', body: fd, credentials: 'same-origin' })
+        .then(function (r) { return r.text(); })
+        .then(function (raw) { try { return JSON.parse(raw); } catch (e) { return null; } });
+}
+function ciAfterChange() {
+    // re-read the Inbox + refresh the company rows (the accepted invitation shows as an application on hold)
+    if (typeof endoFetchInbox === 'function') endoFetchInbox().then(function (res) { endoApplyInbox(res, true); });
+    var cur = document.querySelector('.page-inner');
+    if (!cur) return;
+    var open = Array.prototype.map.call(document.querySelectorAll('.company-row .toggle-input:checked'), function (i) { return i.id; });
+    fetch(window.location.pathname, { credentials: 'same-origin', cache: 'no-store' })
+        .then(function (r) { return r.text(); })
+        .then(function (html) {
+            var doc = new DOMParser().parseFromString(html, 'text/html');
+            var fresh = doc.querySelector('.page-inner');
+            if (fresh && cur) { cur.innerHTML = fresh.innerHTML; open.forEach(function (id) { var t = document.getElementById(id); if (t) t.checked = true; }); }
+        }).catch(function () {});
+}
+function ciFail(msg) {
+    if (typeof clShowTopToast === 'function') clShowTopToast('', msg, 'fa-circle-xmark', true); else alert(msg);
+}
+
+function ciRespond(id, decision) {
+    if (_ciBusy) return;
+    var inv = _ciInvites.filter(function (i) { return i.id === id; })[0];
+    var name = inv ? inv.company_name : 'the company';
+    if (decision === 'decline') {
+        document.getElementById('ciConfirmMsg').textContent = 'Decline the invitation of ' + name + '? The company will be told that you declined.';
+        document.getElementById('ciConfirmYes').onclick = function () { ciCloseConfirm(); ciSend(id, 'decline', ''); };
+        document.getElementById('ciConfirmModal').style.display = 'flex';
+        return;
+    }
+    ciSend(id, 'accept', '');
+}
+function ciCloseConfirm() { document.getElementById('ciConfirmModal').style.display = 'none'; }
+
+function ciSend(id, decision, reason) {
+    if (_ciBusy) return;
+    _ciBusy = true;
+    showGlobalLoading(decision === 'accept' ? 'Checking preferred placement' : 'Declining invitation');
+    ciPost({ ci_respond: '1', invite_id: id, decision: decision, reason: reason || '' })
+        .then(function (res) {
+            if (!res) { ciFail('Server error. Please try again.'); return; }
+            if (!res.success) { ciFail(res.message || 'The invitation could not be processed.'); if (res.gone) ciAfterChange(); return; }
+            if (res.mismatch) { ciShowMismatch(id, res.mismatch); return; }
+            if (decision === 'decline') {
+                clShowTopToast(res.company_name || '', 'invitation was declined.', 'fa-circle-xmark', false);
+            } else {
+                ciShowAccepted(res.company_name);
+            }
+            ciAfterChange();
+        })
+        .catch(function () { ciFail('Network error. Please check your connection and try again.'); })
+        .finally(function () { _ciBusy = false; hideGlobalLoading(); });
+}
+
+function ciShowAccepted(company) {
+    document.getElementById('ciAcceptedMsg').innerHTML = 'You accepted the invitation of <strong>' + endoEsc(company || 'the company') + '</strong>.';
+    document.getElementById('ciAcceptedModal').style.display = 'flex';
+}
+
+// the company's data does not match the saved Preference for Placement → same popup as applying
+function ciShowMismatch(id, m) {
+    _ciMismatchFor = id;
+    document.getElementById('ciPmLead').innerHTML = 'The data of <strong>' + endoEsc(m.company_name) + '</strong> does not match your saved Preference for Placement' +
+        (m.pref_name ? ' (<strong>' + endoEsc(m.pref_name) + '</strong>)' : '') + '. Do you want to replace your preferred placement with this company?';
+    document.getElementById('ciPmDiff').innerHTML = '<tr><th>Field</th><th>Your Preference</th><th>Selected Company</th></tr>' +
+        (m.diff || []).map(function (d) {
+            return '<tr><td>' + endoEsc(d.label) + '</td><td' + (d.pref === '' ? ' class="pm-empty"' : '') + '>' + (d.pref === '' ? '&mdash;' : endoEsc(d.pref)) + '</td>' +
+                   '<td' + (d.company === '' ? ' class="pm-empty"' : '') + '>' + (d.company === '' ? '&mdash;' : endoEsc(d.company)) + '</td></tr>';
+        }).join('');
+    document.getElementById('ciPmYes').disabled = false; document.getElementById('ciPmNo').disabled = false;
+    document.getElementById('ciMismatchModal').style.display = 'flex';
+}
+function ciMismatchNo() {
+    if (_ciBusy) return;
+    document.getElementById('ciMismatchModal').style.display = 'none';
+    ciSend(_ciMismatchFor, 'decline', 'The company’s data does not match my preferred placement.');
+}
+function ciMismatchYes() {
+    if (_ciBusy) return;
+    _ciBusy = true;
+    document.getElementById('ciPmYes').disabled = true; document.getElementById('ciPmNo').disabled = true;
+    showGlobalLoading('Updating preferred placement');
+    ciPost({ ci_replace_placement: '1', invite_id: _ciMismatchFor })
+        .then(function (res) {
+            document.getElementById('ciMismatchModal').style.display = 'none';
+            if (!res) { ciFail('Server error. Please try again.'); return; }
+            if (!res.success) { ciFail(res.message || 'The preferred placement could not be updated.'); if (res.gone) ciAfterChange(); return; }
+            ciShowAccepted(res.company_name);
+            ciAfterChange();
+        })
+        .catch(function () { document.getElementById('ciMismatchModal').style.display = 'none'; ciFail('Network error. Please check your connection and try again.'); })
+        .finally(function () { _ciBusy = false; hideGlobalLoading(); });
+}
+
 var ENDO_MAX_BYTES = 8 * 1024 * 1024;
 var ENDO_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'];
 
@@ -4335,19 +6349,39 @@ function endoStatusMeta(status) {
 }
 
 function endoAttention(letters) {
-    return letters.filter(function (l) { return !l.viewed || l.status === 'Awaiting Upload' || l.status === 'Rejected'; }).length;
+    return letters.filter(function (l) { return l.invite !== 'allowed' && (!l.viewed || l.status === 'Awaiting Upload' || l.status === 'Rejected'); }).length
+        + (typeof ciInviteAttention === 'function' ? ciInviteAttention() : 0);   // NEW (company invitations)
 }
 
 function updateEndoBadge(n) {
+    n = parseInt(n, 10); if (isNaN(n) || n < 0) n = 0;
     var b = document.getElementById('endoInboxBadge');
-    if (!b) return;
-    b.textContent = n > 0 ? n : '';
-    b.style.display = n > 0 ? 'flex' : 'none';
+    if (b) {
+        b.textContent = n > 0 ? n : '';
+        b.style.display = n > 0 ? 'flex' : 'none';
+    }
+    // ADJUSTMENT: mirror the same count on the sidebar's Company List link.
+    var sb = document.getElementById('endoSidebarBadge');
+    if (sb) {
+        sb.textContent = n > 0 ? (n > 99 ? '99+' : n) : '';
+        sb.classList.toggle('is-on', n > 0);
+        sb.title = n > 0 ? 'You have endorsement letter(s) in your Inbox' : '';
+        if (n > 0) sb.setAttribute('aria-label', n + ' endorsement letter notification(s)');
+        else sb.removeAttribute('aria-label');
+    }
 }
 
 function renderEndoInbox() {
     var body = document.getElementById('endoInboxBody');
     if (!body) return;
+    _renderEndoLetters(body);
+    var inv = (typeof ciInvitesHtml === 'function') ? ciInvitesHtml() : '';   // NEW (company invitations): shown above the letters
+    if (inv) {
+        if (!_endoLetters.length) body.innerHTML = '';
+        body.insertAdjacentHTML('afterbegin', inv);
+    }
+}
+function _renderEndoLetters(body) {
     if (!_endoLetters.length) {
         body.innerHTML = '<div class="endo-empty"><i class="fas fa-inbox"></i>No endorsement letters yet.<br>Once the administrator approves your application, your letter will arrive here.</div>';
         return;
@@ -4355,7 +6389,7 @@ function renderEndoInbox() {
     // ADJUSTMENT: cards in the administrator's requirement-display style (see the .cv-gallery CSS).
     body.innerHTML = '<div class="cv-gallery">' + _endoLetters.map(function (l) {
         var m = endoStatusMeta(l.status);
-        var canUpload = l.status !== 'Verified';
+        var canUpload = l.status !== 'Verified' && l.invite !== 'allowed';   // NEW (company invitations): accept the invitation first
         var uploadLabel = l.status === 'Rejected' ? 'Re-upload Signed Letter' : (l.has_upload ? 'Replace Upload' : 'Upload Signed Letter');
         var fileUrl = '?view_my_endorsement_upload=' + l.id;
         var isImage = /^image\//.test(l.uploaded_mime || '');
@@ -4365,8 +6399,11 @@ function renderEndoInbox() {
             ? '<div class="cv-no-file"><i class="fas fa-hourglass-half"></i><span>No file yet</span></div>'
             : (isImage
                 ? '<img src="' + fileUrl + '" class="cv-thumb-img" alt="" title="View the uploaded letter" onclick="' + openFile + '">'
-                : '<button type="button" class="cv-no-file is-file" title="View the uploaded letter" onclick="' + openFile + '"><i class="fas fa-file-pdf"></i><span>' + endoEsc(l.uploaded_name || 'Uploaded letter') + '</span></button>')
-              + '<button type="button" class="cv-view-btn" title="View the uploaded letter" aria-label="View the uploaded letter" onclick="' + openFile + '"><i class="fas fa-eye"></i></button>';
+                : '<button type="button" class="cv-pdf-tile" title="View the uploaded letter" aria-label="View the uploaded ' + (/pdf/i.test(l.uploaded_mime || '') ? 'PDF' : 'file') + '" onclick="' + openFile + '"><i class="fas fa-file-pdf"></i><span>' + (/pdf/i.test(l.uploaded_mime || '') ? 'PDF' : 'FILE') + '</span></button>')   /* ADJUSTMENT: AccomForm.php-style PDF tile */
+              + '';
+        /* ADJUSTMENT: the eye icon on the card opens the LETTER itself (always available, like "Open Letter" used to be);
+           the card's button below previews the student's UPLOADED copy. The thumbnail / PDF tile still opens the upload. */
+        preview += '<button type="button" class="cv-view-btn" title="Open the endorsement letter" aria-label="Open the endorsement letter" onclick="openEndoLetter(' + l.id + ')"><i class="fas fa-eye"></i></button>';
         var state = !l.has_upload ? 'awaiting' : (l.status === 'Verified' ? 'verified' : 'pending');
         return '<div class="req-item cv-req-card' + (l.viewed ? '' : ' unread') + '" id="endoCard' + l.id + '" data-state="' + state + '" data-rejected="' + (l.status === 'Rejected' ? '1' : '0') + '">' +
             '<div class="cv-card-preview">' +
@@ -4383,10 +6420,11 @@ function renderEndoInbox() {
                 (l.has_upload ? '<div class="endo-upload-line"><i class="fas fa-paperclip"></i> ' + endoEsc(l.uploaded_name || 'Uploaded file') +
                     (l.uploaded_at ? ' &middot; ' + endoEsc(l.uploaded_at) : '') + '</div>' : '') + // ADJUSTMENT: "View" link → eye button on the preview
                 '<div class="endo-card-actions">' +
-                    '<button type="button" class="endo-act primary" onclick="openEndoLetter(' + l.id + ')"><i class="fas fa-expand"></i> Open Letter</button>' +
+                    '<button type="button" class="endo-act primary" onclick="' + openFile + '"' + (l.has_upload ? ' title="Preview the uploaded letter"' : ' disabled title="No file uploaded yet"') + '><i class="fas fa-expand"></i> Preview Uploaded Letter</button>' +
                     (canUpload ? '<button type="button" class="endo-act upload" id="endoUpBtn' + l.id + '" onclick="endoPickUpload(' + l.id + ')"><i class="fas fa-upload"></i> ' + uploadLabel + '</button>' : '') +
                 '</div>' +
                 (canUpload ? '<div class="endo-upload-hint">Accepted: JPG, PNG, WEBP or PDF &middot; max 8 MB</div>' : '') +
+                (l.invite === 'allowed' ? '<div class="endo-upload-hint"><i class="fas fa-circle-info"></i> This letter came with the company\u2019s invitation. Accept the invitation above to upload your signed copy.</div>' : '') +
             '</div>' +
         '</div>';
     }).join('') + '</div>';
@@ -4401,9 +6439,18 @@ function openEndoFile(id) {
     document.getElementById('endoFileTitle').textContent = 'Uploaded Letter' + (l ? ' — ' + l.company_name : '') + ' · ' + name;
     var canvas = document.getElementById('endoFileCanvas');
     canvas.innerHTML = '';
+    canvas.classList.remove('image-mode');
     if (l && /^image\//.test(l.uploaded_mime || '')) {
+        canvas.classList.add('image-mode');
         var img = document.createElement('img');
-        img.src = url; img.alt = name;
+        img.alt = name;
+        // a file that can no longer be streamed back (e.g. removed after a remark) gets a clear message, not a broken image
+        img.onerror = function () {
+            img.onerror = null;
+            canvas.classList.remove('image-mode');
+            canvas.innerHTML = '<div class="endo-file-unavailable"><i class="fas fa-file-circle-xmark"></i><span>Preview unavailable</span></div>';
+        };
+        img.src = url;
         canvas.appendChild(img);
     } else {
         var fr = document.createElement('iframe');
@@ -4418,6 +6465,7 @@ function closeEndoFileModal() {
     if (!m || m.style.display === 'none') return false;
     m.style.display = 'none';
     document.getElementById('endoFileCanvas').innerHTML = '';
+    document.getElementById('endoFileCanvas').classList.remove('image-mode');
     // keep scrolling locked while the inbox drawer stays open underneath
     if (document.getElementById('endoInboxOverlay').style.display !== 'flex') document.body.style.overflow = '';
     return true;
@@ -4437,6 +6485,19 @@ function closeEndoInbox() {
 
 var _endoToastTimer = null;
 function showEndoToast(msg, type, actionLabel, actionFn) {
+    /* UPDATED: every endorsement popup now uses the page's standard popup notification (the navy .cv-top-toast bar at the top,
+       same as the invitation / application popups; a clickable one shows "View ›"). The old bottom bar below is only a fallback. */
+    if (typeof clShowTopToast === 'function') {
+        try {
+            var isErr = (type === 'error');
+            var go = '';
+            if (actionFn === openEndoInbox) go = 'inbox';
+            else if (actionLabel === 'Refresh') go = 'reload';
+            var icon = isErr ? 'fa-circle-xmark' : (/^New endorsement letter/.test(msg) ? 'fa-envelope-open-text' : 'fa-circle-check');
+            clShowTopToast('', msg, icon, isErr, go);
+            return;
+        } catch (e) { /* fall back to the old bar */ }
+    }
     var t = document.getElementById('endoToast');
     var icon = document.getElementById('endoToastIcon');
     document.getElementById('endoToastMsg').textContent = msg;
@@ -4454,10 +6515,22 @@ function showEndoToast(msg, type, actionLabel, actionFn) {
     _endoToastTimer = setTimeout(function () { t.classList.remove('show'); }, actionLabel ? 9000 : 4500);
 }
 
-function loadEndoInbox() {
+/* ADJUSTMENT (sync): fetch only (no UI) so the popup poll can load the inbox in parallel with the
+   company list and apply everything in one step. Resolves null on any error. */
+function endoFetchInbox() {
     return fetch(window.location.pathname + '?endorsement_inbox=1', { cache: 'no-store' })
-        .then(function (r) { return r.json(); })
-        .then(function (res) {
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .then(function (res) { return (res && res.success) ? res : null; })
+        .catch(function () { return null; });
+}
+
+function loadEndoInbox() {
+    return endoFetchInbox().then(function (res) { endoApplyInbox(res, false); });
+}
+
+// quiet = the application popup already announces the new letter, so skip the duplicate "new letter" toast.
+function endoApplyInbox(res, quiet) {
+    try {
             if (!res || !res.success) return;
             var letters = res.letters || [];
             var newOnes = [], verified = [], rejected = [];
@@ -4469,6 +6542,7 @@ function loadEndoInbox() {
                 _endoKnownStatus[l.id] = l.status;
             });
             _endoLetters = letters;
+            if (typeof ciApplyInvites === 'function') ciApplyInvites(res, quiet);   // NEW (company invitations)
             updateEndoBadge(res.attention || 0);
             if (document.getElementById('endoInboxOverlay').style.display === 'flex') renderEndoInbox();
 
@@ -4479,25 +6553,75 @@ function loadEndoInbox() {
                 showEndoToast('Your endorsement letter for ' + rejected[0].company_name + ' was rejected. See the remarks in your Inbox.', 'error',
                               'Open Inbox', openEndoInbox);
             } else if (newOnes.length) {
-                showEndoToast('New endorsement letter received from ' + newOnes[0].company_name + '.', 'success', 'Open Inbox', openEndoInbox);
+                if (!quiet) showEndoToast('New endorsement letter received from ' + newOnes[0].company_name + '.', 'success', 'Open Inbox', openEndoInbox);
                 var btn = document.getElementById('endoInboxBtn');
                 if (btn) { btn.classList.remove('pulse'); void btn.offsetWidth; btn.classList.add('pulse'); }
             }
-        })
-        .catch(function () { /* silent — retried on next interval */ });
+    } catch (e) { /* silent — retried on next interval */ }
 }
 setInterval(loadEndoInbox, 20000);
 
 /* ── Full-screen letter viewer ── */
-function endoResizeLetterFrame() {
-    var frame = document.getElementById('endoLetterFrame');
+/* ADJUSTMENT: size the iframe to the FULL rendered letter so nothing is hidden while scrolling.
+   The frame has scrolling="no", so any height shorter than the letter cuts off its last page(s).
+   The height is now taken from the real bottom of the last A4 page (not just scrollHeight), is
+   re-measured whenever the letter's layout changes (web fonts / pagination / resize), and only
+   ever grows during a viewing session so late pagination can't truncate it. */
+var _endoResizeObserver = null;
+var _endoResizeTimers   = [];
+
+function endoMeasureLetter(doc) {
+    var h = 0;
+    if (!doc) return 0;
+    if (doc.documentElement) h = Math.max(h, doc.documentElement.scrollHeight || 0);
+    if (doc.body) h = Math.max(h, doc.body.scrollHeight || 0, doc.body.offsetHeight || 0);
     try {
-        var doc = frame.contentDocument;
-        if (doc && doc.documentElement) {
-            var h = Math.max(doc.documentElement.scrollHeight, doc.body ? doc.body.scrollHeight : 0);
-            if (h > 100) frame.style.height = h + 'px';
+        var pages = doc.querySelectorAll('#rendering-preview-root .doc-paper, .doc-paper');
+        if (pages.length) {
+            var win = doc.defaultView, scrollY = (win && win.pageYOffset) || 0;
+            var last = pages[pages.length - 1].getBoundingClientRect();
+            var cs = win ? win.getComputedStyle(pages[pages.length - 1]) : null;
+            var mb = cs ? (parseFloat(cs.marginBottom) || 0) : 0;
+            h = Math.max(h, Math.ceil(last.bottom + scrollY + mb));
         }
     } catch (e) {}
+    return h;
+}
+
+function endoResizeLetterFrame() {
+    var frame = document.getElementById('endoLetterFrame');
+    if (!frame) return;
+    try {
+        var doc = frame.contentDocument;
+        var h = endoMeasureLetter(doc);
+        var cur = parseInt(frame.style.height, 10) || 0;
+        // +4px safety so a fractional last-pixel is never clipped; never shrink mid-session.
+        if (h > 100 && h + 4 > cur) frame.style.height = (h + 4) + 'px';
+    } catch (e) { /* cross-origin / not ready — the next re-measure retries */ }
+}
+
+function endoStopLetterWatch() {
+    _endoResizeTimers.forEach(function (t) { clearTimeout(t); });
+    _endoResizeTimers = [];
+    if (_endoResizeObserver) { try { _endoResizeObserver.disconnect(); } catch (e) {} _endoResizeObserver = null; }
+}
+
+function endoWatchLetterFrame() {
+    endoStopLetterWatch();
+    var frame = document.getElementById('endoLetterFrame');
+    // The builder paginates once its web fonts load — re-measure a few times (kept from before, extended).
+    [50, 100, 250, 400, 700, 900, 1300, 1600, 2600, 4000, 6000].forEach(function (t) {
+        _endoResizeTimers.push(setTimeout(endoResizeLetterFrame, t));
+    });
+    try {
+        var doc = frame.contentDocument;
+        if (doc && doc.fonts && doc.fonts.ready) doc.fonts.ready.then(endoResizeLetterFrame).catch(function () {});
+        if (window.ResizeObserver && doc && doc.body) {
+            _endoResizeObserver = new ResizeObserver(function () { endoResizeLetterFrame(); });
+            _endoResizeObserver.observe(doc.body);
+            if (doc.documentElement) _endoResizeObserver.observe(doc.documentElement);
+        }
+    } catch (e) { /* fall back to the timed re-measures above */ }
 }
 
 function openEndoLetter(id) {
@@ -4507,8 +6631,8 @@ function openEndoLetter(id) {
     var frame = document.getElementById('endoLetterFrame');
     frame.style.height = '1200px';
     frame.onload = function () {
-        // The builder paginates once its web fonts load — re-measure a few times.
-        [100, 400, 900, 1600, 2600].forEach(function (t) { setTimeout(endoResizeLetterFrame, t); });
+        if (!frame.getAttribute('src') || frame.getAttribute('src') === 'about:blank') return; // ignore the blank reset on close
+        endoWatchLetterFrame();
     };
     frame.src = window.location.pathname + '?endorsement_letter=' + encodeURIComponent(id) + '&embed=1';
     document.getElementById('endoLetterModal').style.display = 'flex';
@@ -4526,6 +6650,7 @@ function closeEndoLetterModal() {
     var m = document.getElementById('endoLetterModal');
     if (!m || m.style.display === 'none') return;
     m.style.display = 'none';
+    endoStopLetterWatch();
     document.getElementById('endoLetterFrame').src = 'about:blank';
     document.body.style.overflow = '';
     _endoCurrentLetter = null;
@@ -4562,9 +6687,29 @@ function endoDownloadPdf() {
         });
 }
 
+window.addEventListener('resize', function () {
+    var m = document.getElementById('endoLetterModal');
+    if (m && m.style.display !== 'none') endoResizeLetterFrame();
+});
+
 document.getElementById('endoLetterModal').addEventListener('click', function (e) {
     if (e.target === this) closeEndoLetterModal();
 });
+
+/* ADJUSTMENT: the notifications of the signed-letter upload use the same popup as the letter notifications
+   (the navy .cv-top-toast bar at the top: icon, company name in bold; no "View ›" because the Inbox is already open). Falls back to the
+   old bottom toast if the popup helper is not available, so an upload is never left unreported. */
+function endoUploadNotice(id, message, isError) {
+    try {
+        if (typeof clShowTopToast === 'function') {
+            if (isError) { clShowTopToast('', message, 'fa-circle-xmark', true); return; }
+            var l = _endoLetters.find(function (x) { return x.id === id; });
+            clShowTopToast(l ? l.company_name : '', '\u2014 ' + message, 'fa-envelope-circle-check', false);   // no "View ›": the Inbox is already open
+            return;
+        }
+    } catch (e) {}
+    showEndoToast(message, isError ? 'error' : 'success');
+}
 
 /* ── Upload the signed letter ── */
 function endoPickUpload(id) {
@@ -4578,8 +6723,8 @@ document.getElementById('endoUploadInput').addEventListener('change', function (
     var file = this.files && this.files[0];
     var id = _endoUploadTargetId;
     if (!file || id === null) return;
-    if (ENDO_TYPES.indexOf(file.type) === -1) { showEndoToast('Only JPG, PNG, WEBP or PDF files are accepted.', 'error'); return; }
-    if (file.size > ENDO_MAX_BYTES)           { showEndoToast('The file must be smaller than 8 MB.', 'error'); return; }
+    if (ENDO_TYPES.indexOf(file.type) === -1) { endoUploadNotice(id, 'Only JPG, PNG, WEBP or PDF files are accepted.', true); return; }
+    if (file.size > ENDO_MAX_BYTES)           { endoUploadNotice(id, 'The file must be smaller than 8 MB.', true); return; }
 
     var btn = document.getElementById('endoUpBtn' + id);
     var oldHtml = btn ? btn.innerHTML : '';
@@ -4593,17 +6738,17 @@ document.getElementById('endoUploadInput').addEventListener('change', function (
         .then(function (r) { return r.json(); })
         .then(function (res) {
             if (res && res.success) {
-                showEndoToast(res.message || 'Endorsement letter uploaded.', 'success');
+                endoUploadNotice(id, res.message || 'Endorsement letter uploaded.', false);
                 _endoKnownStatus[id] = 'Pending';
                 loadEndoInbox();
             } else {
                 if (btn) { btn.disabled = false; btn.innerHTML = oldHtml; }
-                showEndoToast((res && res.message) || 'Upload failed. Please try again.', 'error');
+                endoUploadNotice(id, (res && res.message) || 'Upload failed. Please try again.', true);
             }
         })
         .catch(function () {
             if (btn) { btn.disabled = false; btn.innerHTML = oldHtml; }
-            showEndoToast('Network error. Please try again.', 'error');
+            endoUploadNotice(id, 'Network error. Please try again.', true);
         });
 });
 
@@ -4628,11 +6773,83 @@ if (new URLSearchParams(window.location.search).get('inbox') === '1') {
    changes, a popup (administrator.php's .cv-top-toast style) explains
    what happened and the UI updates right away:
      • stage changes      → the company panel list is refreshed in place
-                            (open panels stay open) behind the loading page
+                            (open panels stay open) in place, without a loading page
      • registration change → the page reloads (the sidebar's locked pages
                             change too); the popup is shown again after it
    ══════════════════════════════════════════════════════════════════════ */
 var CL_LIVE_TOASTS_KEY = 'cl_live_toasts';
+
+/* ══════════════════════════════════════════════════════════════════════
+   ADJUSTMENT: CLICKABLE POPUPS — same pattern as administrator.php (cvTagToast / data-cv-go).
+   spec = "inbox" (the endorsement letter) | "company:<id>" (that company's row, opened + highlighted).
+   Also reachable from the other student pages' popups via company_list.php?inbox=1 / ?open_company=<id>.
+   Unknown / already-gone targets are ignored quietly.
+   ══════════════════════════════════════════════════════════════════════ */
+function clTagToast(el, spec) {
+    if (!el || !spec || el.hasAttribute('data-cv-go')) return;
+    el.setAttribute('data-cv-go', spec);
+    el.setAttribute('role', 'link');
+    el.setAttribute('tabindex', '0');
+    el.setAttribute('aria-label', (el.textContent || '').replace(/\s+/g, ' ').trim() + ' \u2014 open');
+    var hint = document.createElement('span');
+    hint.className = 'cv-toast-go';
+    hint.setAttribute('aria-hidden', 'true');
+    hint.innerHTML = 'View <i class="fas fa-chevron-right"></i>';
+    el.appendChild(hint);
+}
+function clGoSpecFor(ev) {
+    if (!ev) return '';
+    if (ev.letterFor) return 'inbox';
+    return ev.id ? 'company:' + ev.id : '';
+}
+function clOpenCompany(id) {
+    try {
+        id = String(id || '').replace(/\D/g, '');
+        var input = id ? document.getElementById('company_' + id) : null;
+        if (!input) return;
+        if (!input.checked) { input.checked = true; input.dispatchEvent(new Event('change', { bubbles: true })); }
+        var row = input.closest('.company-row') || input;
+        try { row.scrollIntoView({ behavior: 'smooth', block: 'center' }); } catch (e) { row.scrollIntoView(); }
+        row.classList.remove('cv-go-highlight'); void row.offsetWidth; row.classList.add('cv-go-highlight');
+        setTimeout(function () { row.classList.remove('cv-go-highlight'); }, 2800);
+    } catch (e) {}
+}
+function clGo(spec) {
+    var p = String(spec || '').split(':');
+    if (p[0] === 'inbox') { if (typeof openEndoInbox === 'function') openEndoInbox(); }
+    else if (p[0] === 'company') clOpenCompany(p[1]);
+    else if (p[0] === 'reload') window.location.reload();   // NEW: the "Refresh" popup of a verified letter
+}
+function clActivateToast(toast) {
+    var spec = toast.getAttribute('data-cv-go');
+    toast.classList.remove('show');
+    setTimeout(function () { if (toast.parentNode) toast.parentNode.removeChild(toast); clLayoutTopToasts(); }, 350);
+    clGo(spec);
+}
+document.addEventListener('click', function (e) {
+    var t = e.target && e.target.closest ? e.target.closest('.cv-top-toast[data-cv-go]') : null;
+    if (t) { e.preventDefault(); clActivateToast(t); }
+});
+document.addEventListener('keydown', function (e) {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    var t = e.target && e.target.closest ? e.target.closest('.cv-top-toast[data-cv-go]') : null;
+    if (t) { e.preventDefault(); clActivateToast(t); }
+});
+/* Arriving from a popup on another page: ?open_company=<id> — done once, then removed from the address bar. */
+(function () {
+    try {
+        var params = new URLSearchParams(window.location.search);
+        var oc = params.get('open_company');
+        if (!oc || !/^\d+$/.test(oc)) return;
+        params.delete('open_company');
+        if (window.history.replaceState) {
+            var q = params.toString();
+            window.history.replaceState({}, document.title, window.location.pathname + (q ? '?' + q : '') + window.location.hash);
+        }
+        var start = function () { setTimeout(function () { clOpenCompany(oc); }, 700); };
+        if (document.readyState === 'complete') start(); else window.addEventListener('load', start);
+    } catch (e) {}
+})();
 
 function clLayoutTopToasts() {
     var top = 30;
@@ -4643,13 +6860,14 @@ function clLayoutTopToasts() {
 }
 
 // Same popup as administrator.php (cvShowTopToast / showStudentVerifiedToast).
-function clShowTopToast(name, messageText, iconClass, isError) {
+function clShowTopToast(name, messageText, iconClass, isError, go) {
     var div = document.createElement('div');
     div.className = 'cv-top-toast' + (isError ? ' is-error' : '');
     div.setAttribute('role', 'status');
     div.innerHTML = '<i class="fas ' + rumEscape(iconClass || 'fa-circle-info') + '"></i><span>' +
         (name ? '<strong>' + rumEscape(name) + '</strong> ' : '') + rumEscape(messageText) + '</span>';
     document.body.appendChild(div);
+    clTagToast(div, go);   // ADJUSTMENT: clickable popup ("View ›")
     clLayoutTopToasts();
     requestAnimationFrame(function () { div.classList.add('show'); });
     setTimeout(function () {
@@ -4663,6 +6881,14 @@ function clShowTopToast(name, messageText, iconClass, isError) {
     var clNames = Object.assign({}, clState.names || {});
     var clBusy  = false;
 
+    /* ADJUSTMENT: share the last snapshot with student_profile.php / AccomForm.php (same key, localStorage) so a
+       change is announced once, on whichever student page is open. Failure to store is harmless. */
+    var CL_SNAP_KEY = 'cl_live_state_' + <?= json_encode((int)$user_id) ?>;
+    function clSaveSnapshot() {
+        try { localStorage.setItem(CL_SNAP_KEY, JSON.stringify({ t: Date.now(), s: clState, n: clNames })); } catch (e) {}
+    }
+    clSaveSnapshot();
+
     function nameOf(id) { return clNames[String(id)] || 'The company'; }
 
     // What changed between two snapshots → list of popups.
@@ -4671,28 +6897,33 @@ function clShowTopToast(name, messageText, iconClass, isError) {
         var prevReg = prev.registered ? String(prev.registered) : null;
         var nextReg = next.registered ? String(next.registered) : null;
         if (nextReg && nextReg !== prevReg) {
-            out.push({ name: nameOf(nextReg), text: 'accepted your application \u2014 you are now registered as their OJT trainee.', icon: 'fa-circle-check' });
+            out.push({ id: nextReg, name: nameOf(nextReg), text: 'accepted your application \u2014 you are now registered as their OJT trainee.', icon: 'fa-circle-check' });
         }
         if (prevReg && prevReg !== nextReg) {
-            out.push({ name: nameOf(prevReg), text: 'no longer has you registered as their OJT trainee.', icon: 'fa-circle-info' });
+            out.push({ id: prevReg, name: nameOf(prevReg), text: 'no longer has you registered as their OJT trainee.', icon: 'fa-circle-info' });
         }
         var pp = prev.pending || {}, np = next.pending || {};
         Object.keys(pp).forEach(function (id) {
             if (np[id] === pp[id]) return;
             if (!np[id]) {
                 if (id === nextReg) return; // accepted — already announced above
+                if (pp[id] === 'hold') { out.push({ id: id, name: nameOf(id), text: '\u2014 your on-hold application was cancelled.', icon: 'fa-circle-xmark' }); return; }
                 out.push(pp[id] === 'admin'
-                    ? { name: nameOf(id), text: '\u2014 your application was not approved by the administrator.', icon: 'fa-circle-xmark' }
-                    : { name: nameOf(id), text: 'did not accept your application.', icon: 'fa-circle-xmark' });
+                    ? { id: id, name: nameOf(id), text: '\u2014 your application was not approved by the administrator.', icon: 'fa-circle-xmark' }
+                    : { id: id, name: nameOf(id), text: 'did not accept your application.', icon: 'fa-circle-xmark' });
+            } else if (pp[id] === 'hold' && np[id] === 'admin') {
+                out.push({ id: id, name: nameOf(id), text: '\u2014 your requirements are verified again, so your application was sent automatically and is Waiting for the Approval.', icon: 'fa-paper-plane' });
             } else if (pp[id] === 'admin' && np[id] === 'company') {
-                out.push({ name: nameOf(id), text: '\u2014 the administrator approved your application. It is now Under Company Validation; your endorsement letter is in your Inbox.', icon: 'fa-envelope-circle-check' });
+                out.push({ id: id, name: nameOf(id), text: '\u2014 the administrator approved your application. It is now Under Company Validation; your endorsement letter is in your Inbox.', icon: 'fa-envelope-circle-check', letterFor: String(id) });
             }
         });
         Object.keys(np).forEach(function (id) {
-            if (!pp[id]) out.push(np[id] === 'company'
+            if (!pp[id]) out.push(np[id] === 'hold'
+                ? { id: id, name: nameOf(id), text: '\u2014 your application is On Hold until your new Application SIT is verified.', icon: 'fa-pause-circle' }
+                : np[id] === 'company'
                 // ADJUSTMENT: applied by the administrator (monitoring dashboard) — straight to the company.
-                ? { name: nameOf(id), text: '\u2014 the administrator applied you to this company. It is now Under Company Validation; your endorsement letter is in your Inbox.', icon: 'fa-envelope-circle-check' }
-                : { name: nameOf(id), text: '\u2014 your application was sent and is Waiting for the Approval.', icon: 'fa-paper-plane' });
+                ? { id: id, name: nameOf(id), text: '\u2014 the administrator applied you to this company. It is now Under Company Validation; your endorsement letter is in your Inbox.', icon: 'fa-envelope-circle-check', letterFor: String(id) }
+                : { id: id, name: nameOf(id), text: '\u2014 your application was sent and is Waiting for the Approval.', icon: 'fa-paper-plane' });
         });
         return out;
     }
@@ -4700,7 +6931,9 @@ function clShowTopToast(name, messageText, iconClass, isError) {
     // Re-renders the company panel list from the server, keeping open panels open.
     function refreshCompanyList() {
         var open = Array.prototype.map.call(document.querySelectorAll('.company-row .toggle-input:checked'), function (i) { return i.id; });
-        showGlobalLoading('Updating company list');
+        /* ADJUSTMENT: no loading page here any more. This is a background refresh triggered by the live
+           poll (e.g. the endorsement letter arrived); the list is swapped in place and the popup / badges
+           appear right after, so covering the page with an overlay was an extra, unwanted loading page. */
         return fetch(window.location.pathname, { credentials: 'same-origin', cache: 'no-store' })
             .then(function (r) { return r.text(); })
             .then(function (html) {
@@ -4712,8 +6945,20 @@ function clShowTopToast(name, messageText, iconClass, isError) {
                     open.forEach(function (id) { var t = document.getElementById(id); if (t) t.checked = true; });
                 }
             })
-            .catch(function () {})
-            .finally(function () { hideGlobalLoading(); });
+            .catch(function () {});
+    }
+
+    // The letter row can land a moment after the stage change; retry briefly until it is listed
+    // (max 3 retries, then continue anyway so the popup is never held back).
+    function fetchInboxWithLetters(expected, attempt) {
+        attempt = attempt || 0;
+        return endoFetchInbox().then(function (res) {
+            if (!expected.length || attempt >= 3) return res;
+            var have = res ? (res.letters || []).map(function (l) { return String(l.company_id); }) : [];
+            var missing = expected.some(function (id) { return have.indexOf(id) === -1; });
+            if (!missing) return res;
+            return new Promise(function (ok) { setTimeout(ok, 700); }).then(function () { return fetchInboxWithLetters(expected, attempt + 1); });
+        });
     }
 
     function pollApplicationState() {
@@ -4726,17 +6971,28 @@ function clShowTopToast(name, messageText, iconClass, isError) {
                 Object.assign(clNames, next.names || {});
                 var events = describeChanges(clState, next);
                 var regChanged = String(clState.registered || '') !== String(next.registered || '');
+                var endoChanged = !!(next.endo && (!clState.endo || clState.endo.sig !== next.endo.sig));
                 clState = next;
-                if (!events.length) return;
+                clSaveSnapshot();
+                if (!events.length) {
+                    // No popup, but the letters changed (e.g. verified / rejected) → refresh badges now, not in up to 20 s.
+                    if (endoChanged) return endoFetchInbox().then(function (res) { endoApplyInbox(res, false); });
+                    return;
+                }
                 if (regChanged) {
                     // Sidebar pages (Attendance / Reports / Dashboard) depend on registration → reload.
                     try { sessionStorage.setItem(CL_LIVE_TOASTS_KEY, JSON.stringify(events)); } catch (e) {}
+                    globalLoadingMarkReturn();
                     startNavigationGlobalLoading('Updating');
                     window.location.reload();
                     return;
                 }
-                return refreshCompanyList().then(function () {
-                    events.forEach(function (ev) { clShowTopToast(ev.name, ev.text, ev.icon); });
+                // SYNC: load the company list AND the inbox first, then show the popup, the sidebar badge
+                // and the Inbox badge in the same moment.
+                var expected = events.filter(function (ev) { return ev.letterFor; }).map(function (ev) { return ev.letterFor; });
+                return Promise.all([refreshCompanyList(), fetchInboxWithLetters(expected)]).then(function (out) {
+                    endoApplyInbox(out[1], true);
+                    events.forEach(function (ev) { clShowTopToast(ev.name, ev.text, ev.icon, false, clGoSpecFor(ev)); });
                 });
             })
             .catch(function () { /* silent — retried on the next tick */ })
@@ -4759,9 +7015,101 @@ function clShowTopToast(name, messageText, iconClass, isError) {
         var saved = JSON.parse(sessionStorage.getItem(CL_LIVE_TOASTS_KEY) || 'null');
         sessionStorage.removeItem(CL_LIVE_TOASTS_KEY);
         if (saved && saved.length) {
-            setTimeout(function () { saved.forEach(function (ev) { clShowTopToast(ev.name, ev.text, ev.icon); }); }, 450);
+            setTimeout(function () { saved.forEach(function (ev) { clShowTopToast(ev.name, ev.text, ev.icon, false, clGoSpecFor(ev)); }); }, 450);
         }
     } catch (e) {}
+})();
+</script>
+<!-- ══════════════════════════════════════════════════════════════════════
+     NEW (OJT trainee group chat) — NEW-MESSAGE POPUP + SIDE-MENU INDICATOR (same as student_profile.php)
+     ------------------------------------------------------------------------
+     When someone writes in the group chat with the student's company (the chat itself lives on student_profile.php),
+     this page shows:
+       • the same navy popup ("<Name> sent a message in OJT Trainee Group Chat") — clicking it opens the chat on
+         student_profile.php;
+       • a live red count on the "My Profile" side-menu link.
+     The counts come from student_profile.php?gc_load=1&peek=1 (read-only; only while the student is registered to a
+     company). Same rules as the other popups: messages already waiting when the page opens are the baseline (no
+     popup); seen ids are kept briefly in sessionStorage (shared with student_profile.php, so moving between pages
+     never repeats a popup); checked right away, then every 5 s (paused while the tab is hidden).
+     Self-contained: no existing function, poller or style is changed.
+     ══════════════════════════════════════════════════════════════════════ -->
+<style>
+    .sidebar-badge-chat { background:#dc2626; color:#fff; font-weight:800; text-align:center; box-sizing:border-box; min-width:18px; height:18px; padding:0 3px; border-radius:50%; font-size:10px; line-height:18px; display:inline-flex; align-items:center; justify-content:center; position:absolute; right:18px; top:50%; transform:translateY(-50%); animation:ccBadgePulse 2s ease-in-out infinite; }
+    .sidebar.collapsed .sidebar-badge-chat { right:14px; top:10px; transform:none; }
+    @keyframes ccBadgePulse { 0%, 100% { box-shadow:0 0 0 0 rgba(220,38,38,0.55); } 50% { box-shadow:0 0 0 6px rgba(220,38,38,0); } }
+    .cv-top-toast.cc-go { position:fixed; top:30px; left:50%; transform:translateX(-50%); background:#1B2A4A; color:#E3E8F1; border:1px solid #55668C; border-radius:0; padding:14px 20px; box-shadow:0 8px 24px rgba(27,42,74,0.30); display:flex; align-items:center; gap:12px; font-family:'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; font-size:12.5px; line-height:1.45; z-index:10020; max-width:440px; opacity:0; transition:opacity 0.35s, top 0.3s ease, background-color 0.15s ease; pointer-events:auto; cursor:pointer; }
+    .cv-top-toast.cc-go.show { opacity:1; }
+    .cv-top-toast.cc-go:hover { background:#24375E; }
+    .cv-top-toast.cc-go:focus-visible { outline:2px solid #F7C600; outline-offset:2px; }
+    .cv-top-toast.cc-go i { color:#8FD18F; font-size:18px; flex-shrink:0; }
+    .cv-top-toast.cc-go strong { color:#ffffff; font-weight:700; }
+    .cv-top-toast.cc-go .cv-toast-go { flex-shrink:0; margin-left:6px; color:#F7C600; font-size:10.5px; font-weight:700; text-transform:uppercase; letter-spacing:0.4px; white-space:nowrap; }
+    .cv-top-toast.cc-go .cv-toast-go i { color:inherit; font-size:9px; margin-left:3px; }
+</style>
+<script>
+(function () {
+    'use strict';
+    if (window._cvStudentChatNotifyReady) return;
+    window._cvStudentChatNotifyReady = true;
+    var ENDPOINT = 'student_profile.php?gc_load=1&peek=1', POLL_MS = 5000, TOAST_MS = 7000, STORE_KEY = 'cvStudentGroupChatKnownIds', STORE_FRESH = 45000;
+    var known = null, inFlight = false;
+
+    function esc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
+    function readStore() { try { var o = JSON.parse(sessionStorage.getItem(STORE_KEY) || 'null'); if (o && Array.isArray(o.ids) && Date.now() - (o.ts || 0) <= STORE_FRESH) return new Set(o.ids.map(String)); } catch (e) {} return null; }
+    function writeStore() { if (!known) return; try { sessionStorage.setItem(STORE_KEY, JSON.stringify({ ids: Array.from(known), ts: Date.now() })); } catch (e) {} }
+    function layoutToasts() {
+        var top = 30, undo = document.getElementById('undoToast');
+        if (undo && undo.classList && undo.classList.contains('show')) top = Math.max(top, undo.getBoundingClientRect().bottom + 12);
+        document.querySelectorAll('.cv-top-toast').forEach(function (el) { el.style.top = top + 'px'; top += el.offsetHeight + 12; });
+    }
+    function goChat() { window.location.href = 'student_profile.php?open_chat=1'; }
+    function popup(who, text) {
+        var div = document.createElement('div');
+        div.className = 'cv-top-toast cc-go'; div.setAttribute('role', 'status'); div.setAttribute('tabindex', '0');
+        div.innerHTML = '<i class="fas fa-comment-dots"></i><span><strong>' + esc(who) + '</strong> ' + esc(text) + '</span><span class="cv-toast-go">View <i class="fas fa-chevron-right"></i></span>';
+        div.addEventListener('click', goChat);
+        div.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); goChat(); } });
+        document.body.appendChild(div); layoutToasts();
+        requestAnimationFrame(function () { div.classList.add('show'); });
+        setTimeout(function () { div.classList.remove('show'); setTimeout(function () { div.remove(); layoutToasts(); }, 400); }, TOAST_MS);
+    }
+    function setBadge(n) {
+        n = parseInt(n, 10) || 0;
+        var b = document.getElementById('sidebarChatBadge');
+        if (b) { b.textContent = n > 99 ? '99+' : n; b.style.display = n > 0 ? '' : 'none'; }
+    }
+    function poll() {
+        if (inFlight || document.hidden) return;
+        inFlight = true;
+        fetch(ENDPOINT, { credentials: 'same-origin', cache: 'no-store' })
+            .then(function (r) { return r.json(); })
+            .then(function (d) {
+                inFlight = false;
+                if (!d || !d.success) return;
+                if (d.registered === false) { setBadge(0); return; }   // not registered to a company: no chat
+                var rows = d.unread_rows || [], ids = new Set(rows.map(function (r) { return String(r.id); }));
+                setBadge(d.unread);
+                if (known === null) {
+                    var st = readStore();
+                    if (!st) { known = ids; writeStore(); return; }   // baseline: nothing pops up
+                    known = st;
+                }
+                var fresh = rows.filter(function (r) { return !known.has(String(r.id)); });
+                known = ids; writeStore();
+                if (!fresh.length) return;
+                var names = Array.from(new Set(fresh.map(function (r) { return r.name; })));
+                if (names.length === 1) popup(names[0], fresh.length > 1 ? 'sent ' + fresh.length + ' messages in OJT Trainee Group Chat.' : 'sent a message in OJT Trainee Group Chat.');
+                else popup(fresh.length + ' new messages', 'in OJT Trainee Group Chat.');
+            })
+            .catch(function () { inFlight = false; });
+    }
+    poll();
+    setInterval(poll, POLL_MS);
+    document.addEventListener('visibilitychange', function () { if (!document.hidden && known !== null) poll(); });
+    window.addEventListener('focus', function () { if (known !== null) poll(); });
+    window.addEventListener('pageshow', function (e) { if (e.persisted) poll(); });
+    window.addEventListener('pagehide', writeStore);
 })();
 </script>
 </body>
