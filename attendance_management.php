@@ -3962,41 +3962,59 @@ td.incomplete, td.missed { color: var(--grid-amber); }
     .page-inner { padding: 16px; }
     .field-row, .summary-grid { grid-template-columns: 1fr; }
 }
-/* ── Step 3 (Confirm & Save): same look as the manual Add New Student form in admin_student_list.php — compact uppercase title with
-      an icon, labelled fields in a grid, small hints under each field and a bordered action bar. Scoped to #wizStep3 only. ── */
-#wizStep3 .s3-header { padding: 16px 24px 10px; border-bottom: 1px solid var(--grid-border); margin: 0 0 0; }
-#wizStep3 .s3-title-row { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
-#wizStep3 .s3-header h2 { font-size: 15px; text-transform: uppercase; letter-spacing: .4px; display: flex; align-items: center; gap: 8px; }
-#wizStep3 .s3-header h2 i { font-size: 14px; }
-#wizStep3 .s3-close { background: none; border: none; font-size: 24px; line-height: 1; cursor: pointer; color: var(--grid-muted); transition: color .2s; padding: 0 2px; }
-#wizStep3 .s3-close:hover { color: var(--grid-navy); }
-#wizStep3 .s3-intro { margin: 0 0 10px; font-size: 11.5px; line-height: 1.45; color: var(--grid-muted); }
-#wizStep3 .s3-body { padding: 12px 24px 4px; max-height: calc(100vh - 230px); max-height: calc(100dvh - 230px); min-height: 120px; overflow-y: auto; }
-#wizStep3 .sg-scope { align-items: flex-start; font-size: 11.5px; line-height: 1.45; padding: 8px 12px; margin-bottom: 12px; }
-#wizStep3 .sg-scope i { margin-top: 2px; }
-#wizStep3 .s3-grid { display: grid; grid-template-columns: repeat(3, 1fr); column-gap: 14px; row-gap: 0; align-items: start; }
-#wizStep3 .s3-grid .s3-span { grid-column: 1 / -1; }
-#wizStep3 .form-group { margin-bottom: 9px; }
-#wizStep3 .form-group label { display: block; font-weight: 600; color: #1e293b; margin-bottom: 4px; font-size: 12px; text-transform: none; letter-spacing: 0; }
-#wizStep3 .s3-field { width: 100%; box-sizing: border-box; padding: 7px 10px; border: 1px solid var(--grid-border); border-radius: 0; font-size: 13px; font-weight: 600; color: #1e293b; background: var(--surface-soft); min-height: 34px; line-height: 1.35; overflow-wrap: anywhere; }
-#wizStep3 .s3-field.s3-total { color: var(--grid-green); background: var(--grid-green-bg); }
-#wizStep3 .s3-field.s3-total span { font-size: 14px; }
-#wizStep3 .help-text { font-size: 10.5px; color: var(--grid-muted); margin-top: 3px; line-height: 1.35; }
-#wizStep3 .s3-notify-field { display: flex; align-items: center; gap: 8px; }
-#wizStep3 .s3-notify-field i { color: var(--grid-navy); font-size: 12px; }
-#wizStep3 .s3-footer { margin-top: 4px; padding: 10px 24px 12px; border-top: 1px solid var(--grid-border); justify-content: flex-end; }
-#wizStep3 .s3-footer .wiz-dots { display: none; }
-#wizStep3 .s3-footer .wiz-btn { padding: 10px 24px; font-weight: 600; letter-spacing: .3px; }
-#wizStep3 .s3-footer .wiz-btn-save { background: var(--grid-navy); }
-#wizStep3 .s3-footer .wiz-btn-save:hover { background: #24375E; }
-#wizardBox.s3-wide { width: 860px; max-width: 94%; }
+/* ── Wizard (Steps 1-3): Confirm & Save: same look as the manual Add New Student form in admin_student_list.php — compact uppercase title with
+      an icon, labelled fields in a grid, small hints under each field and a bordered action bar. Scoped to #wizardBox only. ── */
+#wizardBox .s3-header { padding: 16px 24px 10px; border-bottom: 1px solid var(--grid-border); margin: 0 0 0; }
+#wizardBox .s3-title-row { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+#wizardBox .s3-header h2 { font-size: 15px; text-transform: uppercase; letter-spacing: .4px; display: flex; align-items: center; gap: 8px; }
+#wizardBox .s3-header h2 i { font-size: 14px; }
+#wizardBox .s3-close { background: none; border: none; font-size: 24px; line-height: 1; cursor: pointer; color: var(--grid-muted); transition: color .2s; padding: 0 2px; }
+#wizardBox .s3-close:hover { color: var(--grid-navy); }
+#wizardBox .s3-intro { margin: 0 0 10px; font-size: 11.5px; line-height: 1.45; color: var(--grid-muted); }
+#wizardBox .s3-body { padding: 12px 24px 4px; max-height: calc(100vh - 230px); max-height: calc(100dvh - 230px); min-height: 120px; overflow-y: auto; }
+#wizardBox .sg-scope { align-items: flex-start; font-size: 11.5px; line-height: 1.45; padding: 8px 12px; margin-bottom: 12px; }
+#wizardBox .sg-scope i { margin-top: 2px; }
+#wizardBox .s3-grid { display: grid; grid-template-columns: repeat(3, 1fr); column-gap: 14px; row-gap: 0; align-items: start; }
+#wizardBox .s3-grid .s3-span { grid-column: 1 / -1; }
+#wizardBox .form-group { margin-bottom: 9px; }
+#wizardBox .form-group label { display: block; font-weight: 600; color: #1e293b; margin-bottom: 4px; font-size: 12px; text-transform: none; letter-spacing: 0; }
+#wizardBox .s3-field { width: 100%; box-sizing: border-box; padding: 7px 10px; border: 1px solid var(--grid-border); border-radius: 0; font-size: 13px; font-weight: 600; color: #1e293b; background: var(--surface-soft); min-height: 34px; line-height: 1.35; overflow-wrap: anywhere; }
+#wizardBox .s3-field.s3-total { color: var(--grid-green); background: var(--grid-green-bg); }
+#wizardBox .s3-field.s3-total span { font-size: 14px; }
+#wizardBox .help-text { font-size: 10.5px; color: var(--grid-muted); margin-top: 3px; line-height: 1.35; }
+#wizardBox .s3-notify-field { display: flex; align-items: center; gap: 8px; }
+#wizardBox .s3-notify-field i { color: var(--grid-navy); font-size: 12px; }
+#wizardBox .s3-footer { margin-top: 4px; padding: 10px 24px 12px; border-top: 1px solid var(--grid-border); justify-content: flex-end; }
+#wizardBox .s3-footer .wiz-dots { display: none; }
+#wizardBox .s3-footer .wiz-btn { padding: 10px 24px; font-weight: 600; letter-spacing: .3px; }
+#wizardBox .s3-footer .wiz-btn-save { background: var(--grid-navy); }
+#wizardBox .s3-footer .wiz-btn-save:hover { background: #24375E; }
+#wizardBox { width: 860px; max-width: 94%; }
 @media (max-width: 760px) {
-    #wizStep3 .s3-grid { grid-template-columns: 1fr 1fr; }
+    #wizardBox .s3-grid { grid-template-columns: 1fr 1fr; }
 }
 @media (max-width: 480px) {
-    #wizStep3 .s3-grid { grid-template-columns: 1fr; }
-    #wizStep3 .s3-header, #wizStep3 .s3-body, #wizStep3 .s3-footer { padding-left: 14px; padding-right: 14px; }
-}</style>
+    #wizardBox .s3-grid { grid-template-columns: 1fr; }
+    #wizardBox .s3-header, #wizardBox .s3-body, #wizardBox .s3-footer { padding-left: 14px; padding-right: 14px; }
+}
+
+/* Steps 1 & 2: the four time fields sit in one grid row (the existing .field-row pairs are flattened into it) */
+#wizardBox #amFieldsContainer, #wizardBox #pmFieldsContainer { display: grid; grid-template-columns: repeat(4, 1fr); column-gap: 14px; row-gap: 0; align-items: start; }
+#wizardBox #amFieldsContainer .field-row, #wizardBox #pmFieldsContainer .field-row { display: contents; }
+#wizardBox .field-group { margin-bottom: 9px; min-width: 0; }
+#wizardBox .field-group label { font-size: 12px; font-weight: 600; color: #1e293b; text-transform: none; letter-spacing: 0; margin-bottom: 4px; }
+#wizardBox .field-group input[type="time"] { padding: 7px 10px; font-size: 13px; min-height: 34px; }
+#wizardBox .field-group input:focus { box-shadow: 0 0 0 3px rgba(27,42,74,.08); }
+#wizardBox .field-hint { font-size: 10.5px; color: var(--grid-muted) !important; margin-top: 3px; line-height: 1.35; }
+#wizardBox .skip-row { margin: 0 0 12px; padding: 6px 12px; }
+#wizardBox #amErrorMsg, #wizardBox #pmErrorMsg { font-size: 11.5px !important; padding: 8px 12px !important; margin: 0 0 8px !important; }
+@media (max-width: 760px) {
+    #wizardBox #amFieldsContainer, #wizardBox #pmFieldsContainer { grid-template-columns: 1fr 1fr; }
+}
+@media (max-width: 480px) {
+    #wizardBox #amFieldsContainer, #wizardBox #pmFieldsContainer { grid-template-columns: 1fr; }
+}
+</style>
 </head>
 <body>
 <style id="cvCompanyShellCss">
@@ -4947,12 +4965,17 @@ function doAttExport(link) {
 
     <!-- STEP 1: AM Times -->
     <div class="wiz-step" id="wizStep1">
-      <div class="wiz-header">
-        <div class="wiz-step-label">Step 1 of 3</div>
-        <h2>AM Duty Times</h2>
-        <p>Set the morning shift sign-in and sign-out windows. Sign-In Opens/Closes must be <strong>before noon (12:00 PM)</strong>. Sign-Out can be set to any time (AM or PM pick-up).</p>
+      <div class="wiz-header s3-header">
+        <div class="s3-title-row">
+          <div>
+            <div class="wiz-step-label">Step 1 of 3</div>
+            <h2><i class="fas fa-sun"></i> AM Duty Times</h2>
+          </div>
+          <button type="button" class="s3-close" onclick="closeWizard()" aria-label="Close" title="Close">&times;</button>
+        </div>
       </div>
-      <div class="wiz-body">
+      <div class="wiz-body s3-body">
+        <p class="s3-intro">Set the morning shift sign-in and sign-out windows. Sign-In Opens/Closes must be <strong>before noon (12:00 PM)</strong>. Sign-Out can be set to any time (AM or PM pick-up).</p>
         <div class="skip-row">
           <label class="skip-checkbox">
             <input type="checkbox" id="skipAmCheckbox" onchange="guardSkipDuty('am')">
@@ -4964,30 +4987,30 @@ function doAttExport(link) {
             <div class="field-group">
               <label>Sign-In Opens</label>
               <input type="time" id="w_am_ti_s" onchange="validateAmInField(this); checkAmDutyLimit()">
-              <div class="field-hint am-hint">Must be before 12:00 PM</div>
+              <div class="field-hint am-hint"><i class="fas fa-info-circle"></i> Must be before 12:00 PM</div>
             </div>
             <div class="field-group">
               <label>Sign-In Closes</label>
               <input type="time" id="w_am_ti_e" onchange="validateAmInField(this)">
-              <div class="field-hint am-hint">Must be before 12:00 PM</div>
+              <div class="field-hint am-hint"><i class="fas fa-info-circle"></i> Must be before 12:00 PM</div>
             </div>
           </div>
           <div class="field-row">
             <div class="field-group">
               <label>Sign-Out Opens</label>
               <input type="time" id="w_am_to_s" onchange="clearAmError(); checkAmDutyLimit()">
-              <div class="field-hint" style="color:#888;">Any time (AM or PM)</div>
+              <div class="field-hint" style="color:#888;"><i class="fas fa-info-circle"></i> Any time (AM or PM)</div>
             </div>
             <div class="field-group">
               <label>Sign-Out Closes <small style="font-weight:400;color:#aaa;">(grace only)</small></label>
               <input type="time" id="w_am_to_e" onchange="clearAmError()">
-              <div class="field-hint" style="color:#888;">Any time — grace period end</div>
+              <div class="field-hint" style="color:#888;"><i class="fas fa-info-circle"></i> Any time — grace period end</div>
             </div>
           </div>
         </div>
         <div id="amErrorMsg" style="display:none;background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:8px 12px;font-size:12px;color:#c62828;margin-top:4px;"></div>
       </div>
-      <div class="wiz-footer">
+      <div class="wiz-footer s3-footer">
         <div class="wiz-dots"><div class="wiz-dot active"></div><div class="wiz-dot"></div><div class="wiz-dot"></div></div>
         <div style="display:flex;gap:8px">
           <button class="wiz-btn wiz-btn-back" onclick="closeWizard()"><i class="fas fa-times"></i> Cancel</button>
@@ -4998,12 +5021,17 @@ function doAttExport(link) {
 
     <!-- STEP 2: PM Times -->
     <div class="wiz-step" id="wizStep2" style="display:none">
-      <div class="wiz-header">
-        <div class="wiz-step-label">Step 2 of 3</div>
-        <h2>PM Duty Times</h2>
-        <p>Set the afternoon shift windows. All PM fields must be <strong>12:00 PM or later</strong>.</p>
+      <div class="wiz-header s3-header">
+        <div class="s3-title-row">
+          <div>
+            <div class="wiz-step-label">Step 2 of 3</div>
+            <h2><i class="fas fa-moon"></i> PM Duty Times</h2>
+          </div>
+          <button type="button" class="s3-close" onclick="closeWizard()" aria-label="Close" title="Close">&times;</button>
+        </div>
       </div>
-      <div class="wiz-body">
+      <div class="wiz-body s3-body">
+        <p class="s3-intro">Set the afternoon shift windows. All PM fields must be <strong>12:00 PM or later</strong>.</p>
         <div class="skip-row">
           <label class="skip-checkbox">
             <input type="checkbox" id="skipPmCheckbox" onchange="guardSkipDuty('pm')">
@@ -5012,17 +5040,17 @@ function doAttExport(link) {
         </div>
         <div id="pmFieldsContainer">
           <div class="field-row">
-            <div class="field-group"><label>Sign-In Opens</label><input type="time" id="w_pm_ti_s" min="12:00" max="23:59" onchange="validatePmField(this)"><div class="field-hint pm-hint">Must be 12:00 PM or later</div></div>
-            <div class="field-group"><label>Sign-In Closes</label><input type="time" id="w_pm_ti_e" min="12:00" max="23:59" onchange="validatePmField(this)"><div class="field-hint pm-hint">Must be 12:00 PM or later</div></div>
+            <div class="field-group"><label>Sign-In Opens</label><input type="time" id="w_pm_ti_s" min="12:00" max="23:59" onchange="validatePmField(this)"><div class="field-hint pm-hint"><i class="fas fa-info-circle"></i> Must be 12:00 PM or later</div></div>
+            <div class="field-group"><label>Sign-In Closes</label><input type="time" id="w_pm_ti_e" min="12:00" max="23:59" onchange="validatePmField(this)"><div class="field-hint pm-hint"><i class="fas fa-info-circle"></i> Must be 12:00 PM or later</div></div>
           </div>
           <div class="field-row">
-            <div class="field-group"><label>Sign-Out Opens</label><input type="time" id="w_pm_to_s" min="12:00" max="23:59" onchange="validatePmField(this)"><div class="field-hint pm-hint">Must be 12:00 PM or later</div></div>
-            <div class="field-group"><label>Sign-Out Closes <small style="font-weight:400;color:#aaa;">(grace only)</small></label><input type="time" id="w_pm_to_e" min="12:00" max="23:59" onchange="validatePmField(this)"><div class="field-hint pm-hint">Must be 12:00 PM or later — grace period</div></div>
+            <div class="field-group"><label>Sign-Out Opens</label><input type="time" id="w_pm_to_s" min="12:00" max="23:59" onchange="validatePmField(this)"><div class="field-hint pm-hint"><i class="fas fa-info-circle"></i> Must be 12:00 PM or later</div></div>
+            <div class="field-group"><label>Sign-Out Closes <small style="font-weight:400;color:#aaa;">(grace only)</small></label><input type="time" id="w_pm_to_e" min="12:00" max="23:59" onchange="validatePmField(this)"><div class="field-hint pm-hint"><i class="fas fa-info-circle"></i> Must be 12:00 PM or later — grace period</div></div>
           </div>
         </div>
         <div id="pmErrorMsg" style="display:none;background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:8px 12px;font-size:12px;color:#c62828;margin-top:4px;"></div>
       </div>
-      <div class="wiz-footer">
+      <div class="wiz-footer s3-footer">
         <div class="wiz-dots"><div class="wiz-dot"></div><div class="wiz-dot active"></div><div class="wiz-dot"></div></div>
         <div style="display:flex;gap:8px">
           <button class="wiz-btn wiz-btn-back" onclick="wizBack(2)"><i class="fas fa-arrow-left"></i> Back</button>
@@ -5846,12 +5874,11 @@ function openWizard() {
     showWizStep(1);
     document.getElementById('wizardOverlay').classList.add('open');
 }
-function closeWizard(){document.getElementById('wizardOverlay').classList.remove('open'); const wb=document.getElementById('wizardBox'); if(wb) wb.classList.remove('s3-wide');}
+function closeWizard(){document.getElementById('wizardOverlay').classList.remove('open');}
 function showWizStep(n){
     document.querySelectorAll('.wiz-step').forEach(s=>s.style.display='none');
     document.getElementById('wizStep'+n).style.display='block';
     document.getElementById('wizardProgressBar').style.width=(n*33.33)+'%';
-    const wb=document.getElementById('wizardBox'); if(wb) wb.classList.toggle('s3-wide', n===3); // Step 3 uses the wide Add-Student-style form
 }
 function fmt12js(val){
     if(!val) return '—';
