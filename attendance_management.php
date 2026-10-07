@@ -3964,17 +3964,17 @@ td.incomplete, td.missed { color: var(--grid-amber); }
 }
 /* ── Step 3 (Confirm & Save): same look as the manual Add New Student form in admin_student_list.php — compact uppercase title with
       an icon, labelled fields in a grid, small hints under each field and a bordered action bar. Scoped to #wizStep3 only. ── */
-#wizStep3 .s3-header { padding: 16px 28px 8px; border-bottom: 1px solid var(--grid-border); margin: 0 0 0; }
+#wizStep3 .s3-header { padding: 16px 24px 10px; border-bottom: 1px solid var(--grid-border); margin: 0 0 0; }
 #wizStep3 .s3-title-row { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
 #wizStep3 .s3-header h2 { font-size: 15px; text-transform: uppercase; letter-spacing: .4px; display: flex; align-items: center; gap: 8px; }
 #wizStep3 .s3-header h2 i { font-size: 14px; }
 #wizStep3 .s3-close { background: none; border: none; font-size: 24px; line-height: 1; cursor: pointer; color: var(--grid-muted); transition: color .2s; padding: 0 2px; }
 #wizStep3 .s3-close:hover { color: var(--grid-navy); }
 #wizStep3 .s3-intro { margin: 0 0 10px; font-size: 11.5px; line-height: 1.45; color: var(--grid-muted); }
-#wizStep3 .s3-body { padding: 14px 28px 4px; max-height: calc(100vh - 230px); max-height: calc(100dvh - 230px); min-height: 120px; overflow-y: auto; }
+#wizStep3 .s3-body { padding: 12px 24px 4px; max-height: calc(100vh - 230px); max-height: calc(100dvh - 230px); min-height: 120px; overflow-y: auto; }
 #wizStep3 .sg-scope { align-items: flex-start; font-size: 11.5px; line-height: 1.45; padding: 8px 12px; margin-bottom: 12px; }
 #wizStep3 .sg-scope i { margin-top: 2px; }
-#wizStep3 .s3-grid { display: grid; grid-template-columns: 1fr 1fr; column-gap: 14px; row-gap: 0; align-items: start; }
+#wizStep3 .s3-grid { display: grid; grid-template-columns: repeat(3, 1fr); column-gap: 14px; row-gap: 0; align-items: start; }
 #wizStep3 .s3-grid .s3-span { grid-column: 1 / -1; }
 #wizStep3 .form-group { margin-bottom: 9px; }
 #wizStep3 .form-group label { display: block; font-weight: 600; color: #1e293b; margin-bottom: 4px; font-size: 12px; text-transform: none; letter-spacing: 0; }
@@ -3984,10 +3984,18 @@ td.incomplete, td.missed { color: var(--grid-amber); }
 #wizStep3 .help-text { font-size: 10.5px; color: var(--grid-muted); margin-top: 3px; line-height: 1.35; }
 #wizStep3 .s3-notify-field { display: flex; align-items: center; gap: 8px; }
 #wizStep3 .s3-notify-field i { color: var(--grid-navy); font-size: 12px; }
-#wizStep3 .s3-footer { margin-top: 4px; padding: 10px 28px 14px; border-top: 1px solid var(--grid-border); }
+#wizStep3 .s3-footer { margin-top: 4px; padding: 10px 24px 12px; border-top: 1px solid var(--grid-border); justify-content: flex-end; }
+#wizStep3 .s3-footer .wiz-dots { display: none; }
+#wizStep3 .s3-footer .wiz-btn { padding: 10px 24px; font-weight: 600; letter-spacing: .3px; }
+#wizStep3 .s3-footer .wiz-btn-save { background: var(--grid-navy); }
+#wizStep3 .s3-footer .wiz-btn-save:hover { background: #24375E; }
+#wizardBox.s3-wide { width: 860px; max-width: 94%; }
+@media (max-width: 760px) {
+    #wizStep3 .s3-grid { grid-template-columns: 1fr 1fr; }
+}
 @media (max-width: 480px) {
     #wizStep3 .s3-grid { grid-template-columns: 1fr; }
-    #wizStep3 .s3-header, #wizStep3 .s3-body, #wizStep3 .s3-footer { padding-left: 16px; padding-right: 16px; }
+    #wizStep3 .s3-header, #wizStep3 .s3-body, #wizStep3 .s3-footer { padding-left: 14px; padding-right: 14px; }
 }</style>
 </head>
 <body>
@@ -5062,6 +5070,11 @@ function doAttExport(link) {
             <div class="help-text"><i class="fas fa-info-circle"></i> Sign-Out opens &ndash; closes (grace)</div>
           </div>
           <div class="form-group">
+            <label>Total Duty Hours</label>
+            <div class="s3-field s3-total"><i class="fas fa-clock"></i> <span id="sum_total_hrs">—</span></div>
+            <div class="help-text"><i class="fas fa-info-circle"></i> Duty time is measured from <strong>Sign-In Opens &rarr; Sign-Out Opens</strong>. Sign-Out Closes is a grace window and is not counted.</div>
+          </div>
+          <div class="form-group">
             <label>PM Sign-In</label>
             <div class="s3-field" id="sum_pm_in">—</div>
             <div class="help-text"><i class="fas fa-info-circle"></i> Sign-In opens &ndash; closes</div>
@@ -5071,12 +5084,7 @@ function doAttExport(link) {
             <div class="s3-field" id="sum_pm_out">—</div>
             <div class="help-text"><i class="fas fa-info-circle"></i> Sign-Out opens &ndash; closes (grace)</div>
           </div>
-          <div class="form-group s3-span">
-            <label>Total Duty Hours</label>
-            <div class="s3-field s3-total"><i class="fas fa-clock"></i> <span id="sum_total_hrs">—</span></div>
-            <div class="help-text"><i class="fas fa-info-circle"></i> Duty time is measured from <strong>Sign-In Opens &rarr; Sign-Out Opens</strong>. Sign-Out Closes is a grace window and is not counted.</div>
-          </div>
-          <div class="form-group s3-span">
+          <div class="form-group">
             <label>Notification</label>
             <div class="s3-field s3-notify-field"><i class="fas fa-envelope"></i> Email notification</div>
             <div class="help-text"><i class="fas fa-info-circle"></i> All registered students <strong>and system admins</strong> will be notified by email.</div>
@@ -5838,11 +5846,12 @@ function openWizard() {
     showWizStep(1);
     document.getElementById('wizardOverlay').classList.add('open');
 }
-function closeWizard(){document.getElementById('wizardOverlay').classList.remove('open');}
+function closeWizard(){document.getElementById('wizardOverlay').classList.remove('open'); const wb=document.getElementById('wizardBox'); if(wb) wb.classList.remove('s3-wide');}
 function showWizStep(n){
     document.querySelectorAll('.wiz-step').forEach(s=>s.style.display='none');
     document.getElementById('wizStep'+n).style.display='block';
     document.getElementById('wizardProgressBar').style.width=(n*33.33)+'%';
+    const wb=document.getElementById('wizardBox'); if(wb) wb.classList.toggle('s3-wide', n===3); // Step 3 uses the wide Add-Student-style form
 }
 function fmt12js(val){
     if(!val) return '—';
