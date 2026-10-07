@@ -3964,11 +3964,14 @@ td.incomplete, td.missed { color: var(--grid-amber); }
 }
 /* ── Step 3 (Confirm & Save): same look as the manual Add New Student form in admin_student_list.php — compact uppercase title with
       an icon, labelled fields in a grid, small hints under each field and a bordered action bar. Scoped to #wizStep3 only. ── */
-#wizStep3 .s3-header { padding: 16px 28px 10px; }
+#wizStep3 .s3-header { padding: 16px 28px 8px; border-bottom: 1px solid var(--grid-border); margin: 0 0 0; }
+#wizStep3 .s3-title-row { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
 #wizStep3 .s3-header h2 { font-size: 15px; text-transform: uppercase; letter-spacing: .4px; display: flex; align-items: center; gap: 8px; }
 #wizStep3 .s3-header h2 i { font-size: 14px; }
-#wizStep3 .s3-header p { font-size: 12px; margin-top: 6px; }
-#wizStep3 .s3-body { padding: 14px 28px 4px; }
+#wizStep3 .s3-close { background: none; border: none; font-size: 24px; line-height: 1; cursor: pointer; color: var(--grid-muted); transition: color .2s; padding: 0 2px; }
+#wizStep3 .s3-close:hover { color: var(--grid-navy); }
+#wizStep3 .s3-intro { margin: 0 0 10px; font-size: 11.5px; line-height: 1.45; color: var(--grid-muted); }
+#wizStep3 .s3-body { padding: 14px 28px 4px; max-height: calc(100vh - 230px); max-height: calc(100dvh - 230px); min-height: 120px; overflow-y: auto; }
 #wizStep3 .sg-scope { align-items: flex-start; font-size: 11.5px; line-height: 1.45; padding: 8px 12px; margin-bottom: 12px; }
 #wizStep3 .sg-scope i { margin-top: 2px; }
 #wizStep3 .s3-grid { display: grid; grid-template-columns: 1fr 1fr; column-gap: 14px; row-gap: 0; align-items: start; }
@@ -3979,8 +3982,9 @@ td.incomplete, td.missed { color: var(--grid-amber); }
 #wizStep3 .s3-field.s3-total { color: var(--grid-green); background: var(--grid-green-bg); }
 #wizStep3 .s3-field.s3-total span { font-size: 14px; }
 #wizStep3 .help-text { font-size: 10.5px; color: var(--grid-muted); margin-top: 3px; line-height: 1.35; }
-#wizStep3 .help-text.s3-notify { font-size: 12px; margin-top: 0; }
-#wizStep3 .s3-footer { margin-top: 4px; padding: 10px 28px 14px; }
+#wizStep3 .s3-notify-field { display: flex; align-items: center; gap: 8px; }
+#wizStep3 .s3-notify-field i { color: var(--grid-navy); font-size: 12px; }
+#wizStep3 .s3-footer { margin-top: 4px; padding: 10px 28px 14px; border-top: 1px solid var(--grid-border); }
 @media (max-width: 480px) {
     #wizStep3 .s3-grid { grid-template-columns: 1fr; }
     #wizStep3 .s3-header, #wizStep3 .s3-body, #wizStep3 .s3-footer { padding-left: 16px; padding-right: 16px; }
@@ -5025,11 +5029,16 @@ function doAttExport(link) {
          The same element ids are kept, so the wizard script (sum_* values, sumScope, bothSkippedWarning, wizSaveBtn) is untouched. -->
     <div class="wiz-step" id="wizStep3" style="display:none">
       <div class="wiz-header s3-header">
-        <div class="wiz-step-label">Step 3 of 3</div>
-        <h2><i class="fas fa-clipboard-check"></i> Confirm &amp; Save</h2>
-        <p>Review the schedule below. It will be applied to <strong>today and all future OJT weekdays</strong>. Past days will <strong>not</strong> be affected. Students &amp; admins will be notified by email.</p>
+        <div class="s3-title-row">
+          <div>
+            <div class="wiz-step-label">Step 3 of 3</div>
+            <h2><i class="fas fa-clipboard-check"></i> Confirm &amp; Save</h2>
+          </div>
+          <button type="button" class="s3-close" onclick="closeWizard()" aria-label="Close" title="Close">&times;</button>
+        </div>
       </div>
       <div class="wiz-body s3-body">
+        <p class="s3-intro">Review the schedule below. It will be applied to <strong>today and all future OJT weekdays</strong>. Past days will <strong>not</strong> be affected. Students &amp; admins will be notified by email.</p>
         <div id="bothSkippedWarning" style="display:none;" class="skip-warning">
           <i class="fas fa-exclamation-triangle"></i> You are trying to skip both AM and PM duty times. At least one duty period must be configured.
         </div>
@@ -5069,7 +5078,8 @@ function doAttExport(link) {
           </div>
           <div class="form-group s3-span">
             <label>Notification</label>
-            <div class="help-text s3-notify"><i class="fas fa-envelope"></i> All registered students <strong>and system admins</strong> will be notified by email.</div>
+            <div class="s3-field s3-notify-field"><i class="fas fa-envelope"></i> Email notification</div>
+            <div class="help-text"><i class="fas fa-info-circle"></i> All registered students <strong>and system admins</strong> will be notified by email.</div>
           </div>
         </div>
       </div>
