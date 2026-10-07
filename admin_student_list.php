@@ -47,6 +47,48 @@ if (
     exit;
 }
 
+// ============================================================================
+// NEW (this adjustment): NO NOTIFICATIONS LEFT BEHIND BY DELETED ACCOUNTS
+// ----------------------------------------------------------------------------
+// When a student or company account is deleted (Student List, Company List or
+// Manage Accounts), its notifications must disappear from the inboxes of
+// administrator.php / company_validation.php and from every side-menu
+// indicator. The company delete paths now remove them directly; this sweep also
+// clears any that were already left behind (or come from any other path). It
+// removes ONLY notification rows whose account no longer exists in `users`:
+//   • company_requirement_upload_notifications  (Company Requirements inbox + badge)
+//   • admin_application_approvals              (Application Requests inbox + badge)
+//   • moa_requests                             (MOA notifications — rows tied to an account)
+//   • email_recovery_requests, Pending only    (Manage Accounts indicator)
+// Archiving never deletes an account, so archived students / companies are never
+// touched. Runs at most once every 15 seconds per admin; fully guarded.
+// ============================================================================
+if (!function_exists('cv_sweep_orphan_notifications')) {
+    function cv_sweep_orphan_notifications($conn) {
+        $has = function ($t) use ($conn) {
+            try { $r = $conn->query("SHOW TABLES LIKE '" . $conn->real_escape_string($t) . "'"); return $r && $r->num_rows > 0; }
+            catch (\Throwable $e) { return false; }
+        };
+        $run = function ($sql) use ($conn) { try { $conn->query($sql); } catch (\Throwable $e) { /* never affects the page */ } };
+        if (!$has('users')) return;
+        if ($has('company_requirement_upload_notifications'))
+            $run("DELETE n FROM company_requirement_upload_notifications n LEFT JOIN users u ON u.id = n.user_id WHERE u.id IS NULL");
+        if ($has('admin_application_approvals'))
+            $run("DELETE a FROM admin_application_approvals a LEFT JOIN users s ON s.id = a.student_id LEFT JOIN users c ON c.id = a.company_id WHERE s.id IS NULL OR c.id IS NULL");
+        if ($has('moa_requests'))
+            $run("DELETE m FROM moa_requests m LEFT JOIN users u ON u.id = m.user_id WHERE m.user_id > 0 AND u.id IS NULL");
+        if ($has('email_recovery_requests'))
+            $run("DELETE r FROM email_recovery_requests r WHERE r.status = 'Pending' AND NOT EXISTS (SELECT 1 FROM users u WHERE u.email = r.old_email OR u.email = r.new_email)");
+    }
+}
+try {
+    $cvSweepNow = time();
+    if (!isset($_SESSION['cv_orphan_sweep_at']) || $cvSweepNow - (int)$_SESSION['cv_orphan_sweep_at'] >= 15) {
+        $_SESSION['cv_orphan_sweep_at'] = $cvSweepNow;
+        cv_sweep_orphan_notifications($conn);
+    }
+} catch (\Throwable $e) { /* never affects the page */ }
+
 // ── NEW (this adjustment): EMAIL RECOVERY REQUESTS side-menu indicator ─────────
 // Number of Pending rows in email_recovery_requests (the requests handled in
 // Manage Accounts > Email Recovery Requests on monitoring.php). Shown as a badge
@@ -121,7 +163,7 @@ if (!function_exists('cv_alog_capture')) {
     function cv_alog_status_word($status) {
         $s = strtolower(trim((string)$status));
         $map = ['verified' => 'Verified', 'approved' => 'Approved', 'rejected' => 'Rejected', 'pending' => 'Set to Pending', 'complied' => 'Complied'];
-        return $map[$s] ?? ($s !== '' ? ucwords($s) : 'Updated');
+        return $map[$s] ?? ($s !== '' ? ucwords($s ?? '') : 'Updated');
     }
     function cv_alog_performer($conn) {
         $n = trim((string)($GLOBALS['adminFullName'] ?? ''));
@@ -368,6 +410,45 @@ if (!function_exists('student_list_completion_date')) {
         return null;
     }
 }
+/* NEW (Status column): the account's onboarding status, derived from the `requirements`
+   table that submit_requirements.php / AccomForm.php write to and that the administrator's
+   Student Validation (administrator.php) reviews:
+     inactive   - no requirement file submitted yet (no activity since the account was created,
+                  and every imported / not-yet-registered row)
+     validating - at least one requirement file submitted, but not every required one Verified yet
+     active     - every required requirement has a file and all submitted files are Verified
+   Read-only and fully guarded: any lookup failure falls back to 'inactive'. */
+if (!function_exists('student_list_account_status')) {
+    function student_list_account_status($conn, $userId): string
+    {
+        $userId = (int)$userId;
+        if ($userId <= 0) return 'inactive';
+        static $required = ['cert_registration', 'certificate_pdos', 'ojt_sheet', 'application_sit',
+                            'waiver_form', 'student_contract', 'psych_result', 'medical_result'];
+        try {
+            $st = $conn->prepare("SELECT requirement_type, status FROM requirements
+                                  WHERE user_id = ? AND file_name IS NOT NULL AND LENGTH(file_name) > 0");
+            if (!$st) return 'inactive';
+            $st->bind_param('i', $userId);
+            $st->execute();
+            $res = $st->get_result();
+            $files = 0; $unverified = 0; $types = [];
+            while ($r = $res->fetch_assoc()) {
+                $files++;
+                if (($r['status'] ?? '') !== 'Verified') $unverified++;
+                $types[(string)$r['requirement_type']] = true;
+            }
+            $st->close();
+            if ($files === 0) return 'inactive';
+            if ($unverified === 0 && !array_diff($required, array_keys($types))) return 'active';
+            return 'validating';
+        } catch (\Throwable $e) {
+            error_log('[student list] account status lookup failed: ' . $e->getMessage());
+            return 'inactive';
+        }
+    }
+}
+
 if (!function_exists('student_list_ojt_end_info')) {
     /* Returns ['date' => Y-m-d|null, 'type' => 'completed'|'estimated'|'last_log',
                 'est_days' => int, 'rule' => array|null] */
@@ -619,11 +700,11 @@ if ((isset($_GET['export']) && $_GET['export'] === 'xlsx') || ($_SERVER['REQUEST
         $ws->setCellValue('I' . $row, $r['ojt_company'] ?? 'Unassigned');
 
         $ws->setCellValue('J' . $row, $r['ojt_date_start']
-            ? date('M d, Y', strtotime($r['ojt_date_start'])) : '—');
+            ? date('M d, Y', strtotime($r['ojt_date_start'] ?? '')) : '—');
         // UPDATED (OJT Date End <-> Est. Duty Days)
         $endInfo = student_list_ojt_end_info($conn, $export_course_rules, $r);
         $ws->setCellValue('K' . $row, $endInfo['date']
-            ? date('M d, Y', strtotime($endInfo['date'])) . ($endInfo['type'] === 'estimated' ? ' (est.)' : '') : '—');
+            ? date('M d, Y', strtotime($endInfo['date'] ?? '')) . ($endInfo['type'] === 'estimated' ? ' (est.)' : '') : '—');
 
         $hrs = floatval($r['ojt_total_hours'] ?? 0);
         // UPDATED (accurate hours): exact hours + minutes instead of a rounded decimal
@@ -705,8 +786,46 @@ $conn->query("CREATE TABLE IF NOT EXISTS admin_application_approvals (
     submitted_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     UNIQUE KEY unique_application (student_id, company_id)
 )");
-$app_request_count_res = $conn->query("SELECT COUNT(*) as total FROM admin_application_approvals");
+$app_request_count_res = $conn->query("SELECT COUNT(*) as total FROM admin_application_approvals aaa_c INNER JOIN users aaa_u ON aaa_u.id = aaa_c.student_id");
 $app_request_count = (int)(($app_request_count_res ? $app_request_count_res->fetch_assoc()['total'] : 0));
+
+// ============================================================================
+// NEW (this adjustment): STUDENT REQUIREMENT SUBMISSIONS — side-menu indicator.
+// A student's new / re-uploaded requirement is recorded as a notification by
+// administrator.php (cv_sru_detect()) and counts toward the Student Validation
+// indicator next to the application requests — the same count administrator.php
+// shows. Same helpers as administrator.php (created once per session, so every
+// admin page can count them). Fully guarded: if anything fails the count simply
+// stays the application requests only.
+// ============================================================================
+if (!function_exists('cv_sru_ensure')) {
+    function cv_sru_ensure($conn) {
+        if (!empty($_SESSION['cv_sru_ready'])) return true;
+        try {
+            $conn->query("CREATE TABLE IF NOT EXISTS student_requirement_upload_notifications (
+                id INT AUTO_INCREMENT PRIMARY KEY, user_id INT NOT NULL, detail TEXT NULL,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                admin_viewed TINYINT(1) NOT NULL DEFAULT 0, KEY idx_sru_viewed (admin_viewed), KEY idx_sru_user (user_id))");
+            $conn->query("CREATE TABLE IF NOT EXISTS student_requirement_upload_watch (
+                user_id INT NOT NULL, requirement_type VARCHAR(100) NOT NULL, file_len BIGINT NOT NULL DEFAULT 0,
+                PRIMARY KEY (user_id, requirement_type))");
+            $conn->query("CREATE TABLE IF NOT EXISTS student_requirement_upload_meta (id TINYINT NOT NULL PRIMARY KEY, initialized TINYINT(1) NOT NULL DEFAULT 0)");
+            $_SESSION['cv_sru_ready'] = 1;
+            return true;
+        } catch (\Throwable $e) { return false; }
+    }
+    // unviewed submissions of active (not archived) students
+    function cv_sru_count($conn) {
+        try {
+            if (!cv_sru_ensure($conn)) return 0;
+            $r = $conn->query("SELECT COUNT(*) AS total FROM student_requirement_upload_notifications n
+                               INNER JOIN users u ON u.id = n.user_id WHERE n.admin_viewed = 0 AND COALESCE(u.is_archived, 0) = 0");
+            $row = $r ? $r->fetch_assoc() : null;
+            return (int)($row['total'] ?? 0);
+        } catch (\Throwable $e) { return 0; }
+    }
+}
+try { $app_request_count += cv_sru_count($conn); } catch (\Throwable $e) { /* indicator keeps the application-request count */ }
 
 /* ── FIX (sidebar notification indicator — adopted from
    admin_company_list.php's aclCompanyValidationNotifCount()): the
@@ -1251,7 +1370,7 @@ function student_list_delete_student_account($conn, $userId, $performerName) {
     } catch (\Throwable $e) {
         try { $conn->rollback(); } catch (\Throwable $ignored) {}
         error_log('[admin_student_list.php] delete student account failed: ' . $e->getMessage());
-        $result['message'] = htmlspecialchars($accName) . ': could not fully delete this account and its records, so nothing was deleted for it. Please try again.';
+        $result['message'] = htmlspecialchars($accName ?? '') . ': could not fully delete this account and its records, so nothing was deleted for it. Please try again.';
         return $result;
     }
 
@@ -1355,7 +1474,7 @@ function attempt_create_student_account_from_data($conn, array $impRow) {
     $dupCheck->close();
 
     if ($alreadyRegistered) {
-        $result['detail'] = $studentLabel . ": this email (" . htmlspecialchars($emailVal) . ") is already associated with an existing account, so a new one was not created.";
+        $result['detail'] = $studentLabel . ": this email (" . htmlspecialchars($emailVal ?? '') . ") is already associated with an existing account, so a new one was not created.";
         return $result;
     }
 
@@ -1438,20 +1557,20 @@ function attempt_create_student_account_from_data($conn, array $impRow) {
         $mail->Subject = 'Your Student Account Login Password - NEUST OJT Portal';
         $firstForEmail = trim((string)($impRow['first_name'] ?? ''));
         $greetingForEmail = $firstForEmail !== ''
-            ? "Hello, <strong>" . htmlspecialchars($firstForEmail) . "</strong>!"
+            ? "Hello, <strong>" . htmlspecialchars($firstForEmail ?? '') . "</strong>!"
             : "Hello,";
         $accountBody = "
             <p style='margin:0 0 14px;color:#1e293b;font-size:15px;'>" . $greetingForEmail . "</p>
             <p style='margin:0 0 22px;color:#334155;font-size:14px;line-height:1.7;'>
                 A student account has been created for you on the NEUST OJT Portal by the administrator.
                 Use the password below together with your registered email
-                (<strong>" . htmlspecialchars($emailVal) . "</strong>) to log in.
+                (<strong>" . htmlspecialchars($emailVal ?? '') . "</strong>) to log in.
                 For your security, please don't share this password with anyone.
             </p>
 
             <div style='background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;padding:22px;text-align:center;margin:0 0 22px;'>
                 <p style='margin:0 0 8px;color:#64748b;font-size:11px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;'>Your Login Password</p>
-                <p style='margin:0;color:#0038a8;font-size:32px;font-weight:800;letter-spacing:6px;'>" . htmlspecialchars($plainPassword) . "</p>
+                <p style='margin:0;color:#0038a8;font-size:32px;font-weight:800;letter-spacing:6px;'>" . htmlspecialchars($plainPassword ?? '') . "</p>
             </div>
 
             <p style='margin:0 0 4px;color:#64748b;font-size:13px;line-height:1.6;font-style:italic;'>
@@ -1562,24 +1681,31 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_student_manual'])
     $email        = trim($_POST['email']        ?? '');
     $campus_branch = trim($_POST['campus_branch'] ?? '');
 
+    // Typed "+ Add New ..." values (course / major / section / campus): only the FIRST letter is capitalised,
+    // the rest is kept as typed — the same rule the form applies while typing, enforced here too.
+    $manual_cap_first = function ($v) {
+        $v = trim(preg_replace('/\s+/', ' ', (string)$v));
+        return $v === '' ? $v : mb_strtoupper(mb_substr($v, 0, 1, 'UTF-8'), 'UTF-8') . mb_substr($v, 1, null, 'UTF-8');
+    };
+
     // If "other" campus selected, use the custom campus text input
     if ($campus_branch === 'other' && isset($_POST['custom_campus']) && !empty(trim($_POST['custom_campus']))) {
-        $campus_branch = trim($_POST['custom_campus']);
+        $campus_branch = $manual_cap_first($_POST['custom_campus']);
     }
 
     // If "other" course selected, use the custom course text input
     if ($course === 'other' && isset($_POST['custom_course']) && !empty(trim($_POST['custom_course']))) {
-        $course = trim($_POST['custom_course']);
+        $course = $manual_cap_first($_POST['custom_course']);
     }
 
     /* NEW (Major/Section dropdown): same "other" → custom text pattern as
        Course/Campus above, now applied to the new Major and Section
        dropdowns. */
     if ($major === 'other' && isset($_POST['custom_major']) && !empty(trim($_POST['custom_major']))) {
-        $major = trim($_POST['custom_major']);
+        $major = $manual_cap_first($_POST['custom_major']);
     }
     if ($section === 'other' && isset($_POST['custom_section']) && !empty(trim($_POST['custom_section']))) {
-        $section = trim($_POST['custom_section']);
+        $section = $manual_cap_first($_POST['custom_section']);
     }
 
     $errors = [];
@@ -1597,7 +1723,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['add_student_manual'])
 
     // NEW (Course Offering): the course must exist in Course Offering.
     if (!empty($course) && !student_list_course_is_offered($course_offering_map, $course)) {
-        $errors[] = "The course \"" . htmlspecialchars($course) . "\" is not in Course Offering, so the student was not added. Add the course on the Course Offering page first.";
+        $errors[] = "The course \"" . htmlspecialchars($course ?? '') . "\" is not in Course Offering, so the student was not added. Add the course on the Course Offering page first.";
     }
 
     if (empty($errors)) {
@@ -1893,7 +2019,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['import_file']) && !i
                        Course Offering checks so a row that was left out can
                        never fail or roll back the import. */
                     if ($importFilterActive && !student_list_import_row_matches_filter($importCampusSet, $importCourseSet, $campus, $course)) {
-                        $skippedImportFilterRows[] = "Row " . $globalRowNumber . ": " . htmlspecialchars($campus) . " / " . htmlspecialchars($course) . " was not selected in the import filter — skipped.";
+                        $skippedImportFilterRows[] = "Row " . $globalRowNumber . ": " . htmlspecialchars($campus ?? '') . " / " . htmlspecialchars($course ?? '') . " was not selected in the import filter — skipped.";
                         continue;
                     }
 
@@ -1906,7 +2032,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['import_file']) && !i
                     if (!student_list_course_is_offered($course_offering_map, $course)) {
                         if ($skipUnknownCourses) {
                             $skippedUnknownCourseDetails[] = htmlspecialchars(preg_replace('/\s+/', ' ', trim($first_name . ' ' . $middle_name . ' ' . $last_name)))
-                                . ": the course \"" . htmlspecialchars($course) . "\" is not in Course Offering, so this student was not imported.";
+                                . ": the course \"" . htmlspecialchars($course ?? '') . "\" is not in Course Offering, so this student was not imported.";
                         } else {
                             $errorRows[] = "Row " . $globalRowNumber . ": Course \"" . $course . "\" is not in Course Offering.";
                         }
@@ -1983,7 +2109,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['import_file']) && !i
                             $skipName = preg_replace('/\s+/', ' ', trim(
                                 ($pendingRow['first_name'] ?? '') . ' ' . ($pendingRow['middle_name'] ?? '') . ' ' . ($pendingRow['last_name'] ?? '')
                             ));
-                            $auto_create_account_pre_skipped_details[] = htmlspecialchars($skipName) . ": this email (" . htmlspecialchars($pendingRow['email']) . ") already has an existing account, so a new one was not created.";
+                            $auto_create_account_pre_skipped_details[] = htmlspecialchars($skipName ?? '') . ": this email (" . htmlspecialchars($pendingRow['email'] ?? '') . ") already has an existing account, so a new one was not created.";
                         } else {
                             $auto_create_account_import_ids[] = student_list_queue_pending_account($pendingRow);
                         }
@@ -2241,6 +2367,154 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['create_student_accoun
         'counts'  => $batch['counts'],
         'details' => $batch['details'],
     ]);
+    exit;
+}
+
+/* ════════════════════════════════════════════════════════════════════
+   NEW (Requirements column): read-only "View Requirements" backend, adopted from
+   admin_company_list.php (ajax_fetch_requirements / view_requirement_file) but reading
+   the STUDENT's `requirements` table - the one submit_requirements.php writes to and
+   administrator.php (Student Validation) reviews. Nothing here ever inserts, updates or
+   deletes a row; verifying / denying stays exclusively on administrator.php.
+     • POST ajax_fetch_student_requirements=1&user_id=N -> JSON list of the 8 required
+       documents (+ any other submitted type), each with an aggregate status
+       (Verified / Pending / Denied / Awaiting) and its files {id, status, mime}.
+     • GET  view_student_req_file=ID&req_user_id=N       -> streams ONE file inline,
+       always cross-checked against the student's user_id; content type is whitelisted.
+   ════════════════════════════════════════════════════════════════════ */
+if (!function_exists('student_list_requirement_labels')) {
+    function student_list_requirement_labels(): array
+    {
+        return [
+            'cert_registration' => 'Certification of Registration',
+            'certificate_pdos'  => 'PDOS Certificate',
+            'ojt_sheet'         => 'OJT Sheet',
+            'application_sit'   => 'Application SIT',
+            'waiver_form'       => 'Waiver Form',
+            'student_contract'  => 'Student Contract',
+            'psych_result'      => 'Psych Result',
+            'medical_result'    => 'Medical Result',
+        ];
+    }
+}
+if (!function_exists('student_list_req_student_ok')) {
+    /* True when $uid is a real student account. */
+    function student_list_req_student_ok($conn, int $uid): bool
+    {
+        if ($uid <= 0) return false;
+        try {
+            $q = $conn->prepare("SELECT id FROM users WHERE id = ? AND role = 'student' LIMIT 1");
+            if (!$q) return false;
+            $q->bind_param('i', $uid);
+            $q->execute();
+            $ok = (bool)$q->get_result()->fetch_assoc();
+            $q->close();
+            return $ok;
+        } catch (\Throwable $e) {
+            error_log('[student list] requirement student check failed: ' . $e->getMessage());
+            return false;
+        }
+    }
+}
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['ajax_fetch_student_requirements'])) {
+    header('Content-Type: application/json');
+    $reqUid = isset($_POST['user_id']) ? (int)$_POST['user_id'] : 0;
+    if ($reqUid <= 0) { echo json_encode(['success' => false, 'message' => 'Invalid student.']); exit; }
+    if (!student_list_req_student_ok($conn, $reqUid)) {
+        echo json_encode(['success' => false, 'message' => 'This student account could not be found.']);
+        exit;
+    }
+    try {
+        $qs = $conn->prepare("SELECT id, requirement_type, status, (file_name IS NOT NULL AND LENGTH(file_name) > 0) AS has_file,
+                                     SUBSTRING(file_name, 1, 8192) AS file_head
+                              FROM requirements WHERE user_id = ? ORDER BY requirement_type ASC, id ASC");
+        if (!$qs) throw new \RuntimeException($conn->error);
+        $qs->bind_param('i', $reqUid);
+        $qs->execute();
+        $rs = $qs->get_result();
+        $byType = [];
+        while ($r = $rs->fetch_assoc()) {
+            $t = (string)$r['requirement_type'];
+            if (!isset($byType[$t])) $byType[$t] = ['files' => [], 'notVerified' => 0, 'denied' => 0];
+            if (empty($r['has_file'])) continue;
+            $mime = 'application/pdf';
+            if (!empty($r['file_head'])) {
+                try {
+                    $det = (new finfo(FILEINFO_MIME_TYPE))->buffer($r['file_head']);
+                    if ($det && $det !== 'application/octet-stream') $mime = $det;
+                } catch (\Throwable $e) { /* keep the PDF default */ }
+            }
+            $st = (string)($r['status'] ?: 'Pending');
+            $byType[$t]['files'][] = ['id' => (int)$r['id'], 'status' => $st, 'mime' => $mime];
+            if ($st !== 'Verified') $byType[$t]['notVerified']++;
+            if ($st === 'Denied' || $st === 'Rejected') $byType[$t]['denied']++;
+        }
+        $qs->close();
+
+        $labels = student_list_requirement_labels();
+        $order  = array_keys($labels);
+        foreach (array_keys($byType) as $t) if (!in_array($t, $order, true)) $order[] = $t;
+
+        $out = [];
+        foreach ($order as $t) {
+            $d = $byType[$t] ?? ['files' => [], 'notVerified' => 0, 'denied' => 0];
+            $n = count($d['files']);
+            if ($n === 0)                    $status = 'Awaiting';
+            elseif ($d['notVerified'] === 0) $status = 'Verified';
+            elseif ($d['denied'] > 0)        $status = 'Denied';
+            else                             $status = 'Pending';
+            $out[] = [
+                'type'   => $t,
+                'label'  => $labels[$t] ?? ucwords(str_replace('_', ' ', $t)),
+                'status' => $status,
+                'files'  => $d['files'],
+            ];
+        }
+        echo json_encode(['success' => true, 'requirements' => $out]);
+    } catch (\Throwable $e) {
+        error_log('[student list] fetch requirements failed: ' . $e->getMessage());
+        echo json_encode(['success' => false, 'message' => 'Could not load this student\'s requirements. Please try again.']);
+    }
+    exit;
+}
+
+if (isset($_GET['view_student_req_file'])) {
+    $vfId  = (int)$_GET['view_student_req_file'];
+    $vfUid = isset($_GET['req_user_id']) ? (int)$_GET['req_user_id'] : 0;
+    if ($vfId <= 0 || $vfUid <= 0) { http_response_code(400); exit('Invalid request.'); }
+    if (!student_list_req_student_ok($conn, $vfUid)) { http_response_code(404); exit('No file found for this requirement.'); }
+
+    $blob = null; $vfType = 'requirement';
+    try {
+        $q = $conn->prepare("SELECT file_name, requirement_type FROM requirements WHERE id = ? AND user_id = ?");
+        if ($q) {
+            $q->bind_param('ii', $vfId, $vfUid);
+            $q->execute();
+            $row = $q->get_result()->fetch_assoc();
+            $q->close();
+            $blob   = $row['file_name'] ?? null;
+            $vfType = (string)($row['requirement_type'] ?? 'requirement');
+        }
+    } catch (\Throwable $e) {
+        error_log('[student list] stream requirement failed: ' . $e->getMessage());
+    }
+    if (!is_string($blob) || $blob === '') { http_response_code(404); exit('No file found for this requirement.'); }
+
+    $mime = '';
+    try { $mime = (string)(new finfo(FILEINFO_MIME_TYPE))->buffer($blob); } catch (\Throwable $e) { $mime = ''; }
+    if ($mime === 'application/pdf' || strpos(substr($blob, 0, 2048), '%PDF-') !== false) $mime = 'application/pdf';
+    elseif (!in_array($mime, ['image/jpeg', 'image/png', 'image/gif', 'image/webp'], true)) { http_response_code(415); exit('Unsupported file type.'); }
+    $ext = ['application/pdf' => 'pdf', 'image/jpeg' => 'jpg', 'image/png' => 'png', 'image/gif' => 'gif', 'image/webp' => 'webp'][$mime];
+
+    session_write_close();   // a large file must not hold the session lock while it streams
+    while (ob_get_level() > 0) { @ob_end_clean(); }
+    header('Content-Type: ' . $mime);
+    header('X-Content-Type-Options: nosniff');
+    header('Content-Disposition: inline; filename="' . preg_replace('/[^a-zA-Z0-9_-]/', '_', $vfType) . '_' . $vfId . '.' . $ext . '"');
+    header('Content-Length: ' . strlen($blob));
+    header('Cache-Control: private, no-cache, must-revalidate');
+    echo $blob;
     exit;
 }
 
@@ -2566,26 +2840,28 @@ if ($total_students == 0) {
                     <thead>
                         <tr>
                             <th class="checkbox-cell"><input type="checkbox" id="selectAllCheckbox" title="Select all entries on this page"></th>
-                            <th><i class="fas fa-user"            style="margin-right:5px;"></i>Full Name</th>
-                            <th><i class="fas fa-graduation-cap"  style="margin-right:5px;"></i>Course</th>
-                            <th><i class="fas fa-book-open"       style="margin-right:5px;"></i>Major</th>
-                            <th><i class="fas fa-layer-group"     style="margin-right:5px;"></i>Section</th>
-                            <th><i class="fas fa-envelope"        style="margin-right:5px;"></i>Email</th>
-                            <th><i class="fas fa-university"      style="margin-right:5px;"></i>Campus Branch</th>
-                            <th><i class="fas fa-building"        style="margin-right:5px;"></i>Company</th>
-                            <th><i class="fas fa-calendar-check"  style="margin-right:5px;"></i>Date of Start</th>
-                            <th><i class="fas fa-calendar-times"  style="margin-right:5px;"></i>Date of End</th>
-                            <th><i class="fas fa-clock"           style="margin-right:5px;"></i>Total Hours</th>
-                            <th><i class="fas fa-hourglass-half"  style="margin-right:5px;"></i>Remaining Hours</th>
+                            <th>Full Name</th>
+                            <th>Course</th>
+                            <th>Major</th>
+                            <th>Section</th>
+                            <th>Email</th>
+                            <th>Campus Branch</th>
+                            <th>Status</th>
+                            <th>Company</th>
+                            <th>Date of Start</th>
+                            <th>Date of End</th>
+                            <th>Total Hours</th>
+                            <th>Remaining Hours</th>
+                            <th>Requirements</th>
                         </tr>
                     </thead>
                     <tbody>
                         <?php while ($row = $students_result->fetch_assoc()): ?>
                         <tr>
                             <td class="checkbox-cell">
-                                <input type="checkbox" class="row-select-checkbox" value="<?= htmlspecialchars($row['row_key'], ENT_QUOTES) ?>"
-                                    data-id="<?= htmlspecialchars($row['row_key'], ENT_QUOTES) ?>"
-                                    data-source="<?= htmlspecialchars($row['source'], ENT_QUOTES) ?>"
+                                <input type="checkbox" class="row-select-checkbox" value="<?= htmlspecialchars($row['row_key'] ?? '', ENT_QUOTES) ?>"
+                                    data-id="<?= htmlspecialchars($row['row_key'] ?? '', ENT_QUOTES) ?>"
+                                    data-source="<?= htmlspecialchars($row['source'] ?? '', ENT_QUOTES) ?>"
                                     data-first="<?= htmlspecialchars($row['first_name'] ?? '', ENT_QUOTES) ?>"
                                     data-middle="<?= htmlspecialchars($row['middle_name'] ?? '', ENT_QUOTES) ?>"
                                     data-last="<?= htmlspecialchars($row['last_name'] ?? '', ENT_QUOTES) ?>"
@@ -2605,16 +2881,18 @@ if ($total_students == 0) {
                                     <div style="font-size:10px; color:var(--grid-muted); text-transform:uppercase; letter-spacing:0.3px; margin-top:2px;">Not Registered</div>
                                 <?php endif; ?>
                             </td>
-                            <td><?= htmlspecialchars($row['course']) ?></td>
-                            <td><?= !empty($row['major']) ? htmlspecialchars($row['major']) : '<span style="color:#9aa2b1; font-style:italic;">—</span>' ?></td>
-                            <td><?= !empty($row['section']) ? htmlspecialchars($row['section']) : '<span style="color:#9aa2b1; font-style:italic;">—</span>' ?></td>
-                            <td style="font-size:12px; color:#475569;"><?= htmlspecialchars($row['email']) ?></td>
-                            <td><?= htmlspecialchars($row['campus_branch']) ?></td>
+                            <td><?= htmlspecialchars($row['course'] ?? '') ?></td>
+                            <td><?= !empty($row['major']) ? htmlspecialchars($row['major'] ?? '') : '<span style="color:#9aa2b1; font-style:italic;">—</span>' ?></td>
+                            <td><?= !empty($row['section']) ? htmlspecialchars($row['section'] ?? '') : '<span style="color:#9aa2b1; font-style:italic;">—</span>' ?></td>
+                            <td style="font-size:12px; color:#475569;"><?= htmlspecialchars($row['email'] ?? '') ?></td>
+                            <td><?= htmlspecialchars($row['campus_branch'] ?? '') ?></td>
+                            <?php $acctStatus = student_list_account_status($conn, $row['ojt_user_id'] ?? 0); ?>
+                            <td><span class="status-pill status-<?= $acctStatus ?>" title="<?= htmlspecialchars(['inactive' => 'No requirement submitted yet', 'validating' => 'Requirements submitted - awaiting verification', 'active' => 'All requirements verified'][$acctStatus] ?? '') ?>"><?= ucfirst($acctStatus) ?></span></td>
                             <td>
                                 <?php if (!empty($row['ojt_company'])): ?>
                                     <span class="company-pill">
                                         <i class="fas fa-building" style="font-size:9px;"></i>
-                                        <?= htmlspecialchars($row['ojt_company']) ?>
+                                        <?= htmlspecialchars($row['ojt_company'] ?? '') ?>
                                     </span>
                                 <?php else: ?>
                                     <span class="company-pill unassigned">
@@ -2626,7 +2904,7 @@ if ($total_students == 0) {
                                 <?php if (!empty($row['ojt_date_start'])): ?>
                                     <span class="date-cell">
                                         <i class="fas fa-play-circle" style="color:#2C5A2C; font-size:10px; margin-right:3px;"></i>
-                                        <?= date('M d, Y', strtotime($row['ojt_date_start'])) ?>
+                                        <?= date('M d, Y', strtotime($row['ojt_date_start'] ?? '')) ?>
                                     </span>
                                 <?php else: ?>
                                     <span class="date-cell no-data">—</span>
@@ -2646,9 +2924,9 @@ if ($total_students == 0) {
                                 $row['ojt_date_end'] = $endInfo['date'];
                                 ?>
                                 <?php if (!empty($row['ojt_date_end'])): ?>
-                                    <span class="date-cell"<?= $endTip !== '' ? ' title="' . htmlspecialchars($endTip) . '"' : '' ?>>
+                                    <span class="date-cell"<?= $endTip !== '' ? ' title="' . htmlspecialchars($endTip ?? '') . '"' : '' ?>>
                                         <i class="fas fa-stop-circle" style="color:#A02A2A; font-size:10px; margin-right:3px;"></i>
-                                        <?= date('M d, Y', strtotime($row['ojt_date_end'])) ?>
+                                        <?= date('M d, Y', strtotime($row['ojt_date_end'] ?? '')) ?>
                                         <?php if ($endInfo['type'] === 'estimated'): ?><em style="font-size:10px; margin-left:2px;">(est.)</em><?php endif; ?>
                                     </span>
                                 <?php else: ?>
@@ -2698,6 +2976,14 @@ if ($total_students == 0) {
                                     <?php endif; ?>
                                 <?php else: ?>
                                     <span class="hours-badge no-hours" title="No matching Course Offering to compute this from">—</span>
+                                <?php endif; ?>
+                            </td>
+                            <td>
+                                <?php /* NEW (Requirements column): imported rows have no account yet, so nothing can have been submitted. */ ?>
+                                <?php if (!empty($row['ojt_user_id'])): ?>
+                                    <button type="button" class="cc-moa-btn view sl-view-req-btn" data-uid="<?= (int)$row['ojt_user_id'] ?>" data-name="<?= htmlspecialchars(trim(preg_replace('/\s+/', ' ', ($row['first_name'] ?? '') . ' ' . ($row['middle_name'] ?? '') . ' ' . ($row['last_name'] ?? ''))), ENT_QUOTES) ?>"><i class="fas fa-folder-open"></i> View Requirements</button>
+                                <?php else: ?>
+                                    <span class="date-cell no-data" title="Not registered yet, so no requirements have been submitted">—</span>
                                 <?php endif; ?>
                             </td>
                         </tr>
@@ -3072,11 +3358,56 @@ if (isset($_GET['ajax_table']) && $_GET['ajax_table'] === '1') {
         .student-table th:nth-child(5), .student-table td:nth-child(5) { min-width: 100px; } /* Section     */
         .student-table th:nth-child(6), .student-table td:nth-child(6) { min-width: 210px; } /* Email       */
         .student-table th:nth-child(7), .student-table td:nth-child(7) { min-width: 145px; } /* Campus      */
-        .student-table th:nth-child(8), .student-table td:nth-child(8) { min-width: 170px; } /* Company     */
-        .student-table th:nth-child(9), .student-table td:nth-child(9) { min-width: 130px; } /* Date Start  */
-        .student-table th:nth-child(10), .student-table td:nth-child(10) { min-width: 130px; } /* Date End    */
-        .student-table th:nth-child(11), .student-table td:nth-child(11) { min-width: 115px; } /* Total Hours */
-        .student-table th:nth-child(12), .student-table td:nth-child(12) { min-width: 130px; } /* Remaining Hours (NEW) */
+        .student-table th:nth-child(8), .student-table td:nth-child(8) { min-width: 110px; } /* Status       */
+        .student-table th:nth-child(9), .student-table td:nth-child(9) { min-width: 170px; } /* Company     */
+        .student-table th:nth-child(10), .student-table td:nth-child(10) { min-width: 130px; } /* Date Start  */
+        .student-table th:nth-child(11), .student-table td:nth-child(11) { min-width: 130px; } /* Date End    */
+        .student-table th:nth-child(12), .student-table td:nth-child(12) { min-width: 115px; } /* Total Hours */
+        .student-table th:nth-child(13), .student-table td:nth-child(13) { min-width: 130px; } /* Remaining Hours (NEW) */
+        .student-table th:nth-child(14), .student-table td:nth-child(14) { min-width: 175px; } /* Requirements */
+
+        /* NEW (Requirements column): "View Requirements" button + full-screen viewer, same look as admin_company_list.php. */
+        .cc-moa-btn { border:1px solid var(--grid-border); border-radius:0; padding:6px 12px; font-size:11px; font-weight:700; cursor:pointer; display:inline-flex; align-items:center; gap:5px; text-decoration:none; text-transform:uppercase; letter-spacing:0.3px; font-family:inherit; white-space:nowrap; }
+        .cc-moa-btn.view { background:#fff; color:#5b3fa0; border-color:#5b3fa0; }
+        .cc-moa-btn.view:hover { background:#5b3fa0; color:#fff; }
+        .cc-badge { font-size:11px; font-weight:700; padding:3px 10px 3px 8px; border-radius:0; white-space:nowrap; display:inline-block; text-transform:uppercase; letter-spacing:0.3px; border-left:3px solid transparent; }
+        .cc-badge.Verified { background:var(--grid-green-bg); color:var(--grid-green); border-left-color:var(--grid-green); }
+        .cc-badge.Pending  { background:var(--grid-amber-bg); color:var(--grid-amber); border-left-color:var(--grid-amber); }
+        .cc-badge.Awaiting { background:#EDEFF3; color:var(--grid-muted); border-left-color:var(--grid-border); }
+        .cc-badge.Rejected { background:var(--grid-red-bg); color:var(--grid-red); border-left-color:var(--grid-red); }
+        #requirementsModal { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.88); z-index:10000; flex-direction:column; }
+        #requirementsModal.open { display:flex; }
+        #reqViewerBar { background:var(--grid-navy); padding:12px 24px; display:flex; align-items:center; justify-content:space-between; gap:16px; flex-shrink:0; }
+        #reqViewerTitle { color:#fff; font-size:14px; font-weight:700; display:flex; align-items:center; gap:10px; text-transform:uppercase; letter-spacing:0.3px; min-width:0; flex-wrap:wrap; }
+        #reqViewerTitle .req-viewer-current { color:var(--neust-gold); }
+        #reqViewerTitle .req-viewer-current:not(:empty)::before { content:'/'; color:rgba(255,255,255,0.5); margin-right:10px; }
+        .req-viewer-bar-actions { display:flex; align-items:center; gap:10px; flex-shrink:0; }
+        .req-viewer-close-btn { background:transparent; color:#fff; border:1px solid rgba(255,255,255,0.6); padding:7px 14px; font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.3px; cursor:pointer; font-family:inherit; }
+        .req-viewer-close-btn:hover { background:rgba(255,255,255,0.15); }
+        #reqViewerBody { flex:1; display:flex; min-height:0; }
+        #reqViewerSidebar { width:300px; flex-shrink:0; background:#fff; border-right:1px solid var(--grid-border); overflow-y:auto; display:flex; flex-direction:column; }
+        .req-viewer-sidebar-head { padding:14px 16px; font-size:11px; font-weight:700; color:var(--grid-navy); text-transform:uppercase; letter-spacing:0.5px; border-bottom:2px solid var(--grid-navy); background:var(--grid-bg); position:sticky; top:0; z-index:1; }
+        .req-viewer-sidebar-head i { margin-right:6px; }
+        #reqViewerCount { color:var(--grid-muted); font-weight:600; }
+        .req-nav-item { border-bottom:1px solid var(--grid-border-soft); }
+        .req-nav-btn { width:100%; background:#fff; border:none; border-left:3px solid transparent; padding:12px 14px; text-align:left; cursor:pointer; display:flex; flex-direction:column; gap:6px; font-family:inherit; }
+        .req-nav-btn:hover { background:#F5F7FB; }
+        .req-nav-item.active > .req-nav-btn { background:#E7ECF7; border-left-color:var(--grid-navy); }
+        .req-nav-title { font-size:13px; font-weight:700; color:var(--grid-navy); }
+        .req-nav-meta { display:flex; align-items:center; gap:8px; flex-wrap:wrap; font-size:11px; color:var(--grid-muted); }
+        .req-nav-files { display:flex; flex-direction:column; padding:0 14px 10px 26px; gap:4px; }
+        .req-nav-file-btn { background:none; border:1px solid var(--grid-border); padding:5px 10px; font-size:11px; font-weight:700; color:#5b3fa0; text-transform:uppercase; letter-spacing:0.3px; text-align:left; cursor:pointer; display:flex; align-items:center; gap:6px; font-family:inherit; }
+        .req-nav-file-btn:hover { background:#F5F7FB; }
+        .req-nav-file-btn.active { background:#5b3fa0; color:#fff; border-color:#5b3fa0; }
+        .req-nav-empty { padding:18px 16px; font-size:13px; color:var(--grid-muted); }
+        #reqViewerStage { flex:1; position:relative; background:#fff; min-width:0; }
+        #reqViewerFrame { position:absolute; inset:0; width:100%; height:100%; border:none; background:#fff; display:none; }
+        #reqViewerImageWrap { position:absolute; inset:0; display:none; align-items:center; justify-content:center; padding:24px; box-sizing:border-box; background:#fff; overflow:auto; }
+        #reqViewerImage { max-width:100%; max-height:100%; object-fit:contain; display:block; margin:auto; box-shadow:0 2px 14px rgba(27,42,74,0.12); }
+        #reqViewerPlaceholder { position:absolute; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px; text-align:center; padding:30px; color:var(--grid-muted); background:var(--grid-bg); }
+        #reqViewerPlaceholder i.req-placeholder-icon { font-size:48px; color:var(--grid-border); }
+        #reqViewerPlaceholder p { margin:0; font-size:14px; max-width:420px; line-height:1.6; }
+        @media (max-width: 760px) { #reqViewerBody { flex-direction:column; } #reqViewerSidebar { width:100%; max-height:35vh; border-right:none; border-bottom:1px solid var(--grid-border); } }
 
         /* Badges restyled flat/colored-text per design #4 — no rounded
            pill backgrounds, just a small left accent + colored text. */
@@ -3085,6 +3416,12 @@ if (isset($_GET['ajax_table']) && $_GET['ajax_table'] === '1') {
             color: #5b3fa0; font-size: 11px; font-weight: 700;
             text-transform: uppercase; letter-spacing: 0.3px; white-space: nowrap;
         }
+        /* NEW (Status column): flat colored text, same style as the other badges. */
+        .status-pill { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.3px; white-space: nowrap; }
+        .status-pill::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+        .status-pill.status-inactive   { color: #9aa2b1; }
+        .status-pill.status-validating { color: #B7791F; }
+        .status-pill.status-active     { color: #2C5A2C; }
         .company-pill.unassigned { color: var(--grid-muted); font-style: italic; }
         .date-cell { font-size: 12px; color: var(--grid-muted); white-space: nowrap; }
         .date-cell.no-data { color: #9aa2b1; font-style: italic; }
@@ -3164,6 +3501,11 @@ if (isset($_GET['ajax_table']) && $_GET['ajax_table'] === '1') {
             visibility: hidden;
             pointer-events: none;
         }
+        /* NEW (loader sync fix — same as administrator.php): when the page is reloading / leaving, the
+           overlay must appear on the very next paint — no 0.35s fade-in, because the browser may stop
+           painting this page before a fade would finish. Added by the script only while leaving, and
+           removed again when the overlay hides. */
+        #globalLoadingOverlay.gl-instant { transition: none; }
         .global-loading-box {
             display: flex;
             flex-direction: column;
@@ -3636,12 +3978,81 @@ if (isset($_GET['ajax_table']) && $_GET['ajax_table'] === '1') {
      unchanged; fetch / XMLHttpRequest keep working exactly as before.
      ══════════════════════════════════════════════════════════════════════ -->
 <style>
-    html.cv-booting::before { content: ''; position: fixed; left: 50%; top: 50%; width: 54px; height: 54px; margin: -44px 0 0 -32px; border-radius: 50%;
-        border: 5px solid #A3AFC7; border-top-color: #1B2A4A; z-index: 20002; animation: cvBootSpin 0.85s linear infinite; }
+    /* the first-paint ring: exactly where the page's own spinner is; its size and look come from the shared ring rule below,
+       and it carries on from the previous page's loading page (--cv-ring-delay). CLEAN-UP (audit): two rules merged into one. */
+    html.cv-booting::before { content: ''; position: fixed; left: 50%; top: 50%; margin: -47.5px 0 0 -32px; z-index: 20002;
+        animation: cvRingSpin 1s steps(12, end) infinite; animation-delay: var(--cv-ring-delay, 0s); }
     html.cv-booting::after { content: 'LOADING'; position: fixed; inset: 0; z-index: 20001; display: flex; align-items: center; justify-content: center;
-        padding-top: 70px; box-sizing: border-box; background: rgba(238, 241, 246, 0.92); color: #1B2A4A;
+        padding: 80px 20.7px 0 0; box-sizing: border-box; background: rgba(238, 241, 246, 0.92); color: #1B2A4A;   /* UPDATED (this adjustment): label exactly where the page's own label is */
         font: 700 13px 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; letter-spacing: 0.6px; }
-    @keyframes cvBootSpin { to { transform: rotate(360deg); } }
+    /* NEW (this adjustment): ENHANCED LOADING RING — instead of one solid arc sweeping round, 12 rounded segments
+       in the site's navy that fade from dark to light around the circle and tick round (like a classic activity
+       indicator). Same 64 px footprint and position as before, so nothing else moves. Used by the first-paint
+       cover AND by this page's own loading page, so both always look identical. */
+    html.cv-booting::before,
+    #globalLoadingOverlay .global-loading-spinner {
+        width: 64px; height: 64px; border: 0; border-radius: 50%; box-sizing: border-box;
+        background: conic-gradient(from 0deg, rgba(27,42,74,0.12) 0deg, rgba(27,42,74,0.35) 120deg, rgba(27,42,74,0.7) 240deg, #1B2A4A 330deg, #1B2A4A 360deg);
+        -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 9px), #000 calc(100% - 8px)),
+                      repeating-conic-gradient(from 5deg, #000 0deg 20deg, transparent 20deg 30deg);
+        -webkit-mask-composite: source-in;
+                mask: radial-gradient(farthest-side, transparent calc(100% - 9px), #000 calc(100% - 8px)),
+                      repeating-conic-gradient(from 5deg, #000 0deg 20deg, transparent 20deg 30deg);
+                mask-composite: intersect;
+        will-change: transform;   /* FIX: the ring keeps turning on the compositor while this large page is busy loading (no pause) — same as administrator.php */
+    }
+    #globalLoadingOverlay .global-loading-spinner { animation: cvRingSpin 1s steps(12, end) infinite; }
+    @keyframes cvRingSpin { to { transform: rotate(360deg); } }
+    /* NEW (this adjustment): the animated dots after "LOADING", like the page's own loading page, so nothing changes
+       when the page's loading page takes over */
+    /* UPDATED (this adjustment): the three dots fade one after another exactly like the page's own dots
+       (same 1.2 s cycle, 0.2 s apart), so they simply carry on when the page's loading page takes over */
+    html.cv-booting body::before { content: '.'; position: fixed; left: calc(50% + 29.75px); top: calc(50% + 32.5px); z-index: 20003;
+        font: 700 13px/15px 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; letter-spacing: 0.6px; color: rgba(27,42,74,0);
+        animation: cvBootDots 1.2s linear infinite; animation-delay: var(--cv-dots-delay, 0s); pointer-events: none; }
+    @keyframes cvBootDots {
+        0.0% { color: rgba(27,42,74,0.0); text-shadow: 4.23px 0 rgba(27,42,74,0.075), 8.47px 0 rgba(27,42,74,0.424); }
+        2.5% { color: rgba(27,42,74,0.0); text-shadow: 4.23px 0 rgba(27,42,74,0.052), 8.47px 0 rgba(27,42,74,0.342); }
+        5.0% { color: rgba(27,42,74,0.0); text-shadow: 4.23px 0 rgba(27,42,74,0.034), 8.47px 0 rgba(27,42,74,0.273); }
+        7.5% { color: rgba(27,42,74,0.0); text-shadow: 4.23px 0 rgba(27,42,74,0.02), 8.47px 0 rgba(27,42,74,0.215); }
+        10.0% { color: rgba(27,42,74,0.0); text-shadow: 4.23px 0 rgba(27,42,74,0.01), 8.47px 0 rgba(27,42,74,0.166); }
+        12.5% { color: rgba(27,42,74,0.0); text-shadow: 4.23px 0 rgba(27,42,74,0.004), 8.47px 0 rgba(27,42,74,0.126); }
+        15.0% { color: rgba(27,42,74,0.0); text-shadow: 4.23px 0 rgba(27,42,74,0.001), 8.47px 0 rgba(27,42,74,0.094); }
+        17.5% { color: rgba(27,42,74,0.0); text-shadow: 4.23px 0 rgba(27,42,74,0.0), 8.47px 0 rgba(27,42,74,0.067); }
+        20.0% { color: rgba(27,42,74,0.0); text-shadow: 4.23px 0 rgba(27,42,74,0.0), 8.47px 0 rgba(27,42,74,0.046); }
+        22.5% { color: rgba(27,42,74,0.071); text-shadow: 4.23px 0 rgba(27,42,74,0.0), 8.47px 0 rgba(27,42,74,0.029); }
+        25.0% { color: rgba(27,42,74,0.221); text-shadow: 4.23px 0 rgba(27,42,74,0.0), 8.47px 0 rgba(27,42,74,0.017); }
+        27.5% { color: rgba(27,42,74,0.409); text-shadow: 4.23px 0 rgba(27,42,74,0.0), 8.47px 0 rgba(27,42,74,0.008); }
+        30.0% { color: rgba(27,42,74,0.576); text-shadow: 4.23px 0 rgba(27,42,74,0.0), 8.47px 0 rgba(27,42,74,0.002); }
+        32.5% { color: rgba(27,42,74,0.706); text-shadow: 4.23px 0 rgba(27,42,74,0.0), 8.47px 0 rgba(27,42,74,0.0); }
+        35.0% { color: rgba(27,42,74,0.802); text-shadow: 4.23px 0 rgba(27,42,74,0.0), 8.47px 0 rgba(27,42,74,0.0); }
+        37.5% { color: rgba(27,42,74,0.874); text-shadow: 4.23px 0 rgba(27,42,74,0.015), 8.47px 0 rgba(27,42,74,0.0); }
+        40.0% { color: rgba(27,42,74,0.925); text-shadow: 4.23px 0 rgba(27,42,74,0.113), 8.47px 0 rgba(27,42,74,0.0); }
+        42.5% { color: rgba(27,42,74,0.96); text-shadow: 4.23px 0 rgba(27,42,74,0.283), 8.47px 0 rgba(27,42,74,0.0); }
+        45.0% { color: rgba(27,42,74,0.983); text-shadow: 4.23px 0 rgba(27,42,74,0.468), 8.47px 0 rgba(27,42,74,0.0); }
+        47.5% { color: rgba(27,42,74,0.996); text-shadow: 4.23px 0 rgba(27,42,74,0.623), 8.47px 0 rgba(27,42,74,0.0); }
+        50.0% { color: rgba(27,42,74,1.0); text-shadow: 4.23px 0 rgba(27,42,74,0.741), 8.47px 0 rgba(27,42,74,0.0); }
+        52.5% { color: rgba(27,42,74,0.967); text-shadow: 4.23px 0 rgba(27,42,74,0.829), 8.47px 0 rgba(27,42,74,0.0); }
+        55.0% { color: rgba(27,42,74,0.905); text-shadow: 4.23px 0 rgba(27,42,74,0.893), 8.47px 0 rgba(27,42,74,0.038); }
+        57.5% { color: rgba(27,42,74,0.815); text-shadow: 4.23px 0 rgba(27,42,74,0.938), 8.47px 0 rgba(27,42,74,0.163); }
+        60.0% { color: rgba(27,42,74,0.705); text-shadow: 4.23px 0 rgba(27,42,74,0.969), 8.47px 0 rgba(27,42,74,0.346); }
+        62.5% { color: rgba(27,42,74,0.591); text-shadow: 4.23px 0 rgba(27,42,74,0.989), 8.47px 0 rgba(27,42,74,0.524); }
+        65.0% { color: rgba(27,42,74,0.487); text-shadow: 4.23px 0 rgba(27,42,74,0.998), 8.47px 0 rgba(27,42,74,0.666); }
+        67.5% { color: rgba(27,42,74,0.395); text-shadow: 4.23px 0 rgba(27,42,74,0.992), 8.47px 0 rgba(27,42,74,0.773); }
+        70.0% { color: rgba(27,42,74,0.317); text-shadow: 4.23px 0 rgba(27,42,74,0.95), 8.47px 0 rgba(27,42,74,0.852); }
+        72.5% { color: rgba(27,42,74,0.252); text-shadow: 4.23px 0 rgba(27,42,74,0.878), 8.47px 0 rgba(27,42,74,0.91); }
+        75.0% { color: rgba(27,42,74,0.198); text-shadow: 4.23px 0 rgba(27,42,74,0.779), 8.47px 0 rgba(27,42,74,0.95); }
+        77.5% { color: rgba(27,42,74,0.152); text-shadow: 4.23px 0 rgba(27,42,74,0.667), 8.47px 0 rgba(27,42,74,0.977); }
+        80.0% { color: rgba(27,42,74,0.115); text-shadow: 4.23px 0 rgba(27,42,74,0.555), 8.47px 0 rgba(27,42,74,0.993); }
+        82.5% { color: rgba(27,42,74,0.084); text-shadow: 4.23px 0 rgba(27,42,74,0.455), 8.47px 0 rgba(27,42,74,1.0); }
+        85.0% { color: rgba(27,42,74,0.059); text-shadow: 4.23px 0 rgba(27,42,74,0.368), 8.47px 0 rgba(27,42,74,0.981); }
+        87.5% { color: rgba(27,42,74,0.04); text-shadow: 4.23px 0 rgba(27,42,74,0.294), 8.47px 0 rgba(27,42,74,0.929); }
+        90.0% { color: rgba(27,42,74,0.024); text-shadow: 4.23px 0 rgba(27,42,74,0.233), 8.47px 0 rgba(27,42,74,0.848); }
+        92.5% { color: rgba(27,42,74,0.013); text-shadow: 4.23px 0 rgba(27,42,74,0.182), 8.47px 0 rgba(27,42,74,0.743); }
+        95.0% { color: rgba(27,42,74,0.006); text-shadow: 4.23px 0 rgba(27,42,74,0.139), 8.47px 0 rgba(27,42,74,0.629); }
+        97.5% { color: rgba(27,42,74,0.001); text-shadow: 4.23px 0 rgba(27,42,74,0.104), 8.47px 0 rgba(27,42,74,0.52); }
+        100.0% { color: rgba(27,42,74,0.0); text-shadow: 4.23px 0 rgba(27,42,74,0.075), 8.47px 0 rgba(27,42,74,0.424); }
+    }
 </style>
 <script>
 (function () {
@@ -3653,13 +4064,140 @@ if (isset($_GET['ajax_table']) && $_GET['ajax_table'] === '1') {
     // ── 1) first paint: covered until this page's own loading overlay exists ──
     root.classList.add('cv-booting');
     function releaseBoot() { root.classList.remove('cv-booting'); }
+    /* NEW (this adjustment): the loading animation no longer starts over midway. When the page's own loading page
+       takes over from this cover, its spinner continues from the same angle, its dots continue in the same rhythm,
+       and its pop-in is not replayed (it is already on screen). Only for this one hand-over, and only if the cover
+       was actually painted; any later showing of the loading page (e.g. "Saving") animates exactly as before. */
+    var cvBootStart = (window.performance && performance.now) ? performance.now() : Date.now();
+    var cvCoverPainted = false;
+    /* NEW (this adjustment): ONE loading page from the side-menu click / refresh until the new page is ready.
+       The page being left saves the moment its loading page appeared (see "pagehide" below); this page picks it
+       up and simply carries on from there — same ring position, same dots, no second pop-in, nothing drawn twice.
+       Used once, only if recent (15 s); a first visit (nothing saved) behaves as before. */
+    var CV_LOADER_KEY = 'cvLoaderEpoch', cvCarriedOver = false;
+    var CV_PHASE_KEY = 'cvLoaderPhase', cvRingAt0 = null, cvDotsAt0 = null, cvPhaseReadAt = 0;   // NEW (loader sync fix)
+    try {
+        var cvEpoch = parseInt(sessionStorage.getItem(CV_LOADER_KEY) || '', 10);
+        sessionStorage.removeItem(CV_LOADER_KEY);
+        var cvSince = cvEpoch ? Date.now() - cvEpoch : -1;
+        if (cvSince >= 0 && cvSince < 15000) {
+            cvCarriedOver = true; cvCoverPainted = true;
+            cvBootStart = cvBootStart - cvSince;
+            root.style.setProperty('--cv-ring-delay', (-((cvSince / 1000) % 1)).toFixed(3) + 's');
+            root.style.setProperty('--cv-dots-delay', (-((cvSince / 1000) % 1.2)).toFixed(3) + 's');
+            /* NEW (loader sync fix): the previous page also handed over where its ring and dots REALLY were in their
+               turn (read from the running animations — see "pagehide" below). The old way assumed the ring started
+               turning the moment the loading page was shown, which is only true for the first loading page after a
+               page opens; a loading page shown later (a link click) had its ring at any angle, so the next page
+               continued from the wrong one — a visible jump. With the real positions it continues exactly. */
+            try {
+                var cvPh = JSON.parse(sessionStorage.getItem(CV_PHASE_KEY) || 'null');
+                if (cvPh && typeof cvPh.ring === 'number' && typeof cvPh.dots === 'number' && Date.now() - cvPh.t >= 0 && Date.now() - cvPh.t < 15000) {
+                    var cvGap = Date.now() - cvPh.t;
+                    cvRingAt0 = (cvPh.ring + cvGap) / 1000; cvDotsAt0 = (cvPh.dots + cvGap) / 1000;
+                    cvPhaseReadAt = (window.performance && performance.now) ? performance.now() : Date.now();
+                    root.style.setProperty('--cv-ring-delay', (-(cvRingAt0 % 1)).toFixed(3) + 's');
+                    root.style.setProperty('--cv-dots-delay', (-(cvDotsAt0 % 1.2)).toFixed(3) + 's');
+                }
+            } catch (e) {}
+        }
+        sessionStorage.removeItem(CV_PHASE_KEY);
+    } catch (e) {}
+    function cvLoaderStartedAt() { return Date.now() - (((window.performance && performance.now) ? performance.now() : Date.now()) - cvBootStart); }
+    if (window.requestAnimationFrame) requestAnimationFrame(function () { requestAnimationFrame(function () { cvCoverPainted = root.classList.contains('cv-booting'); }); });
+    function continueCoverAnimation(ov) {
+        try {
+            if (!cvCoverPainted || !ov || ov.classList.contains('hidden')) return;
+            var now = (window.performance && performance.now) ? performance.now() : Date.now();
+            var elapsed = (now - cvBootStart) / 1000;
+            var elapsedRing = (cvRingAt0 !== null) ? cvRingAt0 + (now - cvPhaseReadAt) / 1000 : elapsed;   // NEW (loader sync fix): the real position, when handed over
+            var elapsedDots = (cvDotsAt0 !== null) ? cvDotsAt0 + (now - cvPhaseReadAt) / 1000 : elapsed;
+            var spinner = ov.querySelector('.global-loading-spinner');
+            if (spinner) spinner.style.animationDelay = (-(elapsedRing % 1)).toFixed(3) + 's';   // UPDATED (this adjustment): the ring's 1 s turn
+            var dots = ov.querySelectorAll('.global-loading-dots span');
+            for (var i = 0; i < dots.length; i++) dots[i].style.animationDelay = (-((elapsedDots - i * 0.2) % 1.2 + 1.2) % 1.2).toFixed(3) + 's';
+            var box = ov.querySelector('.global-loading-box');
+            if (box) {
+                box.style.animation = 'none';   // no second pop-in
+                var restore = new MutationObserver(function () {   // later showings get their pop-in back, as before
+                    if (ov.classList.contains('hidden')) {
+                        restore.disconnect();
+                        setTimeout(function () { box.style.animation = ''; if (spinner) spinner.style.animationDelay = ''; for (var j = 0; j < dots.length; j++) dots[j].style.animationDelay = ''; }, 400);
+                    }
+                });
+                restore.observe(ov, { attributes: true, attributeFilter: ['class'] });
+            }
+        } catch (e) { /* never affects the page */ }
+    }
+    // UPDATED (this adjustment): the cover gives way the instant the page's loading page is in the page (before the
+    // next frame is drawn), so the two are never drawn at the same time
+    var cvHandedOver = false;
+    function cvHandOver(ovEl) {
+        if (cvHandedOver) return;
+        cvHandedOver = true;
+        continueCoverAnimation(ovEl);
+        releaseBoot();
+    }
+    if (window.MutationObserver) {
+        var cvOvWatch = new MutationObserver(function () {
+            var o = document.getElementById('globalLoadingOverlay');
+            if (o) { cvOvWatch.disconnect(); cvHandOver(o); }
+        });
+        cvOvWatch.observe(root, { childList: true, subtree: true });
+        document.addEventListener('DOMContentLoaded', function () { cvOvWatch.disconnect(); });
+    }
     (function waitForOverlay() {
-        if (document.getElementById('globalLoadingOverlay')) { releaseBoot(); return; }
+        var ovEl = document.getElementById('globalLoadingOverlay');
+        if (ovEl) { cvHandOver(ovEl); return; }
         if (document.readyState !== 'loading') { releaseBoot(); return; }   // page without an overlay: never keep it covered
         setTimeout(waitForOverlay, 16);
     })();
     document.addEventListener('DOMContentLoaded', function () { setTimeout(releaseBoot, 0); });
     window.addEventListener('pageshow', function (e) { if (e.persisted) releaseBoot(); });
+
+    /* NEW (this adjustment): remember when this page's loading page appeared, and hand that moment to the next
+       page when this one is left (side-menu link, refresh, redirect) while it is showing — so the next page
+       carries on the same loading page instead of starting a second one. Downloads never leave the page, so
+       they never hand anything over. */
+    var cvShownSince = null;
+    function cvWatchOverlay() {
+        var ov = document.getElementById('globalLoadingOverlay');
+        if (!ov) return;
+        var mark = function () {
+            var shown = !ov.classList.contains('hidden');
+            if (shown && cvShownSince === null) cvShownSince = Date.now();
+            if (!shown) cvShownSince = null;
+        };
+        if (!ov.classList.contains('hidden')) cvShownSince = cvLoaderStartedAt();   // the page's first loading page
+        new MutationObserver(mark).observe(ov, { attributes: true, attributeFilter: ['class'] });
+    }
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', cvWatchOverlay); else cvWatchOverlay();
+    // NEW (loader sync fix): milliseconds into the current turn of an element's running CSS animation (null if unknown)
+    function cvAnimPhase(el, period) {
+        try {
+            if (!el || !el.getAnimations) return null;
+            var list = el.getAnimations();
+            for (var i = 0; i < list.length; i++) {
+                var a = list[i], ct = a.currentTime;
+                if (typeof ct !== 'number' || !a.effect || !a.effect.getComputedTiming) continue;
+                var delay = a.effect.getComputedTiming().delay || 0;
+                return (((ct - delay) % period) + period) % period;
+            }
+        } catch (e) {}
+        return null;
+    }
+    window.addEventListener('pagehide', function () {
+        try {
+            var ov = document.getElementById('globalLoadingOverlay');
+            if (ov && !ov.classList.contains('hidden') && !ov.classList.contains('success-state')) {
+                sessionStorage.setItem(CV_LOADER_KEY, String(cvShownSince !== null ? cvShownSince : Date.now()));
+                // NEW (loader sync fix): where the ring and the dots really are in their turn right now
+                var ringMs = cvAnimPhase(ov.querySelector('.global-loading-spinner'), 1000);
+                var dotsMs = cvAnimPhase(ov.querySelector('.global-loading-dots span'), 1200);
+                if (ringMs !== null && dotsMs !== null) sessionStorage.setItem(CV_PHASE_KEY, JSON.stringify({ t: Date.now(), ring: ringMs, dots: dotsMs }));
+            }
+        } catch (e) {}
+    });
 
     // ── shared: this page's loading overlay ──
     var LABEL = 'Processing', MIN_MS = 350, SAFETY_MS = 30000;
@@ -3751,6 +4289,38 @@ if (isset($_GET['ajax_table']) && $_GET['ajax_table'] === '1') {
         };
     }
 
+    /* NEW (loader sync fix): 'gl-instant' (no fade-in) is only for the moment of leaving; once the overlay is hidden
+       again (navigation cancelled / a download) it is dropped, so later showings fade in as before — same as administrator.php. */
+    document.addEventListener('DOMContentLoaded', function () {
+        try {
+            var ovw = overlay();
+            if (!ovw || !window.MutationObserver) return;
+            new MutationObserver(function () {
+                if (ovw.classList.contains('hidden') && ovw.classList.contains('gl-instant')) ovw.classList.remove('gl-instant');
+            }).observe(ovw, { attributes: true, attributeFilter: ['class'] });
+        } catch (e) { /* never affects the page */ }
+    });
+    /* NEW (loader sync fix — same behaviour as administrator.php's "navigating" flag): once this page is on its way
+       to another page (link click, form submit, reload), nothing may hide the loading page again until the next page
+       has taken over. Before this, this page's own load handler / 4-second safety timer (and the "minimum time"
+       logic) could hide it in the middle of a navigation started in the first seconds after opening the page, so the
+       loading page vanished for a moment and then came back with the next page ("pauses, then continues"). A hide
+       that happens while navigating is undone before the browser paints it. The flag releases itself after 7.5 s
+       (navigation cancelled / a download), a moment before the existing 8 s release below. */
+    var navActive = false, navTimer = null, navObs = null;
+    function navAttach() {
+        if (navObs || !window.MutationObserver) return;
+        var ovn = overlay(); if (!ovn) return;
+        navObs = new MutationObserver(function () {
+            if (navActive && ovn.classList.contains('hidden')) { ovn.classList.add('gl-instant'); ovn.classList.remove('hidden'); }
+        });
+        navObs.observe(ovn, { attributes: true, attributeFilter: ['class'] });
+    }
+    function navStart() { try { navActive = true; navAttach(); clearTimeout(navTimer); navTimer = setTimeout(navEnd, 7500); } catch (e) {} }
+    function navEnd() { navActive = false; clearTimeout(navTimer); }
+    window.cvNavGate = { start: navStart, end: navEnd, active: function () { return navActive; } };
+    window.addEventListener('pageshow', function (e) { if (e.persisted) navEnd(); });
+
     // ── 3) leaving by script (reload / redirect after an action) ──
     var lastFileClick = 0;
     var FILE_RE = /[?&][^=&]*(export|download|print|stream|pdf|preview|blob|file|csv)[^=&]*=|\.(pdf|xlsx?|csv|docx?|zip)(\?|$)/i;
@@ -3765,8 +4335,10 @@ if (isset($_GET['ajax_table']) && $_GET['ajax_table'] === '1') {
     }, true);
     window.addEventListener('beforeunload', function () {
         if (Date.now() - lastFileClick < 2000) return;                             // most likely a file download
+        navStart();                                                                 // NEW (loader sync fix): leaving — keep the loading page up
         var ov = overlay(); if (!ov || !ov.classList.contains('hidden')) return;
         var l = label(); if (l) l.textContent = 'Loading';
+        ov.classList.add('gl-instant');   // NEW (loader sync fix): appears on the very next paint, like administrator.php
         ov.classList.remove('hidden');
         setTimeout(function () { if (!document.hidden) { ov.classList.add('hidden'); } }, 8000);   // still here → it was a download
     });
@@ -3834,6 +4406,10 @@ if (isset($_GET['ajax_table']) && $_GET['ajax_table'] === '1') {
         #studentImportFilterModal .import-classification-options { max-height: none; }
     }
 </style>
+<!-- NEW (this adjustment): button tooltips can now hold a short description, so they may wrap onto a second line -->
+<style>
+    #cvBtnTip { white-space: normal; max-width: 300px; text-align: center; }
+</style>
 </head>
 <body>
 
@@ -3892,7 +4468,7 @@ if (isset($_GET['ajax_table']) && $_GET['ajax_table'] === '1') {
 
     var MIN_VISIBLE_MS = 450;         // shortest time the loading page is shown on a page load
     var OWN_LOAD_HIDE  = true;    // does this page already hide the loading page itself once loaded?
-    var NAV_ON_CLICK   = false;    // show it when leaving the page via a link / form (if the page doesn't already)
+    var NAV_ON_CLICK   = true;    // show it when leaving the page via a link / form (if the page doesn't already)   // UPDATED (loader sync fix): on click, like administrator.php — not only when the browser starts unloading
     var NAV_STUCK_MS   = 10000;       // safety: if the page is still here after this, put things back
     var label = document.getElementById('globalLoadingLabel');
     var start = Date.now();
@@ -3930,9 +4506,11 @@ if (isset($_GET['ajax_table']) && $_GET['ajax_table'] === '1') {
     function navShow() {
         if (navShown) return;
         navShown = true;
+        if (window.cvNavGate) window.cvNavGate.start();   // NEW (loader sync fix): nothing may hide the loading page while leaving
         navWasHidden = ov.classList.contains('hidden');
         if (navWasHidden) {
             if (label) { navPrevLabel = label.textContent; label.textContent = 'Loading'; }
+            ov.classList.add('gl-instant');   // NEW (loader sync fix): no fade-in while leaving
             setHidden(false);
         }
         clearTimeout(navTimer);
@@ -3942,6 +4520,7 @@ if (isset($_GET['ajax_table']) && $_GET['ajax_table'] === '1') {
         clearTimeout(navTimer);
         if (!navShown) return;
         navShown = false;
+        if (window.cvNavGate) window.cvNavGate.end();
         if (navWasHidden) {
             setHidden(true);
             if (label && navPrevLabel !== null) label.textContent = navPrevLabel;
@@ -4046,7 +4625,7 @@ if (isset($_GET['ajax_table']) && $_GET['ajax_table'] === '1') {
     </script>
     <div class="sidebar-header">
         <div class="sidebar-header-titles">
-            <h2 id="sidebarTitle"><?= htmlspecialchars($adminFullName) ?></h2>
+            <h2 id="sidebarTitle"><?= htmlspecialchars($adminFullName ?? '') ?></h2>
             <span class="sidebar-role-label">Administrator</span>
         </div>
         <button id="toggleBtn" class="toggle-btn"><i class="fas fa-bars"></i></button>
@@ -4069,9 +4648,9 @@ if (isset($_GET['ajax_table']) && $_GET['ajax_table'] === '1') {
             <span class="sidebar-badge-moa" id="sidebarMoaBadge"<?= $moa_pending_count > 0 ? '' : ' style="display:none"' ?>><?= $moa_pending_count ?></span>
         </a>
         <a href="monitoring.php" style="position:relative;"><i class="fas fa-users-cog"></i><span class="link-text">Manage Accounts</span><!-- NEW (this adjustment): Email Recovery Requests indicator — same badge look as the application-request badge --><span class="sidebar-badge-app sidebar-badge-recovery" id="sidebarRecoveryBadge"<?= $recovery_pending_count > 0 ? '' : ' style="display:none"' ?>><?= (int)$recovery_pending_count ?></span></a>
-        <a href="admin_monitoring_dashboard.php">
+        <a href="admin_monitoring_dashboard.php" style="position:relative;">
             <i class="fas fa-chart-line"></i>
-            <span class="link-text">Monitoring Dashboard</span>
+            <span class="link-text">Monitoring Dashboard</span><!-- NEW (company chat notification): unread company messages --><span class="sidebar-badge-app sidebar-badge-chat" id="sidebarChatBadge" style="display:none">0</span>
         </a>
         <a href="admin_final_grades.php"><i class="fas fa-graduation-cap"></i><span class="link-text">Final Grades</span></a>
         <a href="system_setting.php" ><i class="fas fa-gear"></i><span class="link-text">System Setting</span></a>
@@ -4105,15 +4684,15 @@ if (isset($_GET['ajax_table']) && $_GET['ajax_table'] === '1') {
         <div class="filter-bar">
             <div class="filter-group">
                 <label><i class="fas fa-search"></i> Search</label>
-                <input type="text" id="searchInput" placeholder="Name or Email..." value="<?= htmlspecialchars($search_term) ?>">
+                <input type="text" id="searchInput" placeholder="Name or Email..." value="<?= htmlspecialchars($search_term ?? '') ?>">
             </div>
             <div class="filter-group">
                 <label><i class="fas fa-building"></i> Campus Branch</label>
                 <select id="campusSelect">
                     <option value="">All Campuses</option>
                     <?php foreach ($campuses as $campus): ?>
-                        <option value="<?= htmlspecialchars($campus) ?>" <?= $campus_filter == $campus ? 'selected' : '' ?>>
-                            <?= htmlspecialchars($campus) ?>
+                        <option value="<?= htmlspecialchars($campus ?? '') ?>" <?= $campus_filter == $campus ? 'selected' : '' ?>>
+                            <?= htmlspecialchars($campus ?? '') ?>
                         </option>
                     <?php endforeach; ?>
                 </select>
@@ -4123,8 +4702,8 @@ if (isset($_GET['ajax_table']) && $_GET['ajax_table'] === '1') {
                 <select id="courseSelect">
                     <option value="">All Courses</option>
                     <?php foreach ($courses as $course): ?>
-                        <option value="<?= htmlspecialchars($course) ?>" <?= $course_filter == $course ? 'selected' : '' ?>>
-                            <?= htmlspecialchars($course) ?>
+                        <option value="<?= htmlspecialchars($course ?? '') ?>" <?= $course_filter == $course ? 'selected' : '' ?>>
+                            <?= htmlspecialchars($course ?? '') ?>
                         </option>
                     <?php endforeach; ?>
                 </select>
@@ -4226,7 +4805,7 @@ if (isset($_GET['ajax_table']) && $_GET['ajax_table'] === '1') {
                             <option value="other">+ Add New Course (Enter manually)</option>
                         <?php else: ?>
                             <?php foreach ($add_student_course_options as $co): ?>
-                                <option value="<?= htmlspecialchars($co) ?>"><?= htmlspecialchars($co) ?></option>
+                                <option value="<?= htmlspecialchars($co ?? '') ?>"><?= htmlspecialchars($co ?? '') ?></option>
                             <?php endforeach; ?>
                             <option value="other">+ Add New Course (Enter manually)</option>
                         <?php endif; ?>
@@ -4247,7 +4826,7 @@ if (isset($_GET['ajax_table']) && $_GET['ajax_table'] === '1') {
                         <option value="">Select Major</option>
                         <option value="none">None</option>
                         <?php foreach ($all_major_options as $mo): ?>
-                            <option value="<?= htmlspecialchars($mo) ?>"><?= htmlspecialchars($mo) ?></option>
+                            <option value="<?= htmlspecialchars($mo ?? '') ?>"><?= htmlspecialchars($mo ?? '') ?></option>
                         <?php endforeach; ?>
                         <option value="other">+ Add New Major (Enter manually)</option>
                     </select>
@@ -4266,7 +4845,7 @@ if (isset($_GET['ajax_table']) && $_GET['ajax_table'] === '1') {
                     <select name="section" id="sectionSelectModal" required>
                         <option value="">Select Section</option>
                         <?php foreach ($all_section_options as $so): ?>
-                            <option value="<?= htmlspecialchars($so) ?>"><?= htmlspecialchars($so) ?></option>
+                            <option value="<?= htmlspecialchars($so ?? '') ?>"><?= htmlspecialchars($so ?? '') ?></option>
                         <?php endforeach; ?>
                         <option value="other">+ Add New Section (Enter manually)</option>
                     </select>
@@ -4290,7 +4869,7 @@ if (isset($_GET['ajax_table']) && $_GET['ajax_table'] === '1') {
                             <option value="other">+ Add New Campus (Enter manually)</option>
                         <?php else: ?>
                             <?php foreach ($all_campus_options as $campus_option): ?>
-                                <option value="<?= htmlspecialchars($campus_option) ?>"><?= htmlspecialchars($campus_option) ?></option>
+                                <option value="<?= htmlspecialchars($campus_option ?? '') ?>"><?= htmlspecialchars($campus_option ?? '') ?></option>
                             <?php endforeach; ?>
                             <option value="other">+ Add New Campus (Enter manually)</option>
                         <?php endif; ?>
@@ -4355,7 +4934,7 @@ if (isset($_GET['ajax_table']) && $_GET['ajax_table'] === '1') {
                     <select name="edit_course" id="editCourseSelect" required>
                         <option value="">Select Course</option>
                         <?php foreach ($all_course_options as $co): ?>
-                            <option value="<?= htmlspecialchars($co) ?>"><?= htmlspecialchars($co) ?></option>
+                            <option value="<?= htmlspecialchars($co ?? '') ?>"><?= htmlspecialchars($co ?? '') ?></option>
                         <?php endforeach; ?>
                         <option value="other">+ Add New Course (Enter manually)</option>
                     </select>
@@ -4375,7 +4954,7 @@ if (isset($_GET['ajax_table']) && $_GET['ajax_table'] === '1') {
                         <option value="">Select Major</option>
                         <option value="none">None</option>
                         <?php foreach ($all_major_options as $mo): ?>
-                            <option value="<?= htmlspecialchars($mo) ?>"><?= htmlspecialchars($mo) ?></option>
+                            <option value="<?= htmlspecialchars($mo ?? '') ?>"><?= htmlspecialchars($mo ?? '') ?></option>
                         <?php endforeach; ?>
                         <option value="other">+ Add New Major (Enter manually)</option>
                     </select>
@@ -4394,7 +4973,7 @@ if (isset($_GET['ajax_table']) && $_GET['ajax_table'] === '1') {
                     <select name="edit_section" id="editSectionSelect" required>
                         <option value="">Select Section</option>
                         <?php foreach ($all_section_options as $so): ?>
-                            <option value="<?= htmlspecialchars($so) ?>"><?= htmlspecialchars($so) ?></option>
+                            <option value="<?= htmlspecialchars($so ?? '') ?>"><?= htmlspecialchars($so ?? '') ?></option>
                         <?php endforeach; ?>
                         <option value="other">+ Add New Section (Enter manually)</option>
                     </select>
@@ -4415,7 +4994,7 @@ if (isset($_GET['ajax_table']) && $_GET['ajax_table'] === '1') {
                     <select name="edit_campus_branch" id="editCampusBranchSelect" required>
                         <option value="">Select Campus Branch</option>
                         <?php foreach ($all_campus_options as $campus_option): ?>
-                            <option value="<?= htmlspecialchars($campus_option) ?>"><?= htmlspecialchars($campus_option) ?></option>
+                            <option value="<?= htmlspecialchars($campus_option ?? '') ?>"><?= htmlspecialchars($campus_option ?? '') ?></option>
                         <?php endforeach; ?>
                         <option value="other">+ Add New Campus (Enter manually)</option>
                     </select>
@@ -6796,6 +7375,91 @@ window.addEventListener('pageshow', function (e) {
 });
 </script>
 <!-- ══════════════════════════════════════════════════════════════════════
+     NEW (company chat notification) — COMPANY MESSAGE POPUP + SIDE-MENU INDICATOR
+     ------------------------------------------------------------------------
+     When a company writes in the chat (Profile.php → "Admin Support"), the admin sees, on every admin page:
+       • the same navy popup as the other notifications ("<Company> sent you a new message — open the chat"),
+         clickable: it goes to the Monitoring Dashboard and opens that company's chat window;
+       • a live count on the "Monitoring Dashboard" side-menu link.
+     The list comes from admin_monitoring_dashboard.php?chat_unread_list=1 (read-only: unread = sent by a company,
+     chat not opened since — opening the chat marks it read, so the count goes down by itself).
+     Same rules as the email-recovery popup: messages already waiting when the page opens are the baseline (no
+     popup); seen ids are kept briefly in sessionStorage so moving between admin pages neither repeats a popup nor
+     misses one; checked right away, then every 5 s (paused while the tab is hidden).
+     Self-contained: no existing function, poller or style is changed.
+     ══════════════════════════════════════════════════════════════════════ -->
+<script>
+(function () {
+    'use strict';
+    if (window._cvChatNotifyReady) return;
+    window._cvChatNotifyReady = true;
+    var ENDPOINT = 'admin_monitoring_dashboard.php?chat_unread_list=1', POLL_MS = 5000, TOAST_MS = 7000;
+    var STORE_KEY = 'cvChatKnownIds', STORE_FRESH = 45000;
+    var knownIds = null, inFlight = false;
+
+    function esc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
+    function readStore() {
+        try {
+            var o = JSON.parse(sessionStorage.getItem(STORE_KEY) || 'null');
+            if (!o || !Array.isArray(o.ids) || (Date.now() - (o.ts || 0)) > STORE_FRESH) return null;
+            return new Set(o.ids.map(String));
+        } catch (e) { return null; }
+    }
+    function writeStore() { if (!knownIds) return; try { sessionStorage.setItem(STORE_KEY, JSON.stringify({ ids: Array.from(knownIds), ts: Date.now() })); } catch (e) {} }
+    function layoutToasts() {
+        if (typeof window.cvLayoutTopToasts === 'function') { window.cvLayoutTopToasts(); return; }
+        var top = 30, undo = document.getElementById('undoToast');
+        if (undo && undo.classList.contains('show')) top = Math.max(top, undo.getBoundingClientRect().bottom + 12);
+        document.querySelectorAll('.cv-top-toast').forEach(function (el) { el.style.top = top + 'px'; top += el.offsetHeight + 12; });
+    }
+    function showPopup(companyId, name, n) {
+        var div = document.createElement('div');
+        div.className = 'cv-top-toast';
+        div.setAttribute('role', 'status');
+        div.innerHTML = '<i class="fas fa-comment-dots"></i><span><strong>' + esc(name || 'A company') + '</strong> sent you ' + (n > 1 ? n + ' new messages' : 'a new message') + ' \u2014 open the chat.</span>';
+        document.body.appendChild(div);
+        if (window.cvTagToast) window.cvTagToast(div, 'chat:' + companyId);   // clickable → Monitoring Dashboard, that company's chat
+        layoutToasts();
+        requestAnimationFrame(function () { div.classList.add('show'); });
+        setTimeout(function () { div.classList.remove('show'); setTimeout(function () { div.remove(); layoutToasts(); }, 400); }, TOAST_MS);
+    }
+    function setIndicator(count) {
+        count = parseInt(count, 10) || 0;
+        var b = document.getElementById('sidebarChatBadge');
+        if (b) { b.textContent = count; b.style.display = count > 0 ? '' : 'none'; }
+    }
+    function poll() {
+        if (inFlight || document.hidden) return;
+        inFlight = true;
+        fetch(ENDPOINT, { credentials: 'same-origin', cache: 'no-store' })
+            .then(function (r) { return r.json(); })
+            .then(function (d) {
+                inFlight = false;
+                if (!d || !d.success || !Array.isArray(d.rows)) return;
+                var ids = new Set(d.rows.map(function (r) { return String(r.id); }));
+                setIndicator(d.count);
+                if (knownIds === null) {
+                    var stored = readStore();
+                    if (!stored) { knownIds = ids; writeStore(); return; }   // baseline: nothing pops up
+                    knownIds = stored;
+                }
+                var fresh = d.rows.filter(function (r) { return !knownIds.has(String(r.id)); });
+                knownIds = ids; writeStore();
+                var byCo = {};
+                fresh.forEach(function (r) { (byCo[r.company_id] = byCo[r.company_id] || { name: r.company, n: 0 }).n++; });
+                Object.keys(byCo).forEach(function (cid) { showPopup(cid, byCo[cid].name, byCo[cid].n); });
+            })
+            .catch(function () { inFlight = false; });
+    }
+    poll();
+    setInterval(poll, POLL_MS);
+    document.addEventListener('visibilitychange', function () { if (!document.hidden && knownIds !== null) poll(); });
+    window.addEventListener('focus', function () { if (knownIds !== null) poll(); });
+    window.addEventListener('pageshow', function (e) { if (e.persisted) poll(); });
+    window.addEventListener('pagehide', writeStore);
+})();
+</script>
+<!-- ══════════════════════════════════════════════════════════════════════
      NEW (this adjustment) — EMAIL RECOVERY REQUEST POPUP + SIDE-MENU INDICATOR
      ------------------------------------------------------------------------
      Same popup style as administrator.php's application-request notification
@@ -7085,15 +7749,196 @@ window.addEventListener('pageshow', function (e) {
         for (var k = 0; k < ICONS.length; k++) { if (cls.indexOf(ICONS[k][0]) !== -1) return ICONS[k][1]; }
         return '';
     }
+    /* ─────────────────────────────────────────────────────────────────────
+       UPDATED (this adjustment): tooltips now say, in a few simple words,
+       WHAT the button does — instead of repeating the button's own name.
+       Order: a description written for that exact button → the button's own
+       title / label when it says more than its name → the description for
+       that kind of button (this page first, then the general list) → the
+       old behaviour as a last resort. Counters are understood, e.g.
+       "Delete (2)" / "Export (Excluding 3)".
+       ───────────────────────────────────────────────────────────────────── */
+    var CV_TIP_GENERAL = {
+        'cancel': 'Close this without saving',
+        'close': 'Close this window',
+        'dismiss': 'Hide this message',
+        'ok': 'Close this message',
+        'ok, got it': 'Close this message',
+        'done': 'Close this summary',
+        'save': 'Save your changes',
+        'save changes': 'Save your changes',
+        'save all': 'Save every course you edited',
+        'yes, delete': 'Delete for good — this cannot be undone',
+        'delete': 'Remove this item',
+        'remove': 'Remove this item',
+        'confirm': 'Yes, go ahead',
+        'continue': 'Go on to the next step',
+        'back': 'Go back to the previous step',
+        'next': 'Go to the next page',
+        'prev': 'Go to the previous page',
+        'previous': 'Go to the previous page',
+        'next page': 'Go to the next page',
+        'previous page': 'Go to the previous page',
+        'next month': 'Show the next month',
+        'previous month': 'Show the previous month',
+        'export excel': 'Download this list as an Excel file',
+        'export to excel': 'Download this list as an Excel file',
+        'export filtered': 'Download only the rows that match your filters',
+        'export': 'Download this list as a file',
+        'export (excluding n)': 'Download the list without the entries you ticked',
+        'none, proceed with export': 'Export everyone in the list',
+        'archive batch': 'Move a finished batch to the archive',
+        'unarchive batch': 'Bring an archived batch back',
+        'unarchive': 'Bring this batch back to the active list',
+        'yes, unarchive': 'Bring the batch back to the active list',
+        'view archived batches': 'See the batches you archived',
+        'view archived company batches': 'See the company batches you archived',
+        'undo': 'Reverse your last action',
+        'refresh': 'Load the latest list',
+        'print': 'Print this page',
+        'save as pdf': 'Download this as a PDF file',
+        'select all': 'Tick every item in this list',
+        'clear': 'Untick every item in this list',
+        'import selected': 'Import only the groups you ticked',
+        'cancel import': 'Stop — nothing from the file is added',
+        'skip these students': 'Import the rest and leave these students out',
+        'no, skip these students': 'Import the rest and leave these students out',
+        'no, skip this student': 'Leave this student out',
+        'skip this student': 'Leave this student out',
+        'yes, add course': 'Add this course to Course Offering first',
+        'add course offering': 'Save this course to Course Offering',
+        'edit': 'Choose one entry, then change it',
+        'edit selected': 'Open the entry you picked for editing',
+        'edit (n)': 'Edit the entries you picked',
+        'delete (n)': 'Delete the entries you picked',
+        'view': 'Open the full details',
+        'full view': 'Open the full application',
+        'details': 'Show the full details',
+        'company details': "Show the company's details",
+        'view requirements': "See this company's requirements",
+        'view pdf': 'Open the document',
+        'view pdf (locked)': 'Open the flagged document (read only)',
+        'send': 'Send your message',
+        'open chat': 'Chat with this company',
+        'preview letter': 'See the letter before sending it',
+        'apply & send endorsement letter': 'Assign the students and email the letter',
+        'approve moa': "Approve this company's MOA",
+        'reject': 'Reject it and say what to fix',
+        'accept': 'Accept this request',
+        'send & request revision': 'Ask the company to fix the flagged items',
+        'set signing schedule': 'Pick the MOA signing date and time',
+        're-schedule': 'Change the MOA signing date',
+        'accept proposed schedule': "Agree to the company's proposed date",
+        'review moa': 'Check the MOA the company sent',
+        'moa workflow': "Track each company's MOA progress",
+        'notification inbox': 'See new company notifications',
+        'requirements': "See the companies' requirements",
+        'requirements /': "See the companies' requirements",
+        'allow': "Approve this student's application",
+        'allow application': "Approve this student's application",
+        'deny': "Decline this student's application",
+        'deny application': "Decline this student's application",
+        'approve & send letter': 'Approve and email the endorsement letter',
+        'application requests': 'See new student application requests',
+        'update id': "Save the student's new ID number",
+        'add student': 'Add a student',
+        'remove student': 'Take this student off the list',
+        'confirm & create admin': 'Create the new admin account',
+        'verify credentials': 'Check the details before creating the account',
+        'verify otp': 'Confirm the code sent by email',
+        'clear history': 'Remove all finished recovery requests',
+        'clear log': 'Remove every activity log entry',
+        'confirm accept': 'Approve this email change',
+        'confirm reject': 'Decline this email change',
+        'accept request': 'Approve this email change request',
+        'reject request': 'Decline this email change request',
+        'history': 'Show requests already handled',
+        'pending': 'Show requests waiting for you',
+        'quick actions': 'Open shortcuts for common tasks',
+        'attendance': 'Show the attendance records',
+        'reports': 'Show the weekly reports',
+        'comment': 'Leave feedback on this report',
+        'edit comment': 'Change your feedback',
+        'save comment': 'Save your feedback',
+        'upload': 'Let the student see this grade',
+        'unupload': 'Hide this grade from the student',
+        'upload selected': 'Show the ticked grades to students',
+        'unupload selected': 'Hide the ticked grades from students',
+        'backup now': 'Make a copy of the database now',
+        'add company manually': 'Open the form to add one company',
+        'add company': 'Save this new company',
+        'import companies': 'Add many companies from an Excel file',
+        'import students': 'Add many students from an Excel file',
+        'log out': 'Sign out of your account',
+        'logout': 'Sign out of your account',
+        'notifications': 'See new notifications',
+        'search': 'Search the list',
+        'filter': 'Narrow down the list',
+        'menu': 'Open the menu'
+    };
+    var CV_TIP_PAGE = {
+        'admin_student_list.php': {
+            'delete': 'Choose students to remove', 'yes': 'Choose students to leave out of the export', 'done': 'Close this summary'
+        },
+        'admin_company_list.php': {
+            'delete': 'Choose companies to remove', 'yes': 'Choose companies to leave out of the export', 'done': 'Close this summary'
+        },
+        'course_offering.php': {
+            'delete': 'Choose courses to remove', 'next course': 'Go to the next course', 'previous course': 'Go to the previous course'
+        },
+        'company_validation.php': { 'done': 'Mark this MOA as completed', 'back': 'Go back to the list' },
+        'admin_final_grades.php': { 'export': 'Download the grades as a file' },
+        'system_setting.php': { 'delete': 'Delete this backup', 'refresh': 'Load the latest backup list' },
+        'monitoring.php': { 'delete': 'Delete this account for good' }
+    };
+    var CV_TIP_EXACT = [   // [CSS selector, description] — for buttons whose words mean different things on the same page
+        ['#toggleBtn', null],
+        ['#addStudentBtn', 'Open the form to add one student'],
+        ['#addStudentForm button[type="submit"]', 'Save this new student'],
+        ['#addCourseOfferingBtn', 'Open the form to add a course'],
+        ['#importAddCourseSubmitBtn', 'Save this course, then continue'],
+        ['#courseOfferingSubmitBtn', 'Save this course'],
+        ['#addCompanyBtn', 'Open the form to add one company'],
+        ['#alogClearBtn', 'Remove every activity log entry'],
+        ['#studentImportFilterCloseBtn', 'Stop — nothing from the file is added'],
+        ['#importClassificationCloseBtn', 'Stop — nothing from the file is added'],
+        ['#exportChoiceCloseBtn', 'Cancel the export'],
+        ['#globalResultOkBtn', 'Close this message']
+    ];
+    var CV_TIP_PAGE_NAME = (window.location.pathname.split('/').pop() || '').toLowerCase();
+    function cvTipKey(t) {
+        return String(t || '').replace(/\s+/g, ' ').trim().toLowerCase()
+            .replace(/^[\u2190\u2192\u2039\u203a\u00ab\u00bb\u00d7\u2715<>\s]+|[\u2190\u2192\u2039\u203a\u00ab\u00bb\u00d7\u2715<>\s]+$/g, '')
+            .replace(/\d+/g, 'n');
+    }
+    function cvTipDescribe(key) {
+        var page = CV_TIP_PAGE[CV_TIP_PAGE_NAME] || {};
+        // try the name as it is, then without a trailing counter ("Pending 3", "Requirements 2 / 5")
+        var keys = [key, String(key).replace(/(\s+n(\s*\/\s*n)?)+$/, '').replace(/\s*\/\s*$/, '').trim()];
+        for (var k = 0; k < keys.length; k++) {
+            if (Object.prototype.hasOwnProperty.call(page, keys[k])) return page[keys[k]];
+            if (Object.prototype.hasOwnProperty.call(CV_TIP_GENERAL, keys[k])) return CV_TIP_GENERAL[keys[k]];
+        }
+        return '';
+    }
     function labelOf(b) {
         if (b.id === 'toggleBtn') {
             var sb = document.getElementById('sidebar');
-            return sb && sb.classList.contains('collapsed') ? 'Expand menu' : 'Collapse menu';
+            return sb && sb.classList.contains('collapsed') ? 'Show the full menu' : 'Make the menu smaller';
         }
-        var t = b.getAttribute('data-cv-tip') || b.getAttribute('aria-label') || b.getAttribute('data-cv-title') || b.getAttribute('title') || '';
-        if (!t) t = b.tagName === 'INPUT' ? (b.value || '') : (b.textContent || '');
-        t = t.replace(/\s+/g, ' ').trim();
-        if (/^[\u00D7\u2715xX]$/.test(t)) t = 'Close';
+        for (var i = 0; i < CV_TIP_EXACT.length; i++) {
+            try { if (CV_TIP_EXACT[i][1] && b.matches(CV_TIP_EXACT[i][0])) return CV_TIP_EXACT[i][1]; } catch (x) {}
+        }
+        var visible = (b.tagName === 'INPUT' ? (b.value || '') : (b.textContent || '')).replace(/\s+/g, ' ').trim();
+        if (/^[\u00D7\u2715xX]$/.test(visible)) visible = 'Close';
+        var own = (b.getAttribute('data-cv-tip') || b.getAttribute('aria-label') || b.getAttribute('data-cv-title') || b.getAttribute('title') || '').replace(/\s+/g, ' ').trim();
+        // the button's own title / label, when it says more than the button's name (more than one word)
+        if (own && own.indexOf(' ') !== -1 && cvTipKey(own) !== cvTipKey(visible) && own.length <= 160 && !cvTipDescribe(cvTipKey(own))) return own;
+        var d = cvTipDescribe(cvTipKey(visible)) || cvTipDescribe(cvTipKey(own));
+        if (!d && (!visible || /^[^A-Za-z0-9]+$/.test(visible))) d = cvTipDescribe(cvTipKey(iconName(b)));
+        if (d) return d;
+        // last resort — the old behaviour
+        var t = own || visible;
         if (!t || /^[^A-Za-z0-9]+$/.test(t)) t = iconName(b);
         return t.length > 60 ? '' : t;     // long text (e.g. whole cards acting as buttons) gets no tooltip
     }
@@ -7263,11 +8108,20 @@ window.addEventListener('pageshow', function (e) {
         });
     }
 
+    // NEW (this adjustment): new requirement submission → administrator.php opens that student's requirements
+    function openStudentUpload(id, uid) {
+        var view = g('cvViewStudentUpload');
+        if (typeof view === 'function') { view(parseInt(id, 10), parseInt(uid, 10)); return; }
+        goTo('administrator.php?open_student_upload=' + encodeURIComponent(id) + '&uid=' + encodeURIComponent(uid));
+    }
+
     function go(spec) {
         var p = String(spec || '').split(':');
+        if (p[0] === 'studentupload') { openStudentUpload(p[1], p[2]); return; }
         if (p[0] === 'notif') openNotif(p[1], p[2], p[3]);
         else if (p[0] === 'app') openApp(p[1]);
         else if (p[0] === 'recovery') openRecovery(p[1]);
+        else if (p[0] === 'chat') goTo('admin_monitoring_dashboard.php?open_chat=' + encodeURIComponent(p[1]));   // NEW (company chat notification)
     }
 
     function activate(toast) {
@@ -7291,8 +8145,9 @@ window.addEventListener('pageshow', function (e) {
     if (params.get('open_notif')) spec = 'notif:' + params.get('open_notif') + ':' + (params.get('uid') || 0) + ':' + (params.get('type') || 'new_request');
     else if (params.get('open_app_request')) spec = 'app:' + params.get('open_app_request');
     else if (params.get('open_recovery')) spec = 'recovery:' + params.get('open_recovery');
+    else if (params.get('open_student_upload')) spec = 'studentupload:' + params.get('open_student_upload') + ':' + (params.get('uid') || 0);   // NEW (this adjustment)
     if (spec) {
-        ['open_notif', 'uid', 'type', 'open_app_request', 'open_recovery'].forEach(function (k) { params.delete(k); });
+        ['open_notif', 'uid', 'type', 'open_app_request', 'open_recovery', 'open_student_upload'].forEach(function (k) { params.delete(k); });
         if (window.history.replaceState) {
             var q = params.toString();
             window.history.replaceState({}, document.title, window.location.pathname + (q ? '?' + q : '') + window.location.hash);
@@ -7314,16 +8169,26 @@ window.addEventListener('pageshow', function (e) {
 <script>
 (function () {
     'use strict';
-    var FIELDS = ["#addStudentModal input[name=\"first_name\"]", "#addStudentModal input[name=\"middle_name\"]", "#addStudentModal input[name=\"last_name\"]", "#addStudentModal input[name=\"custom_course\"]", "#addStudentModal input[name=\"custom_major\"]", "#addStudentModal input[name=\"custom_section\"]", "#addStudentModal input[name=\"custom_campus\"]", "#iacCourse"];
+    /* Names: first letter of every word.  "+ Add New" course / major / section / campus (and the import's course
+       field): ONLY the first letter of the whole input — "bachelor of science" -> "Bachelor of science". */
+    var FIELDS = ["#addStudentModal input[name=\"first_name\"]", "#addStudentModal input[name=\"middle_name\"]", "#addStudentModal input[name=\"last_name\"]"];
+    var FIRST_ONLY = ["#addStudentModal input[name=\"custom_course\"]", "#addStudentModal input[name=\"custom_major\"]", "#addStudentModal input[name=\"custom_section\"]", "#addStudentModal input[name=\"custom_campus\"]", "#iacCourse"];
     function capitalizeWords(v) {   // same as admin_company_list.php's capitalizeWordsOnInput()
         return String(v).replace(/(^|\s)([a-z])/g, function (m, boundary, letter) { return boundary + letter.toUpperCase(); });
     }
-    function isTarget(el) { return el && el.tagName === 'INPUT' && FIELDS.some(function (sel) { return el.matches(sel); }); }
+    function capitalizeFirst(v) {   // only the very first letter of the input
+        v = String(v);
+        var i = v.search(/\S/);
+        return i === -1 ? v : v.slice(0, i) + v.charAt(i).toUpperCase() + v.slice(i + 1);
+    }
+    function isFirstOnly(el) { return FIRST_ONLY.some(function (sel) { return el.matches(sel); }); }
+    function isTarget(el) { return el && el.tagName === 'INPUT' && (FIELDS.some(function (sel) { return el.matches(sel); }) || isFirstOnly(el)); }
     FIELDS.forEach(function (sel) { document.querySelectorAll(sel).forEach(function (el) { el.setAttribute('autocapitalize', 'words'); }); });
+    FIRST_ONLY.forEach(function (sel) { document.querySelectorAll(sel).forEach(function (el) { el.setAttribute('autocapitalize', 'sentences'); }); });
     document.addEventListener('input', function (e) {
         var el = e.target;
         if (!isTarget(el) || e.isComposing) return;
-        var fixed = capitalizeWords(el.value);
+        var fixed = isFirstOnly(el) ? capitalizeFirst(el.value) : capitalizeWords(el.value);
         if (fixed === el.value) return;
         var start = el.selectionStart, end = el.selectionEnd;   // same length, so the cursor stays put
         el.value = fixed;
@@ -7370,5 +8235,337 @@ window.addEventListener('pageshow', function (e) {
     });
 })();
 </script>
+<!-- ══════════════════════════════════════════════════════════════════════
+     NEW (this adjustment) — NEW REQUIREMENT SUBMISSION POPUP + INDICATOR
+     Same design and behaviour as the other popups on this page (and as
+     company_validation.php's "uploaded new requirement document(s)" popup):
+     checked right away and then every 4 s; submissions that were already
+     waiting when the page opened do not pop up; each one pops up once (a
+     further file merged into it pops up again, listing everything); clicking
+     it opens that student's requirements (administrator.php). The Student Validation indicator is
+     kept in step with the Inbox total (application requests + submissions).
+     Ported from administrator.php: the submissions list, the detection and the
+     indicator count all come from administrator.php?student_upload_list=1, so
+     every admin page shows the same popups once, whichever page is open.
+     ══════════════════════════════════════════════════════════════════════ -->
+<script>
+(function () {
+    'use strict';
+    if (window._cvStudentUploadPopupReady) return;
+    window._cvStudentUploadPopupReady = true;
+    var SRU_ENDPOINT    = 'administrator.php?student_upload_list=1';
+    var SRU_POLL_MS     = 4000;
+    var SRU_TOAST_MS    = 7000;
+    var SRU_STORE_KEY   = 'cvStudentUploadKnown';
+    var SRU_STORE_FRESH = 45000;
+    var known = null, inFlight = false;
+    function esc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
+    function sigOf(r) { return String(r.id) + '@' + String(r.sig || ''); }
+    function readStore() {
+        try {
+            var o = JSON.parse(sessionStorage.getItem(SRU_STORE_KEY) || 'null');
+            if (!o || !Array.isArray(o.ids) || (Date.now() - (o.ts || 0)) > SRU_STORE_FRESH) return null;
+            return new Set(o.ids.map(String));
+        } catch (e) { return null; }
+    }
+    function writeStore() { if (!known) return; try { sessionStorage.setItem(SRU_STORE_KEY, JSON.stringify({ ids: Array.from(known), ts: Date.now() })); } catch (e) {} }
+    function layoutToasts() {
+        if (typeof window.cvLayoutTopToasts === 'function') { window.cvLayoutTopToasts(); return; }
+        var top = 30, undo = document.getElementById('undoToast');
+        if (undo && undo.classList.contains('show')) top = Math.max(top, undo.getBoundingClientRect().bottom + 12);
+        document.querySelectorAll('.cv-top-toast').forEach(function (el) { el.style.top = top + 'px'; top += el.offsetHeight + 12; });
+    }
+    function showPopup(r) {
+        var labels = (r.items || []).map(function (i) { return i.label || i.key || ''; }).filter(Boolean);
+        var what = labels.length === 1 ? 'a new requirement: ' + labels[0] : (labels.length + ' new requirements: ' + labels.join(', '));
+        var div = document.createElement('div');
+        div.className = 'cv-top-toast';
+        div.setAttribute('role', 'status');
+        if (r.kind === 'schedule') {   // NEW (this adjustment): schedule changed by the company supervisor → the new Student/University Contract needs validation
+            div.innerHTML = '<i class="fas fa-calendar-days"></i><span><strong>' + esc(r.full_name || 'A student') + '</strong>\u2019s schedule was changed by the company supervisor \u2014 the new Application SIT needs validation.</span>';
+        } else if (r.kind === 'placement') {   // NEW (this adjustment): preferred placement replaced → the new Application SIT needs validation
+            div.innerHTML = '<i class="fas fa-right-left"></i><span><strong>' + esc(r.full_name || 'A student') + '</strong> replaced the preferred placement \u2014 the new Application SIT needs validation.</span>';
+        } else if (r.kind === 'invite') {   // NEW (company invitations): a company asks to register a student → Allow / Decline in the Inbox
+            div.innerHTML = '<i class="fas fa-user-plus"></i><span><strong>' + esc(((r.items || [])[0] || {}).label ? String(r.items[0].label).split(' is inviting ')[0] : 'A company') + '</strong> is inviting <strong>' + esc(r.full_name || 'a student') + '</strong> to be added as an OJT trainee \u2014 check the Application Requests inbox.</span>';
+        } else if (r.kind === 'invite_accepted') {   // NEW (company invitations): the student accepted → the Application SIT needs validating again
+            div.innerHTML = '<i class="fas fa-user-check"></i><span><strong>' + esc(r.full_name || 'A student') + '</strong> accepted the company invitation \u2014 the Application SIT needs to be validated again.</span>';
+        } else if (r.kind === 'invite_declined') {   // NEW (company invitations): the student declined
+            div.innerHTML = '<i class="fas fa-user-xmark"></i><span><strong>' + esc(r.full_name || 'A student') + '</strong> declined the company invitation.</span>';
+        } else {
+            div.innerHTML = '<i class="fas fa-file-arrow-up"></i><span><strong>' + esc(r.full_name || 'A student') + '</strong> submitted ' + esc(what) + ' \u2014 check the Application Requests inbox.</span>';
+        }
+        document.body.appendChild(div);
+        if (window.cvTagToast) window.cvTagToast(div, 'studentupload:' + r.id + ':' + r.user_id);   // clickable
+        layoutToasts();
+        requestAnimationFrame(function () { div.classList.add('show'); });
+        setTimeout(function () { div.classList.remove('show'); setTimeout(function () { div.remove(); layoutToasts(); }, 400); }, SRU_TOAST_MS);
+    }
+    function setBadge(count) {
+        var badge = document.getElementById('sidebarAppBadge');
+        if (!badge) return;
+        count = parseInt(count, 10) || 0;
+        badge.textContent = count;
+        badge.style.display = count > 0 ? 'inline-flex' : 'none';
+    }
+    function poll() {
+        if (inFlight || document.hidden) return;
+        inFlight = true;
+        fetch(SRU_ENDPOINT, { credentials: 'same-origin', cache: 'no-store' })
+            .then(function (r) { return r.json(); })
+            .then(function (d) {
+                inFlight = false;
+                if (!d || !d.success || !Array.isArray(d.rows)) return;
+                var now = new Set(d.rows.map(sigOf));
+                setBadge(d.count);
+                if (typeof window.cvRenderStudentUploads === 'function') window.cvRenderStudentUploads(d.rows);   // administrator.php's Inbox, if open
+                if (known === null) { known = readStore() || now; if (known === now) { writeStore(); return; } }
+                var fresh = d.rows.filter(function (r) { return !known.has(sigOf(r)); });
+                known = now; writeStore();
+                fresh.forEach(showPopup);
+            })
+            .catch(function () { inFlight = false; });
+    }
+    setTimeout(function () { poll(); setInterval(poll, SRU_POLL_MS); }, 0);
+    document.addEventListener('visibilitychange', function () { if (!document.hidden && known !== null) poll(); });
+    window.addEventListener('focus', function () { if (known !== null) poll(); });
+    window.addEventListener('pageshow', function (e) { if (e.persisted) poll(); });
+    window.addEventListener('pagehide', writeStore);
+})();
+</script>
+
+<!-- ══════════════════════════════════════════════════════════
+     NEW (Requirements column): full-screen, read-only requirements viewer for a student
+     (same layout as the one on admin_company_list.php). Filled live from the
+     ajax_fetch_student_requirements endpoint; each file is streamed by view_student_req_file.
+     Verifying / denying stays on administrator.php.
+     ══════════════════════════════════════════════════════════ -->
+<div id="requirementsModal">
+    <div id="reqViewerBar">
+        <div id="reqViewerTitle">
+            <i class="fas fa-folder-open"></i>
+            <span id="requirementsModalTitle">Requirements</span>
+            <span id="reqViewerCurrentLabel" class="req-viewer-current"></span>
+            <span id="reqViewerCurrentBadge"></span>
+        </div>
+        <div class="req-viewer-bar-actions">
+            <button type="button" class="req-viewer-close-btn" id="requirementsModalCloseBtn"><i class="fas fa-times"></i> Close</button>
+        </div>
+    </div>
+    <div id="reqViewerBody">
+        <aside id="reqViewerSidebar">
+            <div class="req-viewer-sidebar-head"><i class="fas fa-list-ul"></i> Requirements <span id="reqViewerCount"></span></div>
+            <div id="requirementsModalBody"></div>
+        </aside>
+        <div id="reqViewerStage">
+            <div id="reqViewerPlaceholder">
+                <div class="global-loading-spinner"></div>
+                <p>Loading requirements…</p>
+            </div>
+            <iframe id="reqViewerFrame" title="Requirement Preview"></iframe>
+            <div id="reqViewerImageWrap"><img id="reqViewerImage" alt="Requirement Preview"></div>
+        </div>
+    </div>
+</div>
+<script>
+/* NEW (Requirements column): viewer logic (adopted from admin_company_list.php). The button is
+   handled by one delegated listener, so it keeps working after the table is refreshed by the
+   auto-filter / pagination without a page reload. */
+(function () {
+    var modal = document.getElementById('requirementsModal');
+    if (!modal) return;
+    var titleEl = document.getElementById('requirementsModalTitle');
+    var listEl = document.getElementById('requirementsModalBody');
+    var closeBtn = document.getElementById('requirementsModalCloseBtn');
+    var frame = document.getElementById('reqViewerFrame');
+    var placeholder = document.getElementById('reqViewerPlaceholder');
+    var curLabel = document.getElementById('reqViewerCurrentLabel');
+    var curBadge = document.getElementById('reqViewerCurrentBadge');
+    var imgWrap = document.getElementById('reqViewerImageWrap');
+    var img = document.getElementById('reqViewerImage');
+    var countEl = document.getElementById('reqViewerCount');
+    var state = { userId: null, requirements: [], reqIdx: -1, fileIdx: -1 };
+    var token = 0;
+
+    function badgeClass(s) {
+        if (s === 'Verified') return 'Verified';
+        if (s === 'Pending') return 'Pending';
+        if (s === 'Rejected' || s === 'Denied') return 'Rejected';
+        return 'Awaiting';
+    }
+    function hideImage() {
+        if (imgWrap) imgWrap.style.display = 'none';
+        if (img) img.removeAttribute('src');
+    }
+    function setPlaceholder(iconHtml, text) {
+        if (!placeholder) return;
+        placeholder.innerHTML = '';
+        var w = document.createElement('div');
+        w.innerHTML = iconHtml;
+        while (w.firstChild) placeholder.appendChild(w.firstChild);
+        var p = document.createElement('p');
+        p.textContent = text;
+        placeholder.appendChild(p);
+        placeholder.style.display = 'flex';
+        if (frame) { frame.style.display = 'none'; frame.src = 'about:blank'; }
+        hideImage();
+    }
+    function setHeader(label, status) {
+        if (curLabel) curLabel.textContent = label || '';
+        if (curBadge) {
+            curBadge.innerHTML = '';
+            if (status) {
+                var b = document.createElement('span');
+                b.className = 'cc-badge ' + badgeClass(status);
+                b.textContent = status;
+                curBadge.appendChild(b);
+            }
+        }
+    }
+    function showMessage(msg) {
+        listEl.innerHTML = '';
+        var p = document.createElement('div');
+        p.className = 'req-nav-empty';
+        p.textContent = msg;
+        listEl.appendChild(p);
+        setPlaceholder('<i class="fas fa-exclamation-circle req-placeholder-icon"></i>', msg);
+    }
+    function renderList(reqs) {
+        listEl.innerHTML = '';
+        if (countEl) countEl.textContent = reqs.length ? '(' + reqs.length + ')' : '';
+        reqs.forEach(function (req, reqIdx) {
+            var item = document.createElement('div');
+            item.className = 'req-nav-item';
+            item.dataset.reqIdx = reqIdx;
+            var btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = 'req-nav-btn';
+            var title = document.createElement('span');
+            title.className = 'req-nav-title';
+            title.textContent = req.label;
+            var meta = document.createElement('span');
+            meta.className = 'req-nav-meta';
+            var badge = document.createElement('span');
+            badge.className = 'cc-badge ' + badgeClass(req.status);
+            badge.textContent = req.status;
+            var count = document.createElement('span');
+            var n = (req.files || []).length;
+            count.textContent = n === 0 ? 'No file submitted yet' : (n + ' file' + (n === 1 ? '' : 's'));
+            meta.appendChild(badge);
+            meta.appendChild(count);
+            btn.appendChild(title);
+            btn.appendChild(meta);
+            btn.addEventListener('click', function () { select(reqIdx, 0); });
+            item.appendChild(btn);
+            if (n > 1) {
+                var wrap = document.createElement('div');
+                wrap.className = 'req-nav-files';
+                req.files.forEach(function (f, fileIdx) {
+                    var fb = document.createElement('button');
+                    fb.type = 'button';
+                    fb.className = 'req-nav-file-btn';
+                    fb.dataset.fileIdx = fileIdx;
+                    fb.innerHTML = '<i class="fas fa-file-alt"></i> ';
+                    fb.appendChild(document.createTextNode('File ' + (fileIdx + 1)));
+                    fb.addEventListener('click', function (e) { e.stopPropagation(); select(reqIdx, fileIdx); });
+                    wrap.appendChild(fb);
+                });
+                item.appendChild(wrap);
+            }
+            listEl.appendChild(item);
+        });
+    }
+    function select(reqIdx, fileIdx) {
+        var req = state.requirements[reqIdx];
+        if (!req) return;
+        var files = req.files || [];
+        if (fileIdx < 0 || fileIdx >= files.length) fileIdx = 0;
+        state.reqIdx = reqIdx;
+        state.fileIdx = files.length ? fileIdx : -1;
+        listEl.querySelectorAll('.req-nav-item').forEach(function (el) {
+            var active = parseInt(el.dataset.reqIdx, 10) === reqIdx;
+            el.classList.toggle('active', active);
+            el.querySelectorAll('.req-nav-file-btn').forEach(function (fb) {
+                fb.classList.toggle('active', active && parseInt(fb.dataset.fileIdx, 10) === fileIdx);
+            });
+            if (active && typeof el.scrollIntoView === 'function') el.scrollIntoView({ block: 'nearest' });
+        });
+        setHeader(req.label + (files.length > 1 ? ' (File ' + (fileIdx + 1) + ' of ' + files.length + ')' : ''), req.status);
+        if (!files.length) {
+            setPlaceholder('<i class="fas fa-file-excel req-placeholder-icon"></i>', 'No file has been submitted yet for "' + req.label + '". Choose another requirement from the list on the left.');
+            return;
+        }
+        var url = '?view_student_req_file=' + files[fileIdx].id + '&req_user_id=' + state.userId;
+        if (placeholder) placeholder.style.display = 'none';
+        if (String(files[fileIdx].mime || '').indexOf('image/') === 0 && imgWrap && img) {
+            if (frame) { frame.style.display = 'none'; frame.src = 'about:blank'; }
+            img.src = url;
+            imgWrap.style.display = 'flex';
+        } else if (frame) {
+            hideImage();
+            frame.style.display = 'block';
+            frame.src = url;
+        }
+    }
+    function open(userId, name) {
+        var my = ++token;
+        state = { userId: userId, requirements: [], reqIdx: -1, fileIdx: -1 };
+        titleEl.textContent = (name || 'Student') + ' — Requirements';
+        setHeader('', '');
+        if (countEl) countEl.textContent = '';
+        listEl.innerHTML = '<div class="global-loading-spinner" style="margin:20px auto;"></div>';
+        setPlaceholder('<div class="global-loading-spinner"></div>', 'Loading requirements…');
+        modal.classList.add('open');
+        document.body.style.overflow = 'hidden';
+
+        var fd = new FormData();
+        fd.append('ajax_fetch_student_requirements', '1');
+        fd.append('user_id', userId);
+        fetch(window.location.pathname, { method: 'POST', headers: { 'X-Requested-With': 'XMLHttpRequest' }, body: fd })
+            .then(function (r) { return r.json(); })
+            .then(function (data) {
+                if (my !== token) return;
+                if (!data || !data.success) { showMessage((data && data.message) || 'Could not load this student\'s requirements.'); return; }
+                state.requirements = data.requirements || [];
+                if (!state.requirements.length) { showMessage('No requirements are available for this student.'); return; }
+                renderList(state.requirements);
+                var first = state.requirements.findIndex(function (r) { return r.files && r.files.length > 0; });
+                if (first === -1) {
+                    select(0, 0);
+                    setPlaceholder('<i class="fas fa-folder-open req-placeholder-icon"></i>', 'This student has not submitted any requirements yet.');
+                    return;
+                }
+                select(first, 0);
+            })
+            .catch(function () {
+                if (my !== token) return;
+                showMessage('Something went wrong while loading requirements. Please try again.');
+            });
+    }
+    function close() {
+        token++;
+        modal.classList.remove('open');
+        document.body.style.overflow = '';
+        if (frame) { frame.src = 'about:blank'; frame.style.display = 'none'; }
+        hideImage();
+    }
+    if (closeBtn) closeBtn.addEventListener('click', close);
+    document.addEventListener('click', function (e) {
+        var b = e.target.closest ? e.target.closest('.sl-view-req-btn') : null;
+        if (!b) return;
+        e.preventDefault();
+        var uid = parseInt(b.getAttribute('data-uid'), 10);
+        if (uid > 0) open(uid, b.getAttribute('data-name') || '');
+    });
+    document.addEventListener('keydown', function (e) {
+        if (!modal.classList.contains('open')) return;
+        if (e.key === 'Escape') { close(); return; }
+        var total = state.requirements.length;
+        if (!total) return;
+        if (e.key === 'ArrowDown') { e.preventDefault(); select(Math.min(total - 1, state.reqIdx + 1), 0); }
+        else if (e.key === 'ArrowUp') { e.preventDefault(); select(Math.max(0, state.reqIdx - 1), 0); }
+    });
+})();
+</script>
+<?php /* NEW (OJT Program Cycle): popup — see ojt_cycle_popup.php */ $ojc_popup_mode = 'admin'; include __DIR__ . '/ojt_cycle_popup.php'; ?>
 </body>
 </html>
